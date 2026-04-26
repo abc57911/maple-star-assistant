@@ -21,6 +21,7 @@ RB_BUTTON = pygame.CONTROLLER_BUTTON_RIGHTSHOULDER
 LB_BUTTON = pygame.CONTROLLER_BUTTON_LEFTSHOULDER
 JUMP_KEY_HOLD_SECONDS = 0.05
 POLL_INTERVAL_SECONDS = 0.01
+MACRO_TIMING_GUARD_SECONDS = 0.12
 
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
@@ -52,6 +53,8 @@ class ControllerButtonBinding(Protocol):
     def on_button_up(self) -> None: ...
 
     def update(self, now: float) -> None: ...
+
+    def next_deadline_at(self) -> float | None: ...
 
     def stop(self) -> None: ...
 
@@ -276,6 +279,16 @@ class RBJumpSlashMacro:
                 self.rb_is_down = False
                 self.stop()
 
+    def next_deadline_at(self) -> float | None:
+        deadlines = [
+            deadline
+            for deadline in (self.x_up_at, self.next_c_at, self.next_jump_at if self.rb_is_down else None)
+            if deadline is not None
+        ]
+        if not deadlines:
+            return None
+        return min(deadlines)
+
     def cleanup(self) -> None:
         if self.x_is_down and self.held_jump_vk is not None:
             key_up(self.held_jump_vk)
@@ -389,6 +402,16 @@ class LBJumpSkillMacro:
             tap_key(skill_vk)
             self.stop()
 
+    def next_deadline_at(self) -> float | None:
+        deadlines = [
+            deadline
+            for deadline in (self.jump_up_at, self.skill_at)
+            if deadline is not None
+        ]
+        if not deadlines:
+            return None
+        return min(deadlines)
+
     def stop(self) -> None:
         was_active = self.active or self.jump_is_down
         self.cleanup()
@@ -448,10 +471,41 @@ def main() -> None:
     print("自動喝水設定視窗已開啟，可即時調整 HP/MP 閾值、快捷鍵與冷卻時間。")
     print("按 F11 可暫停/恢復所有腳本功能。")
 
+    def update_active_bindings() -> None:
+        now = time.monotonic()
+        for binding in controller_button_bindings.values():
+            if not auto_potion.scripts_enabled:
+                continue
+            if binding is rb_macro and not auto_potion.settings.rb_enabled:
+                continue
+            if binding is lb_macro and not auto_potion.settings.lb_enabled:
+                continue
+            binding.update(now)
+
+    def next_binding_deadline_at() -> float | None:
+        deadlines: list[float] = []
+        for binding in controller_button_bindings.values():
+            if not auto_potion.scripts_enabled:
+                continue
+            if binding is rb_macro and not auto_potion.settings.rb_enabled:
+                continue
+            if binding is lb_macro and not auto_potion.settings.lb_enabled:
+                continue
+            deadline = binding.next_deadline_at()
+            if deadline is not None:
+                deadlines.append(deadline)
+        if not deadlines:
+            return None
+        return min(deadlines)
+
     try:
         while True:
+            update_active_bindings()
+
             now = time.monotonic()
-            auto_potion.update(now)
+            next_deadline = next_binding_deadline_at()
+            if next_deadline is None or next_deadline - now > MACRO_TIMING_GUARD_SECONDS:
+                auto_potion.update(now)
             if auto_potion.is_closed():
                 break
 
@@ -460,14 +514,7 @@ def main() -> None:
             if not auto_potion.scripts_enabled or not auto_potion.settings.lb_enabled:
                 lb_macro.stop()
 
-            for binding in controller_button_bindings.values():
-                if not auto_potion.scripts_enabled:
-                    continue
-                if binding is rb_macro and not auto_potion.settings.rb_enabled:
-                    continue
-                if binding is lb_macro and not auto_potion.settings.lb_enabled:
-                    continue
-                binding.update(now)
+            update_active_bindings()
 
             for event in pygame.event.get():
                 if event.type == pygame.CONTROLLERDEVICEADDED:

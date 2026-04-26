@@ -1,0 +1,154 @@
+from __future__ import annotations
+
+import json
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+def app_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+SETTINGS_PATH = app_base_dir() / "settings.json"
+@dataclass
+class AutoPotionSettings:
+    hp_enabled: bool = True
+    mp_enabled: bool = True
+    rb_enabled: bool = False
+    hp_threshold_percent: float = 50.0
+    mp_threshold_percent: float = 30.0
+    hp_key: str = "Delete"
+    mp_key: str = "End"
+    hp_cooldown_seconds: float = 0.2
+    mp_cooldown_seconds: float = 0.2
+    rb_jump_key: str = "X"
+    rb_skill_key: str = "C"
+    rb_skill_delay_seconds: float = 0.2
+    rb_jump_interval_seconds: float = 0.66
+    lb_enabled: bool = False
+    lb_jump_key: str = "X"
+    lb_skill_key: str = "C"
+    lb_skill_delay_seconds: float = 0.2
+
+    def snapshot(self) -> tuple[bool, bool, bool, float, float, str, str, float, float, str, str, float, float, bool, str, str, float]:
+        return (
+            self.hp_enabled,
+            self.mp_enabled,
+            self.rb_enabled,
+            self.hp_threshold_percent,
+            self.mp_threshold_percent,
+            self.hp_key,
+            self.mp_key,
+            self.hp_cooldown_seconds,
+            self.mp_cooldown_seconds,
+            self.rb_jump_key,
+            self.rb_skill_key,
+            self.rb_skill_delay_seconds,
+            self.rb_jump_interval_seconds,
+            self.lb_enabled,
+            self.lb_jump_key,
+            self.lb_skill_key,
+            self.lb_skill_delay_seconds,
+        )
+
+    def to_json_dict(self) -> dict[str, object]:
+        return {
+            "hp_enabled": self.hp_enabled,
+            "mp_enabled": self.mp_enabled,
+            "rb_enabled": self.rb_enabled,
+            "hp_threshold_percent": self.hp_threshold_percent,
+            "mp_threshold_percent": self.mp_threshold_percent,
+            "hp_key": self.hp_key,
+            "mp_key": self.mp_key,
+            "hp_cooldown_seconds": self.hp_cooldown_seconds,
+            "mp_cooldown_seconds": self.mp_cooldown_seconds,
+            "rb_jump_key": self.rb_jump_key,
+            "rb_skill_key": self.rb_skill_key,
+            "rb_skill_delay_seconds": self.rb_skill_delay_seconds,
+            "rb_jump_interval_seconds": self.rb_jump_interval_seconds,
+            "lb_enabled": self.lb_enabled,
+            "lb_jump_key": self.lb_jump_key,
+            "lb_skill_key": self.lb_skill_key,
+            "lb_skill_delay_seconds": self.lb_skill_delay_seconds,
+        }
+
+
+def _read_bool(data: dict[str, object], key: str, fallback: bool) -> bool:
+    value = data.get(key, fallback)
+    return value if isinstance(value, bool) else fallback
+
+
+def _read_float(data: dict[str, object], key: str, fallback: float, minimum: float, maximum: float) -> float:
+    value = data.get(key, fallback)
+    try:
+        return max(minimum, min(maximum, float(value)))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _read_string(data: dict[str, object], key: str, fallback: str) -> str:
+    value = data.get(key, fallback)
+    if not isinstance(value, str):
+        return fallback
+    value = value.strip()
+    return value or fallback
+
+
+def load_settings(path: Path = SETTINGS_PATH) -> AutoPotionSettings:
+    settings = AutoPotionSettings()
+    if not path.exists():
+        save_settings(settings, path)
+        print(f"已建立預設設定檔：{path}")
+        return settings
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"讀取設定失敗，使用預設值：{exc}")
+        save_settings(settings, path)
+        return settings
+
+    if not isinstance(raw, dict):
+        print("設定檔格式錯誤，使用預設值")
+        save_settings(settings, path)
+        return settings
+
+    loaded_settings = AutoPotionSettings(
+        hp_enabled=_read_bool(raw, "hp_enabled", settings.hp_enabled),
+        mp_enabled=_read_bool(raw, "mp_enabled", settings.mp_enabled),
+        rb_enabled=_read_bool(raw, "rb_enabled", settings.rb_enabled),
+        hp_threshold_percent=_read_float(raw, "hp_threshold_percent", settings.hp_threshold_percent, 1.0, 100.0),
+        mp_threshold_percent=_read_float(raw, "mp_threshold_percent", settings.mp_threshold_percent, 1.0, 100.0),
+        hp_key=_read_string(raw, "hp_key", settings.hp_key),
+        mp_key=_read_string(raw, "mp_key", settings.mp_key),
+        hp_cooldown_seconds=_read_float(raw, "hp_cooldown_seconds", settings.hp_cooldown_seconds, 0.05, 60.0),
+        mp_cooldown_seconds=_read_float(raw, "mp_cooldown_seconds", settings.mp_cooldown_seconds, 0.05, 60.0),
+        rb_jump_key=_read_string(raw, "rb_jump_key", settings.rb_jump_key),
+        rb_skill_key=_read_string(raw, "rb_skill_key", settings.rb_skill_key),
+        rb_skill_delay_seconds=_read_float(raw, "rb_skill_delay_seconds", settings.rb_skill_delay_seconds, 0.0, 10.0),
+        rb_jump_interval_seconds=_read_float(raw, "rb_jump_interval_seconds", settings.rb_jump_interval_seconds, 0.05, 10.0),
+        lb_enabled=_read_bool(raw, "lb_enabled", settings.lb_enabled),
+        lb_jump_key=_read_string(raw, "lb_jump_key", settings.lb_jump_key),
+        lb_skill_key=_read_string(raw, "lb_skill_key", settings.lb_skill_key),
+        lb_skill_delay_seconds=_read_float(raw, "lb_skill_delay_seconds", settings.lb_skill_delay_seconds, 0.0, 10.0),
+    )
+    expected = loaded_settings.to_json_dict()
+    needs_save = any(
+        key not in raw
+        or type(raw.get(key)) is not type(value)
+        or raw.get(key) != value
+        for key, value in expected.items()
+    )
+    if needs_save:
+        save_settings(loaded_settings, path)
+        print("設定檔已補齊缺少或格式異常的參數")
+    return loaded_settings
+
+
+def save_settings(settings: AutoPotionSettings, path: Path = SETTINGS_PATH) -> None:
+    path.write_text(
+        json.dumps(settings.to_json_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
