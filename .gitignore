@@ -1,2 +1,8 @@
 __pycache__/
 *.py[cod]
+build/
+dist/
+release/
+*.spec
+startup_error.log
+settings.json
