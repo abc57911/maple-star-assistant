@@ -137,6 +137,7 @@ class AutoPotionController:
             "hp": BarDetectionDebug("hp"),
             "mp": BarDetectionDebug("mp"),
         }
+        self.bar_override_warnings: dict[str, str] = {"hp": "", "mp": ""}
         self.bottom_bar_regions: dict[str, tuple[int, int, int, int]] = {}
         self.bottom_bar_regions_at = -999.0
         self.fade_guard_hits = 0
@@ -405,7 +406,12 @@ class AutoPotionController:
                 "手動覆寫",
             )
             if percent is not None:
+                self.bar_override_warnings[bar_type] = ""
                 return percent
+            reason = self.last_bar_debug.get(bar_type, BarDetectionDebug(bar_type)).reason
+            self.bar_override_warnings[bar_type] = f"手動覆寫失敗，已 fallback：{reason}"
+        else:
+            self.bar_override_warnings[bar_type] = ""
 
         paired_region = self._find_bottom_bar_pair_regions().get(bar_type)
         if paired_region is not None:
@@ -634,7 +640,9 @@ class AutoPotionController:
         tail = ""
         if debug.require_clear_tail:
             tail = " | tail=OK" if debug.tail_clear else " | tail=FAIL"
-        return f"{label}: {debug.source} | {percent} | {region} | {debug.reason}{tail}"
+        warning = getattr(self, "bar_override_warnings", {}).get(bar_type, "")
+        warning_text = f" | {warning}" if warning else ""
+        return f"{label}: {debug.source} | {percent} | {region} | {debug.reason}{tail}{warning_text}"
 
     def _bar_region_override(self, bar_type: str) -> tuple[int, int, int, int] | None:
         if bar_type == "hp":
