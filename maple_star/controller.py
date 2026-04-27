@@ -45,12 +45,15 @@ from .constants import (
     MP_BAR_REGION,
     PAUSE_BEEP_FREQUENCY,
     PM_REMOVE,
+    EMERGENCY_STOP_BEEP_FREQUENCY,
     RESUME_BEEP_FREQUENCY,
+    SCRIPT_EMERGENCY_STOP_HOTKEY_ID,
     SCRIPT_TOGGLE_HOTKEY_ID,
     SETTINGS_SAVE_DEBOUNCE_SECONDS,
     TOGGLE_BEEP_DURATION_MS,
     TOGGLE_HOTKEY_DEBOUNCE_SECONDS,
     VK_F11,
+    VK_F12,
     WM_HOTKEY,
 )
 from .gui import AutoPotionSettingsGui, GuiConsoleWriter
@@ -93,8 +96,12 @@ class AutoPotionController:
         self.last_unstable_bar_at = -999.0
         self.scripts_enabled = True
         self.hotkey_registered = False
+        self.emergency_hotkey_registered = False
         self.f11_was_down = False
+        self.f12_was_down = False
         self.last_toggle_hotkey_at = -999.0
+        self.emergency_stop_requested = False
+        self.last_action = "啟動"
         self.bottom_bar_regions: dict[str, tuple[int, int, int, int]] = {}
         self.bottom_bar_regions_at = -999.0
         self.fade_guard_hits = 0
@@ -119,20 +126,29 @@ class AutoPotionController:
     def _register_toggle_hotkey(self) -> None:
         if user32.RegisterHotKey(None, SCRIPT_TOGGLE_HOTKEY_ID, MOD_NOREPEAT, VK_F11):
             self.hotkey_registered = True
-            return
+        else:
+            error_code = ctypes.get_last_error()
+            print(f"註冊 F11 總開關失敗，錯誤碼：{error_code}")
 
-        error_code = ctypes.get_last_error()
-        print(f"註冊 F11 總開關失敗，錯誤碼：{error_code}")
+        if user32.RegisterHotKey(None, SCRIPT_EMERGENCY_STOP_HOTKEY_ID, MOD_NOREPEAT, VK_F12):
+            self.emergency_hotkey_registered = True
+        else:
+            error_code = ctypes.get_last_error()
+            print(f"註冊 F12 硬停止失敗，錯誤碼：{error_code}")
 
     def _unregister_toggle_hotkey(self) -> None:
-        if not self.hotkey_registered:
-            return
-        if not user32.UnregisterHotKey(None, SCRIPT_TOGGLE_HOTKEY_ID):
-            print(f"解除 F11 總開關註冊失敗，錯誤碼：{ctypes.get_last_error()}")
-        self.hotkey_registered = False
+        if self.hotkey_registered:
+            if not user32.UnregisterHotKey(None, SCRIPT_TOGGLE_HOTKEY_ID):
+                print(f"解除 F11 總開關註冊失敗，錯誤碼：{ctypes.get_last_error()}")
+            self.hotkey_registered = False
+        if self.emergency_hotkey_registered:
+            if not user32.UnregisterHotKey(None, SCRIPT_EMERGENCY_STOP_HOTKEY_ID):
+                print(f"解除 F12 硬停止註冊失敗，錯誤碼：{ctypes.get_last_error()}")
+            self.emergency_hotkey_registered = False
 
-    def _poll_toggle_hotkey(self) -> None:
-        hotkey_triggered = False
+    def poll_control_hotkeys(self) -> None:
+        toggle_triggered = False
+        emergency_stop_triggered = False
         message = Msg()
         while user32.PeekMessageW(
             ctypes.byref(message),
@@ -142,15 +158,30 @@ class AutoPotionController:
             PM_REMOVE,
         ):
             if message.wParam == SCRIPT_TOGGLE_HOTKEY_ID:
-                hotkey_triggered = True
+                toggle_triggered = True
+            elif message.wParam == SCRIPT_EMERGENCY_STOP_HOTKEY_ID:
+                emergency_stop_triggered = True
 
         f11_is_down = bool(user32.GetAsyncKeyState(VK_F11) & ASYNC_KEY_DOWN_MASK)
         if f11_is_down and not self.f11_was_down:
-            hotkey_triggered = True
+            toggle_triggered = True
         self.f11_was_down = f11_is_down
 
-        if hotkey_triggered:
+        f12_is_down = bool(user32.GetAsyncKeyState(VK_F12) & ASYNC_KEY_DOWN_MASK)
+        if f12_is_down and not self.f12_was_down:
+            emergency_stop_triggered = True
+        self.f12_was_down = f12_is_down
+
+        if emergency_stop_triggered:
+            self.emergency_stop()
+        elif toggle_triggered:
             self._try_toggle_scripts_enabled(time.monotonic())
+
+    def consume_emergency_stop_requested(self) -> bool:
+        if not self.emergency_stop_requested:
+            return False
+        self.emergency_stop_requested = False
+        return True
 
     def _try_toggle_scripts_enabled(self, now: float) -> None:
         if now - self.last_toggle_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
@@ -164,6 +195,7 @@ class AutoPotionController:
             self._play_toggle_beep(RESUME_BEEP_FREQUENCY)
             self.gui.set_status("腳本已啟用")
             self.gui.show_toggle_notice("腳本已啟用")
+            self.last_action = "F11 啟用"
             print("F11：腳本已啟用")
             return
 
@@ -173,7 +205,21 @@ class AutoPotionController:
         self.gui.set_status("腳本已暫停，按 F11 恢復")
         self.gui.show_toggle_notice("腳本已暫停")
         self.gui.set_current_percentages(None, None)
+        self.last_action = "F11 暫停"
         print("F11：腳本已暫停")
+
+    def emergency_stop(self) -> None:
+        now = time.monotonic()
+        self.scripts_enabled = False
+        self.emergency_stop_requested = True
+        self.last_hp_drink_at = now
+        self.last_mp_drink_at = now
+        self._play_toggle_beep(EMERGENCY_STOP_BEEP_FREQUENCY)
+        self.gui.set_status("F12 硬停止：所有腳本已暫停")
+        self.gui.show_toggle_notice("F12 硬停止")
+        self.gui.set_current_percentages(None, None)
+        self.last_action = "F12 硬停止"
+        print("F12：硬停止，所有腳本已暫停")
 
     def _play_toggle_beep(self, frequency: int) -> None:
         try:
@@ -185,10 +231,10 @@ class AutoPotionController:
                 pass
 
     def update(self, now: float) -> None:
-        self._poll_toggle_hotkey()
+        self.poll_control_hotkeys()
         if not self.gui.pump():
             return
-        self._poll_toggle_hotkey()
+        self.poll_control_hotkeys()
         self._save_settings_when_idle(now)
 
         if now < self.next_capture_at:
@@ -247,6 +293,8 @@ class AutoPotionController:
             return
         if now - self.last_hp_drink_at < self.settings.hp_cooldown_seconds:
             return
+        if not self._is_target_window_active_before_send("HP"):
+            return
 
         hp_percent = self._capture_bar_percent(HP_BAR_REGION, "hp", require_clear_tail=True)
         if hp_percent is None:
@@ -254,9 +302,12 @@ class AutoPotionController:
             return
         if hp_percent > self.settings.hp_threshold_percent:
             return
+        if not self._is_target_window_active_before_send("HP"):
+            return
 
         tap_hotkey(self.settings.hp_key)
         self.last_hp_drink_at = now
+        self.last_action = f"HP 喝水：{self.settings.hp_key}"
         print(f"HP {hp_percent:.0f}% <= {self.settings.hp_threshold_percent:.0f}%，按 {self.settings.hp_key}")
 
     def _maybe_drink_mp(self, now: float, mp_percent: float | None) -> None:
@@ -269,6 +320,8 @@ class AutoPotionController:
             return
         if now - self.last_mp_drink_at < self.settings.mp_cooldown_seconds:
             return
+        if not self._is_target_window_active_before_send("MP"):
+            return
 
         mp_percent = self._capture_bar_percent(MP_BAR_REGION, "mp", require_clear_tail=True)
         if mp_percent is None:
@@ -276,10 +329,21 @@ class AutoPotionController:
             return
         if mp_percent > self.settings.mp_threshold_percent:
             return
+        if not self._is_target_window_active_before_send("MP"):
+            return
 
         tap_hotkey(self.settings.mp_key)
         self.last_mp_drink_at = now
+        self.last_action = f"MP 喝水：{self.settings.mp_key}"
         print(f"MP {mp_percent:.0f}% <= {self.settings.mp_threshold_percent:.0f}%，按 {self.settings.mp_key}")
+
+    def _is_target_window_active_before_send(self, label: str) -> bool:
+        if self.is_target_window_active():
+            return True
+        self.gui.set_status("等待楓星成為前景視窗")
+        self.gui.set_current_percentages(None, None)
+        print(f"{label} 自動喝水略過：楓星不在前景")
+        return False
 
     def _log_unstable_bar(self, now: float, label: str) -> None:
         if now - self.last_unstable_bar_at < 2.0:

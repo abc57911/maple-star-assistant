@@ -9,7 +9,7 @@ from tkinter import ttk
 
 from .constants import MAX_CONSOLE_LINES
 from .key_capture import DETECTABLE_KEY_VKS, event_to_hotkey, pressed_detectable_vks, vk_to_key_name
-from .settings import AutoPotionSettings
+from .settings import AutoPotionSettings, CONTROLLER_BUTTON_CHOICES, normalize_controller_button_name
 from .win_input import Point, parse_vk_key, user32
 
 class GuiConsoleWriter:
@@ -63,22 +63,29 @@ class AutoPotionSettingsGui:
         self.mp_cooldown = tk.StringVar(value=f"{settings.mp_cooldown_seconds:g}")
         self.rb_jump_key = tk.StringVar(value=settings.rb_jump_key)
         self.rb_skill_key = tk.StringVar(value=settings.rb_skill_key)
+        self.rb_controller_button = tk.StringVar(value=settings.rb_controller_button)
         self.rb_skill_delay = tk.StringVar(value=f"{settings.rb_skill_delay_seconds:g}")
         self.rb_jump_interval = tk.StringVar(value=f"{settings.rb_jump_interval_seconds:g}")
         self.lb_enabled = tk.BooleanVar(value=settings.lb_enabled)
         self.lb_jump_key = tk.StringVar(value=settings.lb_jump_key)
         self.lb_skill_key = tk.StringVar(value=settings.lb_skill_key)
+        self.lb_controller_button = tk.StringVar(value=settings.lb_controller_button)
         self.lb_skill_delay = tk.StringVar(value=f"{settings.lb_skill_delay_seconds:g}")
         self.hp_current = tk.StringVar(value="HP: --%")
         self.mp_current = tk.StringVar(value="MP: --%")
         self.status = tk.StringVar(value="只在楓星為前景視窗時生效")
+        self.runtime_script_status = tk.StringVar(value="腳本：啟用")
+        self.runtime_foreground_status = tk.StringVar(value="前景：--")
+        self.runtime_macro_status = tk.StringVar(value="巨集：--")
+        self.runtime_held_keys_status = tk.StringVar(value="按住：--")
+        self.runtime_last_action_status = tk.StringVar(value="最近動作：啟動")
 
         frame = ttk.Frame(self.root, padding=12)
         frame.grid(row=0, column=0, sticky="nsew")
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(5, weight=1)
+        frame.rowconfigure(6, weight=1)
 
         controls = ttk.Frame(frame)
         controls.grid(row=0, column=0, sticky="ew")
@@ -88,33 +95,45 @@ class AutoPotionSettingsGui:
 
         rb_frame = ttk.LabelFrame(frame, text="RB function")
         rb_frame.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        for column in range(11):
+        for column in range(13):
             rb_frame.columnconfigure(column, weight=0)
-        rb_frame.columnconfigure(10, weight=1)
+        rb_frame.columnconfigure(12, weight=1)
         ttk.Checkbutton(rb_frame, text="啟用", variable=self.rb_enabled).grid(row=0, column=0, sticky="w", padx=(8, 12), pady=6)
-        self._build_key_entry(rb_frame, 0, 1, "跳躍鍵", self.rb_jump_key)
-        self._build_key_entry(rb_frame, 0, 3, "技能鍵", self.rb_skill_key)
-        ttk.Label(rb_frame, text="技能延遲").grid(row=0, column=5, sticky="w", padx=(12, 4), pady=6)
-        self._build_seconds_stepper(rb_frame, 0, 6, self.rb_skill_delay, 0.0, 10.0)
-        ttk.Label(rb_frame, text="跳躍間隔").grid(row=1, column=5, sticky="w", padx=(12, 4), pady=(0, 8))
-        self._build_seconds_stepper(rb_frame, 1, 6, self.rb_jump_interval, 0.05, 10.0, pady=(0, 8))
+        self._build_controller_button_select(rb_frame, 0, 1, "觸發", self.rb_controller_button)
+        self._build_key_entry(rb_frame, 0, 3, "跳躍鍵", self.rb_jump_key)
+        self._build_key_entry(rb_frame, 0, 5, "技能鍵", self.rb_skill_key)
+        ttk.Label(rb_frame, text="技能延遲").grid(row=0, column=7, sticky="w", padx=(12, 4), pady=6)
+        self._build_seconds_stepper(rb_frame, 0, 8, self.rb_skill_delay, 0.0, 10.0)
+        ttk.Label(rb_frame, text="跳躍間隔").grid(row=1, column=7, sticky="w", padx=(12, 4), pady=(0, 8))
+        self._build_seconds_stepper(rb_frame, 1, 8, self.rb_jump_interval, 0.05, 10.0, pady=(0, 8))
 
         lb_frame = ttk.LabelFrame(frame, text="LB function")
         lb_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        for column in range(11):
+        for column in range(13):
             lb_frame.columnconfigure(column, weight=0)
-        lb_frame.columnconfigure(10, weight=1)
+        lb_frame.columnconfigure(12, weight=1)
         ttk.Checkbutton(lb_frame, text="啟用", variable=self.lb_enabled).grid(row=0, column=0, sticky="w", padx=(8, 12), pady=6)
-        self._build_key_entry(lb_frame, 0, 1, "跳躍鍵", self.lb_jump_key)
-        self._build_key_entry(lb_frame, 0, 3, "技能鍵", self.lb_skill_key)
-        ttk.Label(lb_frame, text="技能延遲").grid(row=0, column=5, sticky="w", padx=(12, 4), pady=6)
-        self._build_seconds_stepper(lb_frame, 0, 6, self.lb_skill_delay, 0.0, 10.0)
+        self._build_controller_button_select(lb_frame, 0, 1, "觸發", self.lb_controller_button)
+        self._build_key_entry(lb_frame, 0, 3, "跳躍鍵", self.lb_jump_key)
+        self._build_key_entry(lb_frame, 0, 5, "技能鍵", self.lb_skill_key)
+        ttk.Label(lb_frame, text="技能延遲").grid(row=0, column=7, sticky="w", padx=(12, 4), pady=6)
+        self._build_seconds_stepper(lb_frame, 0, 8, self.lb_skill_delay, 0.0, 10.0)
 
-        ttk.Label(frame, text="F11：暫停/恢復所有腳本功能").grid(row=3, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, text="F11：暫停/恢復所有腳本功能；F12：硬停止並釋放按鍵").grid(row=3, column=0, sticky="w", pady=(10, 0))
         ttk.Label(frame, textvariable=self.status).grid(row=4, column=0, sticky="w", pady=(2, 4))
 
+        runtime_frame = ttk.Frame(frame)
+        runtime_frame.grid(row=5, column=0, sticky="ew", pady=(0, 6))
+        for column in range(5):
+            runtime_frame.columnconfigure(column, weight=1)
+        ttk.Label(runtime_frame, textvariable=self.runtime_script_status).grid(row=0, column=0, sticky="w", padx=(0, 12))
+        ttk.Label(runtime_frame, textvariable=self.runtime_foreground_status).grid(row=0, column=1, sticky="w", padx=(0, 12))
+        ttk.Label(runtime_frame, textvariable=self.runtime_macro_status).grid(row=0, column=2, sticky="w", padx=(0, 12))
+        ttk.Label(runtime_frame, textvariable=self.runtime_held_keys_status).grid(row=0, column=3, sticky="w", padx=(0, 12))
+        ttk.Label(runtime_frame, textvariable=self.runtime_last_action_status).grid(row=0, column=4, sticky="w")
+
         console_frame = ttk.LabelFrame(frame, text="Console")
-        console_frame.grid(row=5, column=0, sticky="nsew")
+        console_frame.grid(row=6, column=0, sticky="nsew")
         console_frame.columnconfigure(0, weight=1)
         console_frame.rowconfigure(0, weight=1)
         self.console = tk.Text(console_frame, height=10, width=92, state="disabled", wrap="word")
@@ -171,6 +190,24 @@ class AutoPotionSettingsGui:
         key_entry = ttk.Entry(parent, width=9, textvariable=key_var)
         key_entry.grid(row=row, column=column + 1, sticky="w", padx=(0, 8), pady=6)
         key_entry.bind("<Button-1>", lambda _event, var=key_var, name=label: self.start_key_detection(var, name))
+
+    def _build_controller_button_select(
+        self,
+        parent: ttk.Frame,
+        row: int,
+        column: int,
+        label: str,
+        button_var: tk.StringVar,
+    ) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=column, sticky="w", padx=(0, 4), pady=6)
+        button_select = ttk.Combobox(
+            parent,
+            width=9,
+            textvariable=button_var,
+            values=CONTROLLER_BUTTON_CHOICES,
+            state="readonly",
+        )
+        button_select.grid(row=row, column=column + 1, sticky="w", padx=(0, 8), pady=6)
 
     def _build_seconds_stepper(
         self,
@@ -341,6 +378,11 @@ class AutoPotionSettingsGui:
         self.settings.mp_cooldown_seconds = self._read_cooldown(self.mp_cooldown, self.settings.mp_cooldown_seconds)
         self.settings.rb_jump_key = self.rb_jump_key.get().strip()
         self.settings.rb_skill_key = self.rb_skill_key.get().strip()
+        self.settings.rb_controller_button = normalize_controller_button_name(
+            self.rb_controller_button.get(),
+            self.settings.rb_controller_button,
+        )
+        self.rb_controller_button.set(self.settings.rb_controller_button)
         self.settings.rb_skill_delay_seconds = self._read_seconds(
             self.rb_skill_delay,
             self.settings.rb_skill_delay_seconds,
@@ -355,6 +397,11 @@ class AutoPotionSettingsGui:
         )
         self.settings.lb_jump_key = self.lb_jump_key.get().strip()
         self.settings.lb_skill_key = self.lb_skill_key.get().strip()
+        self.settings.lb_controller_button = normalize_controller_button_name(
+            self.lb_controller_button.get(),
+            self.settings.lb_controller_button,
+        )
+        self.lb_controller_button.set(self.settings.lb_controller_button)
         self.settings.lb_skill_delay_seconds = self._read_seconds(
             self.lb_skill_delay,
             self.settings.lb_skill_delay_seconds,
@@ -388,6 +435,25 @@ class AutoPotionSettingsGui:
 
     def set_status(self, message: str) -> None:
         self.status.set(message)
+
+    def set_runtime_info(
+        self,
+        *,
+        scripts_enabled: bool,
+        target_active: bool,
+        foreground_title: str,
+        macro_status: str,
+        held_keys: str,
+        last_action: str,
+    ) -> None:
+        self.runtime_script_status.set(f"腳本：{'啟用' if scripts_enabled else '暫停'}")
+        foreground_label = "楓星" if target_active else (foreground_title or "--")
+        if len(foreground_label) > 24:
+            foreground_label = foreground_label[:23] + "..."
+        self.runtime_foreground_status.set(f"前景：{foreground_label}")
+        self.runtime_macro_status.set(f"巨集：{macro_status or '--'}")
+        self.runtime_held_keys_status.set(f"按住：{held_keys or '--'}")
+        self.runtime_last_action_status.set(f"最近動作：{last_action or '--'}")
 
     def show_toggle_notice(self, message: str) -> None:
         if self.closed:
