@@ -66,30 +66,3 @@ class BarDetectionDebugTests(unittest.TestCase):
             self.assertEqual(photo.height(), 2)
         finally:
             root.destroy()
-
-    def test_capture_bar_percent_uses_manual_override_first(self):
-        controller = self.make_controller()
-        controller.settings = Mock(hp_region_override=(1, 2, 3, 4), mp_region_override=None)
-        controller._capture_bar_percent_from_region = Mock(return_value=42.0)
-
-        percent = controller._capture_bar_percent((10, 20, 30, 40), "hp")
-
-        self.assertEqual(percent, 42.0)
-        controller._capture_bar_percent_from_region.assert_called_once_with(
-            (1, 2, 3, 4),
-            "hp",
-            False,
-            "手動覆寫",
-        )
-
-    def test_capture_bar_percent_warns_when_manual_override_falls_back(self):
-        controller = self.make_controller()
-        controller.settings = Mock(hp_region_override=(1, 2, 3, 4), mp_region_override=None)
-        controller._capture_bar_percent_from_region = Mock(side_effect=[None, 77.0])
-        controller._find_bottom_bar_pair_regions = Mock(return_value={})
-        controller._scale_region_to_foreground_client = Mock(return_value=(10, 20, 30, 40))
-
-        percent = controller._capture_bar_percent((10, 20, 30, 40), "hp")
-
-        self.assertEqual(percent, 77.0)
-        self.assertIn("手動覆寫失敗", controller._bar_detection_debug_text("hp"))

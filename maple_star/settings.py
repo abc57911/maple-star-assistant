@@ -55,25 +55,6 @@ def normalize_profile_name(value: object, fallback: str = DEFAULT_PROFILE_NAME) 
     return normalized or fallback
 
 
-def normalize_region_override(value: object) -> tuple[int, int, int, int] | None:
-    if value is None:
-        return None
-    if not isinstance(value, (list, tuple)) or len(value) != 4:
-        return None
-    try:
-        left, top, width, height = (int(item) for item in value)
-    except (TypeError, ValueError):
-        return None
-    if width <= 0 or height <= 0:
-        return None
-    return left, top, width, height
-
-
-def offset_region(region: tuple[int, int, int, int], dx: int = 0, dy: int = 0) -> tuple[int, int, int, int]:
-    left, top, width, height = region
-    return max(0, left + dx), max(0, top + dy), width, height
-
-
 @dataclass
 class AutoPotionSettings:
     hp_enabled: bool = True
@@ -95,12 +76,10 @@ class AutoPotionSettings:
     lb_skill_key: str = "C"
     lb_controller_button: str = "LB"
     lb_skill_delay_seconds: float = 0.2
-    hp_region_override: tuple[int, int, int, int] | None = None
-    mp_region_override: tuple[int, int, int, int] | None = None
     active_profile: str = DEFAULT_PROFILE_NAME
     profiles: dict[str, dict[str, object]] = field(default_factory=dict)
 
-    def snapshot(self) -> tuple[bool, bool, bool, float, float, str, str, float, float, str, str, str, float, float, bool, str, str, str, float, tuple[int, int, int, int] | None, tuple[int, int, int, int] | None, str, str]:
+    def snapshot(self) -> tuple[bool, bool, bool, float, float, str, str, float, float, str, str, str, float, float, bool, str, str, str, float, str, str]:
         return (
             self.hp_enabled,
             self.mp_enabled,
@@ -121,8 +100,6 @@ class AutoPotionSettings:
             self.lb_skill_key,
             self.lb_controller_button,
             self.lb_skill_delay_seconds,
-            self.hp_region_override,
-            self.mp_region_override,
             self.active_profile,
             json.dumps(self.profiles, ensure_ascii=False, sort_keys=True),
         )
@@ -155,8 +132,6 @@ class AutoPotionSettings:
             "lb_skill_key": self.lb_skill_key,
             "lb_controller_button": self.lb_controller_button,
             "lb_skill_delay_seconds": self.lb_skill_delay_seconds,
-            "hp_region_override": self.hp_region_override,
-            "mp_region_override": self.mp_region_override,
             "active_profile": normalize_profile_name(self.active_profile),
             "profiles": profiles,
         }
@@ -228,8 +203,6 @@ PROFILE_SETTING_KEYS = (
     "lb_skill_key",
     "lb_controller_button",
     "lb_skill_delay_seconds",
-    "hp_region_override",
-    "mp_region_override",
 )
 
 
@@ -285,8 +258,6 @@ def _read_profile_payload(raw: object, fallback: AutoPotionSettings) -> dict[str
         "lb_skill_key": _read_string(data, "lb_skill_key", fallback.lb_skill_key),
         "lb_controller_button": normalize_controller_button_name(data.get("lb_controller_button"), fallback.lb_controller_button),
         "lb_skill_delay_seconds": _read_float(data, "lb_skill_delay_seconds", fallback.lb_skill_delay_seconds, 0.0, 10.0),
-        "hp_region_override": normalize_region_override(data.get("hp_region_override")),
-        "mp_region_override": normalize_region_override(data.get("mp_region_override")),
     }
 
 
@@ -358,8 +329,6 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
         lb_skill_key=_read_string(raw, "lb_skill_key", settings.lb_skill_key),
         lb_controller_button=normalize_controller_button_name(raw.get("lb_controller_button"), settings.lb_controller_button),
         lb_skill_delay_seconds=_read_float(raw, "lb_skill_delay_seconds", settings.lb_skill_delay_seconds, 0.0, 10.0),
-        hp_region_override=normalize_region_override(raw.get("hp_region_override")),
-        mp_region_override=normalize_region_override(raw.get("mp_region_override")),
         active_profile=normalize_profile_name(raw.get("active_profile"), DEFAULT_PROFILE_NAME),
     )
     profiles = _read_profiles(raw.get("profiles"), base_settings)
