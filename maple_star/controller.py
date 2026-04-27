@@ -29,6 +29,7 @@ from .constants import (
     BAR_PAIR_CACHE_SECONDS,
     BAR_SEARCH_MIN_RUN_PIXELS,
     BAR_TAIL_CHECK_MIN_WIDTH_RATIO,
+    BAR_VERTICAL_BODY_ROW_DENSITY,
     DEFAULT_CAPTURE_INTERVAL_SECONDS,
     FADE_GUARD_BRIGHT_PIXEL_RATIO,
     FADE_GUARD_MEAN_LUMINANCE,
@@ -438,12 +439,16 @@ class AutoPotionController:
                 }
             )
         )
-        hp_candidates = self._bar_run_candidates(self._bar_color_mask(image, "hp"), client_width)
-        mp_candidates = self._bar_run_candidates(self._bar_color_mask(image, "mp"), client_width)
+        hp_mask = self._bar_color_mask(image, "hp")
+        mp_mask = self._bar_color_mask(image, "mp")
+        hp_candidates = self._bar_run_candidates(hp_mask, client_width)
+        mp_candidates = self._bar_run_candidates(mp_mask, client_width)
 
         regions = self._bottom_bar_pair_regions_from_candidates(
             hp_candidates,
             mp_candidates,
+            hp_mask=hp_mask,
+            mp_mask=mp_mask,
             search_left=search_left,
             search_top=search_top,
             search_width=search_width,
@@ -464,6 +469,8 @@ class AutoPotionController:
         hp_candidates: list[tuple[int, int, int]],
         mp_candidates: list[tuple[int, int, int]],
         *,
+        hp_mask: np.ndarray | None = None,
+        mp_mask: np.ndarray | None = None,
         search_left: int,
         search_top: int,
         search_width: int,
@@ -500,26 +507,78 @@ class AutoPotionController:
         min_width = max(48, round(client_width * 0.07))
         max_width = max(min_width + 1, round(client_width * 0.20))
         region_width = max(min_width, min(max_width, round(gap * 0.82)))
-        region_height = max(12, min(40, round(client_height * 0.026)))
         margin_left = max(2, round(region_width * 0.015))
-        row_center = round((hp_row + mp_row) / 2)
-        top = max(0, min(search_height - region_height, row_center - region_height // 2))
+        fallback_height = max(10, min(22, round(client_height * 0.015)))
+        hp_top, hp_height = self._bar_vertical_bounds(
+            hp_mask,
+            hp_start,
+            best_pair[0][2],
+            hp_row,
+            search_height,
+            fallback_height,
+        )
+        mp_top, mp_height = self._bar_vertical_bounds(
+            mp_mask,
+            mp_start,
+            best_pair[1][2],
+            mp_row,
+            search_height,
+            fallback_height,
+        )
         hp_left = max(0, min(search_width - region_width, hp_start - margin_left))
         mp_left = max(0, min(search_width - region_width, mp_start - margin_left))
         return {
             "hp": (
                 search_left + hp_left,
-                search_top + top,
+                search_top + hp_top,
                 region_width,
-                region_height,
+                hp_height,
             ),
             "mp": (
                 search_left + mp_left,
-                search_top + top,
+                search_top + mp_top,
                 region_width,
-                region_height,
+                mp_height,
             ),
         }
+
+    def _bar_vertical_bounds(
+        self,
+        mask: np.ndarray | None,
+        run_start: int,
+        run_length: int,
+        row_index: int,
+        search_height: int,
+        fallback_height: int,
+    ) -> tuple[int, int]:
+        if mask is None or mask.size == 0:
+            top = max(0, min(search_height - fallback_height, row_index - fallback_height // 2))
+            return top, fallback_height
+
+        sample_width = max(8, min(run_length, round(mask.shape[1] * 0.18)))
+        sample_start = max(0, min(mask.shape[1] - sample_width, run_start))
+        sample = mask[:, sample_start : sample_start + sample_width]
+        row_filled = sample.mean(axis=1) >= BAR_VERTICAL_BODY_ROW_DENSITY
+        if not bool(row_filled[row_index]):
+            top = max(0, min(search_height - fallback_height, row_index - fallback_height // 2))
+            return top, fallback_height
+
+        top = row_index
+        while top > 0 and row_filled[top - 1]:
+            top -= 1
+        bottom = row_index
+        while bottom + 1 < row_filled.size and row_filled[bottom + 1]:
+            bottom += 1
+
+        padding = 1
+        top = max(0, top - padding)
+        bottom = min(search_height - 1, bottom + padding)
+        height = max(8, bottom - top + 1)
+        max_height = max(fallback_height + 4, round(search_height * 0.18))
+        if height > max_height:
+            top = max(0, min(search_height - fallback_height, row_index - fallback_height // 2))
+            return top, fallback_height
+        return top, height
 
     def _capture_bar_percent_from_region(
         self,

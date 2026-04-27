@@ -63,10 +63,35 @@ class BarDetectionDebugTests(unittest.TestCase):
 
         self.assertEqual(set(regions), {"hp", "mp"})
         self.assertLess(regions["hp"][0], regions["mp"][0])
-        self.assertEqual(regions["hp"][1], regions["mp"][1])
         self.assertEqual(regions["hp"][2:], regions["mp"][2:])
+        self.assertLessEqual(abs(regions["hp"][1] - regions["mp"][1]), 2)
         self.assertGreaterEqual(regions["hp"][2], 70)
         self.assertLessEqual(regions["hp"][2], 200)
+
+    def test_bottom_bar_pair_regions_use_detected_vertical_body_height(self):
+        controller = self.make_controller()
+        hp_mask = np.zeros((120, 700), dtype=bool)
+        mp_mask = np.zeros((120, 700), dtype=bool)
+        hp_mask[68:82, 120:210] = True
+        mp_mask[69:83, 360:445] = True
+
+        regions = controller._bottom_bar_pair_regions_from_candidates(
+            hp_candidates=[(120, 72, 90)],
+            mp_candidates=[(360, 73, 85)],
+            hp_mask=hp_mask,
+            mp_mask=mp_mask,
+            search_left=10,
+            search_top=900,
+            search_width=700,
+            search_height=120,
+            client_width=1000,
+            client_height=1080,
+        )
+
+        self.assertEqual(regions["hp"][1], 967)
+        self.assertEqual(regions["hp"][3], 16)
+        self.assertEqual(regions["mp"][1], 968)
+        self.assertEqual(regions["mp"][3], 16)
 
     def test_capture_bar_percent_reports_auto_locator_failure(self):
         controller = self.make_controller()
