@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Callable
 
 from .constants import MAX_CONSOLE_LINES
+from .experience import ExperienceSnapshot, format_eta, format_exp
 from .key_capture import DETECTABLE_KEY_VKS, event_to_hotkey, pressed_detectable_vks, vk_to_key_name
 from .settings import (
     SETTINGS_PATH,
@@ -62,6 +63,7 @@ class AutoPotionSettingsGui:
         self.toggle_notice_window: tk.Toplevel | None = None
         self.toggle_notice_after_id: str | None = None
         self.bar_preview_provider: Callable[[bool], dict[str, dict[str, object]]] | None = None
+        self.experience_reset_handler: Callable[[], None] | None = None
         self.bar_preview_labels: dict[str, ttk.Label] = {}
         self.bar_preview_images: list[tk.PhotoImage] = []
         self.bar_preview_has_snapshot = False
@@ -90,8 +92,10 @@ class AutoPotionSettingsGui:
         self.lb_skill_key = tk.StringVar(value=settings.lb_skill_key)
         self.lb_controller_button = tk.StringVar(value=settings.lb_controller_button)
         self.lb_skill_delay = tk.StringVar(value=f"{settings.lb_skill_delay_seconds:g}")
+        self.exp_efficiency_enabled = tk.BooleanVar(value=settings.exp_efficiency_enabled)
         self.toggle_hotkey = tk.StringVar(value=settings.toggle_hotkey)
         self.emergency_stop_hotkey = tk.StringVar(value=settings.emergency_stop_hotkey)
+        self.experience_toggle_hotkey = tk.StringVar(value=settings.experience_toggle_hotkey)
         self.hp_current = tk.StringVar(value="HP: --%")
         self.mp_current = tk.StringVar(value="MP: --%")
         self.status = tk.StringVar(value="只在楓星為前景視窗時生效")
@@ -102,6 +106,12 @@ class AutoPotionSettingsGui:
         self.runtime_last_action_status = tk.StringVar(value="最近動作：啟動")
         self.hp_detection_status = tk.StringVar(value="HP: --")
         self.mp_detection_status = tk.StringVar(value="MP: --")
+        self.exp_current_status = tk.StringVar(value="EXP：--")
+        self.exp_rate_1m_status = tk.StringVar(value="1m：--")
+        self.exp_rate_5m_status = tk.StringVar(value="5m：--")
+        self.exp_rate_1h_status = tk.StringVar(value="1h：--")
+        self.exp_eta_status = tk.StringVar(value="升級預估：--")
+        self.exp_reader_status = tk.StringVar(value="狀態：尚未開始")
 
         frame = ttk.Frame(self.root, padding=12)
         frame.grid(row=0, column=0, sticky="nsew")
@@ -112,7 +122,7 @@ class AutoPotionSettingsGui:
 
         control_hotkey_frame = ttk.LabelFrame(frame, text="全域熱鍵")
         control_hotkey_frame.grid(row=0, column=0, sticky="ew")
-        control_hotkey_frame.columnconfigure(8, weight=1)
+        control_hotkey_frame.columnconfigure(10, weight=1)
         ttk.Label(control_hotkey_frame, text="暫停/恢復").grid(row=0, column=0, sticky="w", padx=(8, 4), pady=6)
         toggle_entry = ttk.Entry(control_hotkey_frame, width=9, textvariable=self.toggle_hotkey)
         toggle_entry.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=6)
@@ -127,7 +137,14 @@ class AutoPotionSettingsGui:
             "<Button-1>",
             lambda _event: self.start_key_detection(self.emergency_stop_hotkey, "硬停止熱鍵"),
         )
-        ttk.Label(control_hotkey_frame, text="硬停止會暫停腳本並釋放按鍵").grid(row=0, column=6, sticky="w", padx=(16, 0), pady=6)
+        ttk.Label(control_hotkey_frame, text="經驗統計").grid(row=0, column=6, sticky="w", padx=(16, 4), pady=6)
+        exp_toggle_entry = ttk.Entry(control_hotkey_frame, width=9, textvariable=self.experience_toggle_hotkey)
+        exp_toggle_entry.grid(row=0, column=7, sticky="w", padx=(0, 8), pady=6)
+        exp_toggle_entry.bind(
+            "<Button-1>",
+            lambda _event: self.start_key_detection(self.experience_toggle_hotkey, "經驗統計熱鍵"),
+        )
+        ttk.Label(control_hotkey_frame, text="硬停止會暫停腳本並釋放按鍵").grid(row=0, column=9, sticky="w", padx=(16, 0), pady=6)
 
         profile_frame = ttk.Frame(frame)
         profile_frame.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -164,8 +181,21 @@ class AutoPotionSettingsGui:
         self.bar_preview_labels["mp"].grid(row=3, column=0, sticky="w", padx=8, pady=(0, 6))
         ttk.Button(detection_frame, text="刷新預覽", command=self.refresh_bar_preview).grid(row=0, column=1, rowspan=4, sticky="ne", padx=8, pady=4)
 
+        exp_frame = ttk.LabelFrame(frame, text="經驗效率")
+        exp_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        for column in range(6):
+            exp_frame.columnconfigure(column, weight=1 if column else 0)
+        ttk.Checkbutton(exp_frame, text="啟用", variable=self.exp_efficiency_enabled).grid(row=0, column=0, sticky="w", padx=(8, 12), pady=6)
+        ttk.Label(exp_frame, textvariable=self.exp_current_status).grid(row=0, column=1, sticky="w", padx=(0, 12), pady=6)
+        ttk.Label(exp_frame, textvariable=self.exp_rate_1m_status).grid(row=0, column=2, sticky="w", padx=(0, 12), pady=6)
+        ttk.Label(exp_frame, textvariable=self.exp_rate_5m_status).grid(row=0, column=3, sticky="w", padx=(0, 12), pady=6)
+        ttk.Label(exp_frame, textvariable=self.exp_rate_1h_status).grid(row=1, column=1, sticky="w", padx=(0, 12), pady=(0, 6))
+        ttk.Label(exp_frame, textvariable=self.exp_eta_status).grid(row=1, column=2, sticky="w", padx=(0, 12), pady=(0, 6))
+        ttk.Label(exp_frame, textvariable=self.exp_reader_status).grid(row=1, column=3, sticky="w", padx=(0, 12), pady=(0, 6))
+        ttk.Button(exp_frame, text="重置統計", command=self.reset_experience_statistics).grid(row=0, column=5, rowspan=2, sticky="e", padx=8, pady=6)
+
         rb_frame = ttk.LabelFrame(frame, text="RB function")
-        rb_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        rb_frame.grid(row=5, column=0, sticky="ew", pady=(8, 0))
         for column in range(13):
             rb_frame.columnconfigure(column, weight=0)
         rb_frame.columnconfigure(12, weight=1)
@@ -179,7 +209,7 @@ class AutoPotionSettingsGui:
         self._build_seconds_stepper(rb_frame, 1, 8, self.rb_jump_interval, 0.05, 10.0, pady=(0, 8))
 
         lb_frame = ttk.LabelFrame(frame, text="LB function")
-        lb_frame.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        lb_frame.grid(row=6, column=0, sticky="ew", pady=(8, 0))
         for column in range(13):
             lb_frame.columnconfigure(column, weight=0)
         lb_frame.columnconfigure(12, weight=1)
@@ -190,10 +220,10 @@ class AutoPotionSettingsGui:
         ttk.Label(lb_frame, text="技能延遲").grid(row=0, column=7, sticky="w", padx=(12, 4), pady=6)
         self._build_seconds_stepper(lb_frame, 0, 8, self.lb_skill_delay, 0.0, 10.0)
 
-        ttk.Label(frame, textvariable=self.status).grid(row=6, column=0, sticky="w", pady=(8, 4))
+        ttk.Label(frame, textvariable=self.status).grid(row=7, column=0, sticky="w", pady=(8, 4))
 
         runtime_frame = ttk.Frame(frame)
-        runtime_frame.grid(row=7, column=0, sticky="ew", pady=(0, 6))
+        runtime_frame.grid(row=8, column=0, sticky="ew", pady=(0, 6))
         for column in range(5):
             runtime_frame.columnconfigure(column, weight=1)
         ttk.Label(runtime_frame, textvariable=self.runtime_script_status).grid(row=0, column=0, sticky="w", padx=(0, 12))
@@ -330,6 +360,14 @@ class AutoPotionSettingsGui:
     def set_bar_preview_provider(self, provider: Callable[[bool], dict[str, dict[str, object]]]) -> None:
         self.bar_preview_provider = provider
 
+    def set_experience_reset_handler(self, handler: Callable[[], None]) -> None:
+        self.experience_reset_handler = handler
+
+    def reset_experience_statistics(self) -> None:
+        if self.experience_reset_handler is not None:
+            self.experience_reset_handler()
+        self.set_experience_snapshot(ExperienceSnapshot(status="已重置"))
+
     def is_detecting_key(self) -> bool:
         return self.detecting_key_target is not None
 
@@ -412,8 +450,10 @@ class AutoPotionSettingsGui:
         self.lb_skill_key.set(self.settings.lb_skill_key)
         self.lb_controller_button.set(self.settings.lb_controller_button)
         self.lb_skill_delay.set(f"{self.settings.lb_skill_delay_seconds:g}")
+        self.exp_efficiency_enabled.set(self.settings.exp_efficiency_enabled)
         self.toggle_hotkey.set(self.settings.toggle_hotkey)
         self.emergency_stop_hotkey.set(self.settings.emergency_stop_hotkey)
+        self.experience_toggle_hotkey.set(self.settings.experience_toggle_hotkey)
         self._refresh_profile_select()
 
     def _switch_profile(self, _event: tk.Event | None = None) -> str:
@@ -654,10 +694,18 @@ class AutoPotionSettingsGui:
             0.0,
             10.0,
         )
+        self.settings.exp_efficiency_enabled = self.exp_efficiency_enabled.get()
         self.settings.toggle_hotkey = self.toggle_hotkey.get().strip() or self.settings.toggle_hotkey
         self.settings.emergency_stop_hotkey = (
             self.emergency_stop_hotkey.get().strip() or self.settings.emergency_stop_hotkey
         )
+        self.settings.experience_toggle_hotkey = (
+            self.experience_toggle_hotkey.get().strip() or self.settings.experience_toggle_hotkey
+        )
+
+    def set_exp_efficiency_enabled(self, enabled: bool) -> None:
+        self.exp_efficiency_enabled.set(enabled)
+        self.settings.exp_efficiency_enabled = enabled
 
     def _read_cooldown(self, var: tk.StringVar, fallback: float) -> float:
         return self._read_seconds(var, fallback, 0.05, 60.0)
@@ -686,6 +734,15 @@ class AutoPotionSettingsGui:
     def set_bar_detection_debug(self, hp_debug: str, mp_debug: str) -> None:
         self.hp_detection_status.set(hp_debug)
         self.mp_detection_status.set(mp_debug)
+
+    def set_experience_snapshot(self, snapshot: ExperienceSnapshot) -> None:
+        percent = "" if snapshot.current_percent is None else f" ({snapshot.current_percent:.2f}%)"
+        self.exp_current_status.set(f"EXP：{format_exp(snapshot.current_exp)}{percent}")
+        self.exp_rate_1m_status.set(f"1m：{format_exp(snapshot.xp_per_minute)} xp")
+        self.exp_rate_5m_status.set(f"5m：{format_exp(snapshot.xp_per_5m)} xp")
+        self.exp_rate_1h_status.set(f"1h：{format_exp(snapshot.xp_per_hour)} xp")
+        self.exp_eta_status.set(f"升級預估：{format_eta(snapshot.eta_seconds)}")
+        self.exp_reader_status.set(f"狀態：{snapshot.status}")
 
     def set_status(self, message: str) -> None:
         self.status.set(message)
