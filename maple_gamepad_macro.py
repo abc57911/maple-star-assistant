@@ -16,7 +16,13 @@ except ImportError:
     raise SystemExit(1)
 
 
-TARGET_TITLE_KEYWORD = "MapleStory Worlds"
+from maple_star.window_target import (
+    TARGET_DISPLAY_NAME,
+    find_target_window,
+    foreground_window_title,
+    is_target_window_active,
+)
+
 JUMP_KEY_HOLD_SECONDS = 0.05
 POLL_INTERVAL_SECONDS = 0.01
 MACRO_TIMING_GUARD_SECONDS = 0.12
@@ -115,32 +121,8 @@ class Input(ctypes.Structure):
 
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
-user32.GetForegroundWindow.restype = wintypes.HWND
-user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
-user32.GetWindowTextLengthW.restype = ctypes.c_int
-user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-user32.GetWindowTextW.restype = ctypes.c_int
 user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(Input), ctypes.c_int]
 user32.SendInput.restype = wintypes.UINT
-
-
-def foreground_window_title() -> str:
-    hwnd = user32.GetForegroundWindow()
-    if not hwnd:
-        return ""
-
-    length = user32.GetWindowTextLengthW(hwnd)
-    if length <= 0:
-        return ""
-
-    buffer = ctypes.create_unicode_buffer(length + 1)
-    user32.GetWindowTextW(hwnd, buffer, length + 1)
-    return buffer.value
-
-
-def is_target_window_active() -> bool:
-    title = foreground_window_title()
-    return TARGET_TITLE_KEYWORD in title
 
 
 def button_name(button: int) -> str:
@@ -326,7 +308,7 @@ class RBJumpSlashMacro:
 
     def start_jump_cycle(self) -> tuple[float, float, float] | None:
         if not is_target_window_active():
-            print(f"忽略 {self.name}：目前前景視窗不是 {TARGET_TITLE_KEYWORD}")
+            print(f"忽略 {self.name}：目前前景視窗不是 {TARGET_DISPLAY_NAME}")
             return None
 
         jump_vk = self._parse_configured_key(self.settings.rb_jump_key, "跳躍鍵")
@@ -399,7 +381,7 @@ class LBJumpSkillMacro:
             return
 
         if not is_target_window_active():
-            print(f"忽略 {self.name}：目前前景視窗不是 {TARGET_TITLE_KEYWORD}")
+            print(f"忽略 {self.name}：目前前景視窗不是 {TARGET_DISPLAY_NAME}")
             return
 
         jump_vk = self._parse_configured_key(self.settings.lb_jump_key, "跳躍鍵")
@@ -507,7 +489,7 @@ def main() -> None:
     pygame.joystick.init()
     controller.init()
 
-    auto_potion = AutoPotionController(is_target_window_active)
+    auto_potion = AutoPotionController(is_target_window_active, target_window_provider=find_target_window)
     auto_potion.install_console_redirect()
     controllers_by_id = open_connected_controllers()
     rb_macro = RBJumpSlashMacro(auto_potion.settings)
@@ -515,6 +497,7 @@ def main() -> None:
     all_button_bindings: tuple[ControllerButtonBinding, ...] = (rb_macro, lb_macro)
     controller_button_bindings: dict[int, ControllerButtonBinding] = {}
     current_controller_button_settings: tuple[str, str, bool, bool] | None = None
+    key_capture_actions_were_blocked = False
 
     print("只在 MapleStory Worlds 為前景視窗時生效。")
     print(
@@ -525,7 +508,10 @@ def main() -> None:
     )
     print(f"LB function 由 {auto_potion.settings.lb_controller_button} 觸發，按下時腳本跳躍一次，並在設定延遲後按技能鍵。")
     print("自動喝水設定視窗已開啟，可即時調整 HP/MP 閾值、快捷鍵與冷卻時間。")
-    print("按 F11 可暫停/恢復所有腳本功能；按 F12 可硬停止並釋放按鍵。按 Ctrl+C 結束。")
+    print(
+        f"按 {auto_potion.settings.toggle_hotkey} 可暫停/恢復所有腳本功能；"
+        f"按 {auto_potion.settings.emergency_stop_hotkey} 可硬停止並釋放按鍵。按 Ctrl+C 結束。"
+    )
 
     def configured_controller_button(button_name_value: str) -> int | None:
         return CONTROLLER_BUTTONS_BY_NAME.get(button_name_value)
@@ -562,6 +548,8 @@ def main() -> None:
         current_controller_button_settings = new_settings
 
     def update_active_bindings() -> None:
+        if auto_potion.is_key_capture_blocking_actions():
+            return
         now = time.monotonic()
         for binding in all_button_bindings:
             if not auto_potion.scripts_enabled:
@@ -588,9 +576,10 @@ def main() -> None:
 
     def refresh_runtime_info() -> None:
         title = foreground_window_title()
+        active = is_target_window_active()
         auto_potion.gui.set_runtime_info(
             scripts_enabled=auto_potion.scripts_enabled,
-            target_active=TARGET_TITLE_KEYWORD in title,
+            target_active=active,
             foreground_title=title,
             macro_status=macro_status_text(),
             held_keys=tracked_held_keys_text(),
@@ -598,6 +587,8 @@ def main() -> None:
         )
 
     def next_binding_deadline_at() -> float | None:
+        if auto_potion.is_key_capture_blocking_actions():
+            return None
         deadlines: list[float] = []
         for binding in all_button_bindings:
             if not auto_potion.scripts_enabled:
@@ -617,8 +608,12 @@ def main() -> None:
         while True:
             sync_controller_button_bindings()
             auto_potion.poll_control_hotkeys()
+            key_capture_actions_blocked = auto_potion.is_key_capture_blocking_actions()
+            if key_capture_actions_blocked and not key_capture_actions_were_blocked:
+                stop_all_bindings("快捷鍵設定中，停止所有手把巨集並釋放按鍵")
+            key_capture_actions_were_blocked = key_capture_actions_blocked
             if auto_potion.consume_emergency_stop_requested():
-                stop_all_bindings("F12：停止所有手把巨集並釋放按鍵")
+                stop_all_bindings(f"{auto_potion.settings.emergency_stop_hotkey}：停止所有手把巨集並釋放按鍵")
             update_active_bindings()
 
             now = time.monotonic()
@@ -626,7 +621,7 @@ def main() -> None:
             if next_deadline is None or next_deadline - now > MACRO_TIMING_GUARD_SECONDS:
                 auto_potion.update(now)
                 if auto_potion.consume_emergency_stop_requested():
-                    stop_all_bindings("F12：停止所有手把巨集並釋放按鍵")
+                    stop_all_bindings(f"{auto_potion.settings.emergency_stop_hotkey}：停止所有手把巨集並釋放按鍵")
             if auto_potion.is_closed():
                 break
 
@@ -656,6 +651,9 @@ def main() -> None:
                 elif event.type == pygame.CONTROLLERBUTTONDOWN:
                     binding = controller_button_bindings.get(event.button)
                     if binding is not None:
+                        if auto_potion.is_key_capture_blocking_actions():
+                            binding.stop()
+                            continue
                         if not auto_potion.scripts_enabled:
                             print(f"忽略 {button_name(event.button)}：腳本已暫停")
                             continue
@@ -670,6 +668,9 @@ def main() -> None:
                 elif event.type == pygame.CONTROLLERBUTTONUP:
                     binding = controller_button_bindings.get(event.button)
                     if binding is not None:
+                        if auto_potion.is_key_capture_blocking_actions():
+                            binding.stop()
+                            continue
                         if not auto_potion.scripts_enabled:
                             binding.stop()
                             continue

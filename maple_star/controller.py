@@ -21,6 +21,9 @@ from .constants import (
     BAR_EMPTY_TAIL_MAX_CHROMA,
     BAR_EMPTY_TAIL_MAX_LUMINANCE,
     BAR_EMPTY_TAIL_MIN_RATIO,
+    BAR_FULL_REGION_LEFT_PADDING_RATIO,
+    BAR_FULL_REGION_RIGHT_PADDING_RATIO,
+    BAR_FULL_REGION_VERTICAL_PADDING_RATIO,
     BAR_LEFT_EDGE_TOLERANCE_RATIO,
     BAR_MAX_INTERNAL_GAP_RATIO,
     BAR_MIN_BODY_ROW_COUNT,
@@ -28,6 +31,7 @@ from .constants import (
     BAR_MIN_SEGMENT_DENSITY,
     BAR_PAIR_CACHE_SECONDS,
     BAR_SEARCH_MIN_RUN_PIXELS,
+    BAR_STABLE_SAMPLE_HOLD_SECONDS,
     BAR_TAIL_CHECK_MIN_WIDTH_RATIO,
     BAR_VERTICAL_BODY_ROW_DENSITY,
     DEFAULT_CAPTURE_INTERVAL_SECONDS,
@@ -49,13 +53,26 @@ from .constants import (
     SETTINGS_SAVE_DEBOUNCE_SECONDS,
     TOGGLE_BEEP_DURATION_MS,
     TOGGLE_HOTKEY_DEBOUNCE_SECONDS,
-    VK_F11,
-    VK_F12,
     WM_HOTKEY,
 )
 from .gui import AutoPotionSettingsGui, GuiConsoleWriter
 from .settings import AutoPotionSettings, load_settings, save_settings
-from .win_input import Msg, Point, tap_hotkey, user32
+from .win_input import (
+    Msg,
+    Point,
+    is_valid_window,
+    is_window_minimized,
+    parse_vk_key,
+    tap_hotkey,
+    temporarily_make_window_topmost,
+    user32,
+    window_client_size,
+)
+
+BAR_PREVIEW_IMAGE_SIZE = (240, 22)
+BAR_PREVIEW_WINDOW_READY_TIMEOUT_SECONDS = 0.8
+BAR_PREVIEW_WINDOW_POLL_SECONDS = 0.05
+BAR_PREVIEW_RENDER_SETTLE_SECONDS = 0.18
 
 
 @dataclass
@@ -91,12 +108,38 @@ def loading_screen_metrics(image: np.ndarray) -> tuple[float, float, float]:
     )
 
 
-def bgra_image_to_ppm_data(image: np.ndarray, scale: int = 3) -> bytes:
+def bgra_image_to_ppm_data(
+    image: np.ndarray,
+    scale: int = 3,
+    target_size: tuple[int, int] | None = None,
+) -> bytes:
     if image.ndim != 3 or image.shape[2] < 3:
         raise ValueError("預覽圖片格式無效")
     scale = max(1, int(scale))
     rgb = image[:, :, :3][:, :, ::-1]
-    if scale > 1:
+    if target_size is not None:
+        target_width, target_height = target_size
+        target_width = max(1, int(target_width))
+        target_height = max(1, int(target_height))
+        source_height, source_width, _channels = rgb.shape
+        fit_scale = min(target_width / source_width, target_height / source_height)
+        scaled_width = max(1, min(target_width, round(source_width * fit_scale)))
+        scaled_height = max(1, min(target_height, round(source_height * fit_scale)))
+        x_indexes = np.minimum(
+            (np.arange(scaled_width) * source_width / scaled_width).astype(np.intp),
+            source_width - 1,
+        )
+        y_indexes = np.minimum(
+            (np.arange(scaled_height) * source_height / scaled_height).astype(np.intp),
+            source_height - 1,
+        )
+        resized = rgb[y_indexes][:, x_indexes]
+        canvas = np.full((target_height, target_width, 3), 240, dtype=np.uint8)
+        left = (target_width - scaled_width) // 2
+        top = (target_height - scaled_height) // 2
+        canvas[top : top + scaled_height, left : left + scaled_width] = resized
+        rgb = canvas
+    elif scale > 1:
         rgb = np.repeat(np.repeat(rgb, scale, axis=0), scale, axis=1)
     height, width, _channels = rgb.shape
     header = f"P6\n{width} {height}\n255\n".encode("ascii")
@@ -108,8 +151,10 @@ class AutoPotionController:
         self,
         is_target_window_active: Callable[[], bool],
         settings: AutoPotionSettings | None = None,
+        target_window_provider: Callable[[], int] | None = None,
     ) -> None:
         self.is_target_window_active = is_target_window_active
+        self.target_window_provider = target_window_provider
         self.settings = settings or load_settings()
         self.gui = AutoPotionSettingsGui(self.settings)
         self.gui.set_bar_preview_provider(self.capture_bar_preview_images)
@@ -122,8 +167,11 @@ class AutoPotionController:
         self.scripts_enabled = True
         self.hotkey_registered = False
         self.emergency_hotkey_registered = False
-        self.f11_was_down = False
-        self.f12_was_down = False
+        self.toggle_hotkey_was_down = False
+        self.emergency_stop_hotkey_was_down = False
+        self.registered_toggle_hotkey_vk = 0
+        self.registered_emergency_stop_hotkey_vk = 0
+        self.control_hotkeys_suppressed_until_release = False
         self.last_toggle_hotkey_at = -999.0
         self.emergency_stop_requested = False
         self.last_action = "啟動"
@@ -132,15 +180,18 @@ class AutoPotionController:
             "mp": BarDetectionDebug("mp"),
         }
         self.bottom_bar_regions: dict[str, tuple[int, int, int, int]] = {}
+        self.bottom_bar_track_regions: dict[str, tuple[int, int, int, int]] = {}
         self.bottom_bar_regions_at = -999.0
         self.bottom_bar_client_bounds: tuple[int, int, int, int] | None = None
+        self.stable_bar_samples: dict[str, tuple[float, tuple[int, int, int, int], float]] = {}
+        self.last_target_hwnd: int = 0
         self.fade_guard_hits = 0
         self.fade_guard_until = 0.0
         self.pending_settings_snapshot = self.settings.snapshot()
         self.next_settings_save_at: float | None = None
         self.original_stdout: object | None = None
         self.original_stderr: object | None = None
-        self._register_toggle_hotkey()
+        self._sync_registered_control_hotkeys()
 
     def install_console_redirect(self) -> None:
         if isinstance(sys.stdout, GuiConsoleWriter):
@@ -153,30 +204,69 @@ class AutoPotionController:
     def is_closed(self) -> bool:
         return not self.gui.exists()
 
-    def _register_toggle_hotkey(self) -> None:
-        if user32.RegisterHotKey(None, SCRIPT_TOGGLE_HOTKEY_ID, MOD_NOREPEAT, VK_F11):
+    def _control_hotkey_vk(self, hotkey: str, fallback: str) -> int:
+        try:
+            return parse_vk_key(hotkey)
+        except ValueError:
+            return parse_vk_key(fallback)
+
+    def _sync_registered_control_hotkeys(self) -> None:
+        toggle_vk = self._control_hotkey_vk(self.settings.toggle_hotkey, "F11")
+        emergency_vk = self._control_hotkey_vk(self.settings.emergency_stop_hotkey, "Pause")
+        if (
+            toggle_vk == self.registered_toggle_hotkey_vk
+            and emergency_vk == self.registered_emergency_stop_hotkey_vk
+        ):
+            return
+        self._unregister_toggle_hotkey()
+        self._register_toggle_hotkey(toggle_vk, emergency_vk)
+
+    def _register_toggle_hotkey(self, toggle_vk: int, emergency_vk: int) -> None:
+        self.registered_toggle_hotkey_vk = toggle_vk
+        if user32.RegisterHotKey(None, SCRIPT_TOGGLE_HOTKEY_ID, MOD_NOREPEAT, toggle_vk):
             self.hotkey_registered = True
         else:
             error_code = ctypes.get_last_error()
-            print(f"註冊 F11 總開關失敗，錯誤碼：{error_code}")
+            print(f"註冊 {self.settings.toggle_hotkey} 總開關失敗，錯誤碼：{error_code}")
 
-        if user32.RegisterHotKey(None, SCRIPT_EMERGENCY_STOP_HOTKEY_ID, MOD_NOREPEAT, VK_F12):
+        self.registered_emergency_stop_hotkey_vk = emergency_vk
+        if user32.RegisterHotKey(None, SCRIPT_EMERGENCY_STOP_HOTKEY_ID, MOD_NOREPEAT, emergency_vk):
             self.emergency_hotkey_registered = True
         else:
             error_code = ctypes.get_last_error()
-            print(f"註冊 F12 硬停止失敗，錯誤碼：{error_code}")
+            print(f"註冊 {self.settings.emergency_stop_hotkey} 硬停止失敗，錯誤碼：{error_code}")
 
     def _unregister_toggle_hotkey(self) -> None:
         if self.hotkey_registered:
             if not user32.UnregisterHotKey(None, SCRIPT_TOGGLE_HOTKEY_ID):
-                print(f"解除 F11 總開關註冊失敗，錯誤碼：{ctypes.get_last_error()}")
+                print(f"解除 {self.settings.toggle_hotkey} 總開關註冊失敗，錯誤碼：{ctypes.get_last_error()}")
             self.hotkey_registered = False
+        self.registered_toggle_hotkey_vk = 0
         if self.emergency_hotkey_registered:
             if not user32.UnregisterHotKey(None, SCRIPT_EMERGENCY_STOP_HOTKEY_ID):
-                print(f"解除 F12 硬停止註冊失敗，錯誤碼：{ctypes.get_last_error()}")
+                print(f"解除 {self.settings.emergency_stop_hotkey} 硬停止註冊失敗，錯誤碼：{ctypes.get_last_error()}")
             self.emergency_hotkey_registered = False
+        self.registered_emergency_stop_hotkey_vk = 0
 
     def poll_control_hotkeys(self) -> None:
+        if self.gui.is_detecting_key():
+            self.toggle_hotkey_was_down = False
+            self.emergency_stop_hotkey_was_down = False
+            self.control_hotkeys_suppressed_until_release = False
+            self._discard_control_hotkey_messages()
+            return
+        if self.gui.consume_key_detection_finished():
+            self.control_hotkeys_suppressed_until_release = True
+            self._discard_control_hotkey_messages()
+            self._sync_control_hotkey_down_states()
+            return
+        if self.control_hotkeys_suppressed_until_release:
+            self._discard_control_hotkey_messages()
+            self._sync_control_hotkey_down_states()
+            if not self._any_control_hotkey_is_down():
+                self.control_hotkeys_suppressed_until_release = False
+            return
+
         toggle_triggered = False
         emergency_stop_triggered = False
         message = Msg()
@@ -192,20 +282,53 @@ class AutoPotionController:
             elif message.wParam == SCRIPT_EMERGENCY_STOP_HOTKEY_ID:
                 emergency_stop_triggered = True
 
-        f11_is_down = bool(user32.GetAsyncKeyState(VK_F11) & ASYNC_KEY_DOWN_MASK)
-        if f11_is_down and not self.f11_was_down:
+        toggle_is_down = bool(
+            self.registered_toggle_hotkey_vk
+            and user32.GetAsyncKeyState(self.registered_toggle_hotkey_vk) & ASYNC_KEY_DOWN_MASK
+        )
+        if toggle_is_down and not self.toggle_hotkey_was_down:
             toggle_triggered = True
-        self.f11_was_down = f11_is_down
+        self.toggle_hotkey_was_down = toggle_is_down
 
-        f12_is_down = bool(user32.GetAsyncKeyState(VK_F12) & ASYNC_KEY_DOWN_MASK)
-        if f12_is_down and not self.f12_was_down:
+        emergency_is_down = bool(
+            self.registered_emergency_stop_hotkey_vk
+            and user32.GetAsyncKeyState(self.registered_emergency_stop_hotkey_vk) & ASYNC_KEY_DOWN_MASK
+        )
+        if emergency_is_down and not self.emergency_stop_hotkey_was_down:
             emergency_stop_triggered = True
-        self.f12_was_down = f12_is_down
+        self.emergency_stop_hotkey_was_down = emergency_is_down
 
         if emergency_stop_triggered:
             self.emergency_stop()
         elif toggle_triggered:
             self._try_toggle_scripts_enabled(time.monotonic())
+
+    def is_key_capture_blocking_actions(self) -> bool:
+        return self.gui.is_detecting_key() or self.gui.is_key_detection_release_pending()
+
+    def _sync_control_hotkey_down_states(self) -> None:
+        self.toggle_hotkey_was_down = bool(
+            self.registered_toggle_hotkey_vk
+            and user32.GetAsyncKeyState(self.registered_toggle_hotkey_vk) & ASYNC_KEY_DOWN_MASK
+        )
+        self.emergency_stop_hotkey_was_down = bool(
+            self.registered_emergency_stop_hotkey_vk
+            and user32.GetAsyncKeyState(self.registered_emergency_stop_hotkey_vk) & ASYNC_KEY_DOWN_MASK
+        )
+
+    def _any_control_hotkey_is_down(self) -> bool:
+        return self.toggle_hotkey_was_down or self.emergency_stop_hotkey_was_down
+
+    def _discard_control_hotkey_messages(self) -> None:
+        message = Msg()
+        while user32.PeekMessageW(
+            ctypes.byref(message),
+            None,
+            WM_HOTKEY,
+            WM_HOTKEY,
+            PM_REMOVE,
+        ):
+            pass
 
     def consume_emergency_stop_requested(self) -> bool:
         if not self.emergency_stop_requested:
@@ -225,18 +348,18 @@ class AutoPotionController:
             self._play_toggle_beep(RESUME_BEEP_FREQUENCY)
             self.gui.set_status("腳本已啟用")
             self.gui.show_toggle_notice("腳本已啟用")
-            self.last_action = "F11 啟用"
-            print("F11：腳本已啟用")
+            self.last_action = f"{self.settings.toggle_hotkey} 啟用"
+            print(f"{self.settings.toggle_hotkey}：腳本已啟用")
             return
 
         self.last_hp_drink_at = time.monotonic()
         self.last_mp_drink_at = self.last_hp_drink_at
         self._play_toggle_beep(PAUSE_BEEP_FREQUENCY)
-        self.gui.set_status("腳本已暫停，按 F11 恢復")
+        self.gui.set_status(f"腳本已暫停，按 {self.settings.toggle_hotkey} 恢復")
         self.gui.show_toggle_notice("腳本已暫停")
         self.gui.set_current_percentages(None, None)
-        self.last_action = "F11 暫停"
-        print("F11：腳本已暫停")
+        self.last_action = f"{self.settings.toggle_hotkey} 暫停"
+        print(f"{self.settings.toggle_hotkey}：腳本已暫停")
 
     def emergency_stop(self) -> None:
         now = time.monotonic()
@@ -245,11 +368,11 @@ class AutoPotionController:
         self.last_hp_drink_at = now
         self.last_mp_drink_at = now
         self._play_toggle_beep(EMERGENCY_STOP_BEEP_FREQUENCY)
-        self.gui.set_status("F12 硬停止：所有腳本已暫停")
-        self.gui.show_toggle_notice("F12 硬停止")
+        self.gui.set_status(f"{self.settings.emergency_stop_hotkey} 硬停止：所有腳本已暫停")
+        self.gui.show_toggle_notice(f"{self.settings.emergency_stop_hotkey} 硬停止")
         self.gui.set_current_percentages(None, None)
-        self.last_action = "F12 硬停止"
-        print("F12：硬停止，所有腳本已暫停")
+        self.last_action = f"{self.settings.emergency_stop_hotkey} 硬停止"
+        print(f"{self.settings.emergency_stop_hotkey}：硬停止，所有腳本已暫停")
 
     def _play_toggle_beep(self, frequency: int) -> None:
         try:
@@ -264,15 +387,20 @@ class AutoPotionController:
         self.poll_control_hotkeys()
         if not self.gui.pump():
             return
+        self._sync_registered_control_hotkeys()
         self.poll_control_hotkeys()
         self._save_settings_when_idle(now)
+
+        if self.is_key_capture_blocking_actions():
+            self.gui.set_current_percentages(None, None)
+            return
 
         if now < self.next_capture_at:
             return
         self.next_capture_at = now + DEFAULT_CAPTURE_INTERVAL_SECONDS
 
         if not self.scripts_enabled:
-            self.gui.set_status("腳本已暫停，按 F11 恢復")
+            self.gui.set_status(f"腳本已暫停，按 {self.settings.toggle_hotkey} 恢復")
             self.gui.set_current_percentages(None, None)
             return
 
@@ -405,11 +533,13 @@ class AutoPotionController:
             )
             return None
 
+        track_region = getattr(self, "bottom_bar_track_regions", {}).get(bar_type)
         return self._capture_bar_percent_from_region(
             region,
             bar_type,
             require_clear_tail,
             "自動定位",
+            track_region=track_region,
         )
 
     def _find_bottom_bar_pair_regions(self) -> dict[str, tuple[int, int, int, int]]:
@@ -423,6 +553,7 @@ class AutoPotionController:
             return self.bottom_bar_regions
 
         old_regions = dict(getattr(self, "bottom_bar_regions", {}))
+        old_track_regions = dict(getattr(self, "bottom_bar_track_regions", {}))
         self.bottom_bar_client_bounds = client_bounds
         self.bottom_bar_regions_at = now
         client_left, client_top, client_width, client_height = client_bounds
@@ -459,10 +590,13 @@ class AutoPotionController:
         )
         if regions:
             self.bottom_bar_regions = regions
+            self.bottom_bar_track_regions = getattr(self, "pending_bottom_bar_track_regions", {})
         elif cached_client_bounds == client_bounds and old_regions:
             self.bottom_bar_regions = old_regions
+            self.bottom_bar_track_regions = old_track_regions
         else:
             self.bottom_bar_regions = {}
+            self.bottom_bar_track_regions = {}
         return self.bottom_bar_regions
 
     def _bottom_bar_pair_regions_from_candidates(
@@ -528,20 +662,69 @@ class AutoPotionController:
         )
         hp_left = max(0, min(search_width - region_width, hp_start - margin_left))
         mp_left = max(0, min(search_width - region_width, mp_start - margin_left))
-        return {
-            "hp": (
-                search_left + hp_left,
-                search_top + hp_top,
-                region_width,
-                hp_height,
-            ),
-            "mp": (
-                search_left + mp_left,
-                search_top + mp_top,
-                region_width,
-                mp_height,
-            ),
+        hp_region, hp_track_region = self._full_bar_region_and_track(
+            search_left,
+            search_top,
+            search_width,
+            search_height,
+            hp_left,
+            hp_top,
+            region_width,
+            hp_height,
+        )
+        mp_region, mp_track_region = self._full_bar_region_and_track(
+            search_left,
+            search_top,
+            search_width,
+            search_height,
+            mp_left,
+            mp_top,
+            region_width,
+            mp_height,
+        )
+        self.pending_bottom_bar_track_regions = {
+            "hp": hp_track_region,
+            "mp": mp_track_region,
         }
+        self.bottom_bar_track_regions = dict(self.pending_bottom_bar_track_regions)
+        return {
+            "hp": hp_region,
+            "mp": mp_region,
+        }
+
+    def _full_bar_region_and_track(
+        self,
+        search_left: int,
+        search_top: int,
+        search_width: int,
+        search_height: int,
+        track_left: int,
+        track_top: int,
+        track_width: int,
+        track_height: int,
+    ) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+        left_padding = max(2, round(track_width * BAR_FULL_REGION_LEFT_PADDING_RATIO))
+        right_padding = max(6, round(track_width * BAR_FULL_REGION_RIGHT_PADDING_RATIO))
+        vertical_padding = max(2, round(track_height * BAR_FULL_REGION_VERTICAL_PADDING_RATIO))
+
+        full_left = max(0, track_left - left_padding)
+        full_top = max(0, track_top - vertical_padding)
+        full_right = min(search_width, track_left + track_width + right_padding)
+        full_bottom = min(search_height, track_top + track_height + vertical_padding)
+        return (
+            (
+                search_left + full_left,
+                search_top + full_top,
+                max(1, full_right - full_left),
+                max(1, full_bottom - full_top),
+            ),
+            (
+                search_left + track_left,
+                search_top + track_top,
+                track_width,
+                track_height,
+            ),
+        )
 
     def _bar_vertical_bounds(
         self,
@@ -587,11 +770,25 @@ class AutoPotionController:
         bar_type: str,
         require_clear_tail: bool = False,
         source: str = "指定區域",
+        *,
+        track_region: tuple[int, int, int, int] | None = None,
     ) -> float | None:
         left, top, width, height = region
         image = np.asarray(self.sct.grab({"left": left, "top": top, "width": width, "height": height}))
         mask = self._bar_color_mask(image, bar_type)
-        percent, reason, tail_clear = self._percent_from_bar_mask_result(mask, image, require_clear_tail)
+        percent_mask, percent_image = self._bar_percent_inputs(region, mask, image, track_region)
+        percent, reason, tail_clear = self._percent_from_bar_mask_result(
+            percent_mask,
+            percent_image,
+            require_clear_tail,
+        )
+        if percent is not None:
+            self._remember_stable_bar_sample(bar_type, percent, region)
+        elif not require_clear_tail:
+            stable_percent = self._recent_stable_bar_percent(bar_type, region)
+            if stable_percent is not None:
+                percent = stable_percent
+                reason = "短暫失敗，沿用最近穩定取樣"
         self._set_bar_detection_debug(
             bar_type,
             source=source,
@@ -602,6 +799,58 @@ class AutoPotionController:
             require_clear_tail=require_clear_tail,
             tail_clear=tail_clear,
         )
+        return percent
+
+    def _bar_percent_inputs(
+        self,
+        region: tuple[int, int, int, int],
+        mask: np.ndarray,
+        image: np.ndarray,
+        track_region: tuple[int, int, int, int] | None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if track_region is None:
+            return mask, image
+
+        region_left, region_top, region_width, region_height = region
+        track_left, track_top, track_width, track_height = track_region
+        relative_left = track_left - region_left
+        relative_top = track_top - region_top
+        if (
+            relative_left < 0
+            or relative_top < 0
+            or track_width <= 0
+            or track_height <= 0
+            or relative_left + track_width > region_width
+            or relative_top + track_height > region_height
+        ):
+            return mask, image
+
+        return (
+            mask[relative_top : relative_top + track_height, relative_left : relative_left + track_width],
+            image[relative_top : relative_top + track_height, relative_left : relative_left + track_width],
+        )
+
+    def _remember_stable_bar_sample(
+        self,
+        bar_type: str,
+        percent: float,
+        region: tuple[int, int, int, int],
+    ) -> None:
+        self.stable_bar_samples[bar_type] = (time.monotonic(), region, percent)
+
+    def _recent_stable_bar_percent(
+        self,
+        bar_type: str,
+        region: tuple[int, int, int, int],
+    ) -> float | None:
+        sampled_at, stable_region, percent = getattr(self, "stable_bar_samples", {}).get(
+            bar_type,
+            (-999.0, None, None),
+        )
+        if stable_region != region:
+            return None
+        if time.monotonic() - sampled_at > BAR_STABLE_SAMPLE_HOLD_SECONDS:
+            return None
         return percent
 
     def _percent_from_bar_mask(
@@ -700,46 +949,115 @@ class AutoPotionController:
             "mp": self.last_bar_debug.get("mp", BarDetectionDebug("mp")).region,
         }
 
-    def capture_bar_preview_images(self) -> dict[str, dict[str, object]]:
+    def capture_bar_preview_images(self, make_target_topmost: bool = False) -> dict[str, dict[str, object]]:
         previews: dict[str, dict[str, object]] = {}
-        for bar_type in ("hp", "mp"):
-            debug = self.last_bar_debug.get(bar_type, BarDetectionDebug(bar_type))
-            label = "HP" if bar_type == "hp" else "MP"
-            if debug.region is None:
-                previews[bar_type] = {
-                    "label": label,
+        missing_regions = [
+            bar_type
+            for bar_type in ("hp", "mp")
+            if self.last_bar_debug.get(bar_type, BarDetectionDebug(bar_type)).region is None
+        ]
+        if missing_regions:
+            return {
+                bar_type: {
+                    "label": "HP" if bar_type == "hp" else "MP",
                     "debug": self._bar_detection_debug_text(bar_type),
                     "image": None,
                     "error": "尚無可預覽的偵測區域",
                 }
-                continue
+                for bar_type in ("hp", "mp")
+            }
 
-            left, top, width, height = debug.region
-            try:
-                image = np.asarray(
-                    self.sct.grab(
-                        {
-                            "left": left,
-                            "top": top,
-                            "width": width,
-                            "height": height,
-                        }
+        target_hwnd = self._target_window_handle() if make_target_topmost else 0
+        with temporarily_make_window_topmost(target_hwnd) as target_is_ready:
+            if make_target_topmost and not target_is_ready:
+                return {
+                    bar_type: {
+                        "label": "HP" if bar_type == "hp" else "MP",
+                        "debug": self._bar_detection_debug_text(bar_type),
+                        "image": None,
+                        "error": "無法顯示目標遊戲視窗，預覽未更新",
+                    }
+                    for bar_type in ("hp", "mp")
+                }
+            if make_target_topmost and not self._wait_for_preview_target_ready(target_hwnd):
+                return {
+                    bar_type: {
+                        "label": "HP" if bar_type == "hp" else "MP",
+                        "debug": self._bar_detection_debug_text(bar_type),
+                        "image": None,
+                        "error": "目標遊戲視窗尚未完成顯示，預覽未更新",
+                    }
+                    for bar_type in ("hp", "mp")
+                }
+            for bar_type in ("hp", "mp"):
+                debug = self.last_bar_debug.get(bar_type, BarDetectionDebug(bar_type))
+                label = "HP" if bar_type == "hp" else "MP"
+                left, top, width, height = debug.region or (0, 0, 0, 0)
+                try:
+                    image = np.asarray(
+                        self.sct.grab(
+                            {
+                                "left": left,
+                                "top": top,
+                                "width": width,
+                                "height": height,
+                            }
+                        )
                     )
-                )
-                previews[bar_type] = {
-                    "label": label,
-                    "debug": self._bar_detection_debug_text(bar_type),
-                    "image": bgra_image_to_ppm_data(image, scale=2),
-                    "error": "",
-                }
-            except Exception as exc:
-                previews[bar_type] = {
-                    "label": label,
-                    "debug": self._bar_detection_debug_text(bar_type),
-                    "image": None,
-                    "error": str(exc),
-                }
+                    mask = self._bar_color_mask(image, bar_type)
+                    track_region = getattr(self, "bottom_bar_track_regions", {}).get(bar_type)
+                    percent_mask, percent_image = self._bar_percent_inputs(
+                        debug.region or (left, top, width, height),
+                        mask,
+                        image,
+                        track_region,
+                    )
+                    percent = self._percent_from_bar_mask(percent_mask, percent_image)
+                    if percent is None:
+                        previews[bar_type] = {
+                            "label": label,
+                            "debug": self._bar_detection_debug_text(bar_type),
+                            "image": None,
+                            "error": "預覽截圖未通過 HP/MP 色條驗證",
+                        }
+                        continue
+                    previews[bar_type] = {
+                        "label": label,
+                        "debug": self._bar_detection_debug_text(bar_type),
+                        "image": bgra_image_to_ppm_data(image, target_size=BAR_PREVIEW_IMAGE_SIZE),
+                        "error": "",
+                    }
+                except Exception as exc:
+                    previews[bar_type] = {
+                        "label": label,
+                        "debug": self._bar_detection_debug_text(bar_type),
+                        "image": None,
+                        "error": str(exc),
+                    }
         return previews
+
+    def _wait_for_preview_target_ready(self, target_hwnd: int) -> bool:
+        deadline = time.monotonic() + BAR_PREVIEW_WINDOW_READY_TIMEOUT_SECONDS
+        while time.monotonic() <= deadline:
+            if not is_valid_window(target_hwnd):
+                return False
+            width, height = window_client_size(target_hwnd)
+            if not is_window_minimized(target_hwnd) and width > 0 and height > 0:
+                time.sleep(BAR_PREVIEW_RENDER_SETTLE_SECONDS)
+                return True
+            time.sleep(BAR_PREVIEW_WINDOW_POLL_SECONDS)
+        return False
+
+    def _target_window_handle(self) -> int:
+        if self.target_window_provider is not None:
+            try:
+                hwnd = int(self.target_window_provider() or 0)
+                if hwnd:
+                    self.last_target_hwnd = hwnd
+                    return hwnd
+            except Exception:
+                pass
+        return self.last_target_hwnd
 
     def _bar_run_has_horizontal_body(self, mask: np.ndarray, start: int, end: int) -> bool:
         if end < start:
@@ -869,6 +1187,7 @@ class AutoPotionController:
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
             raise RuntimeError("找不到前景視窗")
+        self.last_target_hwnd = int(hwnd)
 
         rect = wintypes.RECT()
         if not user32.GetClientRect(hwnd, ctypes.byref(rect)):

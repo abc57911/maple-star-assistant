@@ -1,10 +1,14 @@
 import unittest
+from contextlib import contextmanager
 from unittest.mock import Mock
 
 import numpy as np
 import tkinter as tk
 
 from maple_star.controller import AutoPotionController, BarDetectionDebug, bgra_image_to_ppm_data
+from maple_star.gui import AutoPotionSettingsGui
+from maple_star.key_capture import DETECTABLE_KEY_VKS, vk_to_key_name
+from maple_star.window_target import is_target_process_name, normalize_process_name
 
 
 class BarDetectionDebugTests(unittest.TestCase):
@@ -14,6 +18,7 @@ class BarDetectionDebugTests(unittest.TestCase):
             "hp": BarDetectionDebug("hp"),
             "mp": BarDetectionDebug("mp"),
         }
+        controller.stable_bar_samples = {}
         controller.bar_override_warnings = {"hp": "", "mp": ""}
         return controller
 
@@ -61,12 +66,18 @@ class BarDetectionDebugTests(unittest.TestCase):
             client_height=800,
         )
 
+        hp_track = controller.bottom_bar_track_regions["hp"]
+        mp_track = controller.bottom_bar_track_regions["mp"]
         self.assertEqual(set(regions), {"hp", "mp"})
-        self.assertLess(regions["hp"][0], regions["mp"][0])
-        self.assertEqual(regions["hp"][2:], regions["mp"][2:])
+        self.assertLess(hp_track[0], mp_track[0])
+        self.assertLessEqual(regions["hp"][0], hp_track[0])
+        self.assertGreaterEqual(regions["hp"][0] + regions["hp"][2], hp_track[0] + hp_track[2])
+        self.assertLessEqual(regions["hp"][1], hp_track[1])
+        self.assertGreaterEqual(regions["hp"][1] + regions["hp"][3], hp_track[1] + hp_track[3])
         self.assertLessEqual(abs(regions["hp"][1] - regions["mp"][1]), 2)
-        self.assertGreaterEqual(regions["hp"][2], 70)
-        self.assertLessEqual(regions["hp"][2], 200)
+        self.assertGreater(regions["hp"][2], hp_track[2])
+        self.assertGreaterEqual(hp_track[2], 70)
+        self.assertLessEqual(hp_track[2], 200)
 
     def test_bottom_bar_pair_regions_use_detected_vertical_body_height(self):
         controller = self.make_controller()
@@ -88,10 +99,14 @@ class BarDetectionDebugTests(unittest.TestCase):
             client_height=1080,
         )
 
-        self.assertEqual(regions["hp"][1], 967)
-        self.assertEqual(regions["hp"][3], 16)
-        self.assertEqual(regions["mp"][1], 968)
-        self.assertEqual(regions["mp"][3], 16)
+        hp_track = controller.bottom_bar_track_regions["hp"]
+        mp_track = controller.bottom_bar_track_regions["mp"]
+        self.assertEqual(hp_track[1], 967)
+        self.assertEqual(hp_track[3], 16)
+        self.assertEqual(mp_track[1], 968)
+        self.assertEqual(mp_track[3], 16)
+        self.assertLess(regions["hp"][1], hp_track[1])
+        self.assertGreater(regions["hp"][3], hp_track[3])
 
     def test_capture_bar_percent_reports_auto_locator_failure(self):
         controller = self.make_controller()
@@ -104,6 +119,71 @@ class BarDetectionDebugTests(unittest.TestCase):
         self.assertEqual(debug.source, "自動定位")
         self.assertIsNone(debug.region)
         self.assertEqual(debug.reason, "找不到 HP/MP 成對 HUD 條")
+
+    def test_capture_bar_percent_holds_recent_stable_sample_for_transient_failure(self):
+        controller = self.make_controller()
+        controller.sct = Mock()
+        controller.sct.grab.return_value = np.zeros((4, 10, 4), dtype=np.uint8)
+        controller._bar_color_mask = Mock(return_value=np.zeros((4, 10), dtype=bool))
+        controller._percent_from_bar_mask_result = Mock(
+            side_effect=[
+                (55.0, "OK", None),
+                (None, "找不到符合顏色的填滿欄位", None),
+            ]
+        )
+        region = (10, 20, 100, 12)
+
+        first_percent = controller._capture_bar_percent_from_region(region, "hp")
+        second_percent = controller._capture_bar_percent_from_region(region, "hp")
+
+        self.assertEqual(first_percent, 55.0)
+        self.assertEqual(second_percent, 55.0)
+        debug = controller.last_bar_debug["hp"]
+        self.assertTrue(debug.success)
+        self.assertEqual(debug.reason, "短暫失敗，沿用最近穩定取樣")
+
+    def test_capture_bar_percent_uses_inner_track_inside_full_status_region(self):
+        controller = self.make_controller()
+        controller.sct = Mock()
+        controller.sct.grab.return_value = np.zeros((4, 16, 4), dtype=np.uint8)
+        mask = np.zeros((4, 16), dtype=bool)
+        mask[:, 4:8] = True
+        controller._bar_color_mask = Mock(return_value=mask)
+        full_region = (10, 20, 16, 4)
+        track_region = (14, 20, 8, 4)
+
+        percent = controller._capture_bar_percent_from_region(
+            full_region,
+            "hp",
+            track_region=track_region,
+        )
+
+        self.assertEqual(percent, 50.0)
+        debug = controller.last_bar_debug["hp"]
+        self.assertEqual(debug.region, full_region)
+        self.assertEqual(debug.reason, "OK")
+
+    def test_clear_tail_recheck_does_not_hold_recent_stable_sample(self):
+        controller = self.make_controller()
+        controller.sct = Mock()
+        controller.sct.grab.return_value = np.zeros((4, 10, 4), dtype=np.uint8)
+        controller._bar_color_mask = Mock(return_value=np.zeros((4, 10), dtype=bool))
+        controller._percent_from_bar_mask_result = Mock(
+            side_effect=[
+                (25.0, "OK", True),
+                (None, "尾段疑似被遮擋", False),
+            ]
+        )
+        region = (10, 20, 100, 12)
+
+        first_percent = controller._capture_bar_percent_from_region(region, "hp", require_clear_tail=True)
+        second_percent = controller._capture_bar_percent_from_region(region, "hp", require_clear_tail=True)
+
+        self.assertEqual(first_percent, 25.0)
+        self.assertIsNone(second_percent)
+        debug = controller.last_bar_debug["hp"]
+        self.assertFalse(debug.success)
+        self.assertEqual(debug.reason, "尾段疑似被遮擋")
 
     def test_bgra_image_to_ppm_data_scales_preview(self):
         image = np.array([[[10, 20, 30, 255]]], dtype=np.uint8)
@@ -124,3 +204,97 @@ class BarDetectionDebugTests(unittest.TestCase):
             self.assertEqual(photo.height(), 2)
         finally:
             root.destroy()
+
+    def test_bgra_image_to_ppm_data_can_render_fixed_preview_size(self):
+        image = np.array([[[10, 20, 30, 255], [40, 50, 60, 255]]], dtype=np.uint8)
+
+        data = bgra_image_to_ppm_data(image, target_size=(6, 4))
+
+        self.assertTrue(data.startswith(b"P6\n6 4\n255\n"))
+        self.assertEqual(len(data.split(b"\n", 3)[3]), 6 * 4 * 3)
+
+    def test_refresh_bar_preview_keeps_previous_image_when_preview_is_incomplete(self):
+        gui = AutoPotionSettingsGui.__new__(AutoPotionSettingsGui)
+        gui.bar_preview_provider = Mock(
+            return_value={
+                "hp": {"image": b"P6\n1 1\n255\n\x00\x00\x00"},
+                "mp": {"image": None, "error": "尚無可預覽的偵測區域"},
+            }
+        )
+        gui.bar_preview_labels = {"hp": Mock(), "mp": Mock()}
+        previous_images = [object()]
+        gui.bar_preview_images = previous_images
+        gui.bar_preview_has_snapshot = True
+        gui.set_status = Mock()
+
+        gui._refresh_bar_preview(make_target_topmost=True)
+
+        self.assertIs(gui.bar_preview_images, previous_images)
+        gui.bar_preview_labels["hp"].configure.assert_not_called()
+        gui.bar_preview_labels["mp"].configure.assert_not_called()
+        gui.set_status.assert_called_once_with("HP/MP 預覽未更新：尚未同時抓到 HP/MP 條")
+
+    def test_target_process_name_uses_msw_executable_not_window_title(self):
+        self.assertEqual(normalize_process_name("msw"), "msw.exe")
+        self.assertTrue(is_target_process_name("msw.exe"))
+        self.assertFalse(is_target_process_name("chrome.exe"))
+        self.assertFalse(is_target_process_name("Discord.exe"))
+
+    def test_pause_and_function_keys_are_detectable_for_control_hotkeys(self):
+        self.assertEqual(vk_to_key_name(0x13), "Pause")
+        self.assertIn(0x13, DETECTABLE_KEY_VKS)
+        self.assertIn(0x7A, DETECTABLE_KEY_VKS)
+        self.assertIn(0x7B, DETECTABLE_KEY_VKS)
+
+    def test_capture_bar_preview_rejects_screenshot_without_bar_colors(self):
+        controller = self.make_controller()
+        controller.last_bar_debug["hp"].region = (1, 2, 3, 4)
+        controller.last_bar_debug["mp"].region = (5, 6, 7, 8)
+        controller.last_target_hwnd = 123
+        controller.target_window_provider = Mock(return_value=123)
+        controller.sct = Mock()
+        controller.sct.grab.return_value = np.zeros((4, 10, 4), dtype=np.uint8)
+        controller._wait_for_preview_target_ready = Mock(return_value=True)
+
+        @contextmanager
+        def ready_topmost(_hwnd):
+            yield True
+
+        import maple_star.controller as controller_module
+
+        original_topmost = controller_module.temporarily_make_window_topmost
+        controller_module.temporarily_make_window_topmost = ready_topmost
+        try:
+            previews = controller.capture_bar_preview_images(make_target_topmost=True)
+        finally:
+            controller_module.temporarily_make_window_topmost = original_topmost
+
+        self.assertIsNone(previews["hp"]["image"])
+        self.assertIsNone(previews["mp"]["image"])
+        self.assertEqual(previews["hp"]["error"], "預覽截圖未通過 HP/MP 色條驗證")
+
+    def test_capture_bar_preview_fails_when_target_window_cannot_be_displayed(self):
+        controller = self.make_controller()
+        controller.last_bar_debug["hp"].region = (1, 2, 3, 4)
+        controller.last_bar_debug["mp"].region = (5, 6, 7, 8)
+        controller.last_target_hwnd = 123
+        controller.target_window_provider = Mock(return_value=123)
+        controller.sct = Mock()
+
+        @contextmanager
+        def failed_topmost(_hwnd):
+            yield False
+
+        import maple_star.controller as controller_module
+
+        original_topmost = controller_module.temporarily_make_window_topmost
+        controller_module.temporarily_make_window_topmost = failed_topmost
+        try:
+            previews = controller.capture_bar_preview_images(make_target_topmost=True)
+        finally:
+            controller_module.temporarily_make_window_topmost = original_topmost
+
+        self.assertIsNone(previews["hp"]["image"])
+        self.assertIsNone(previews["mp"]["image"])
+        self.assertEqual(previews["hp"]["error"], "無法顯示目標遊戲視窗，預覽未更新")
+        controller.sct.grab.assert_not_called()
