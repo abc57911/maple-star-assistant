@@ -1,15 +1,26 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import sys
 import time
 import tkinter as tk
 from ctypes import wintypes
-from tkinter import messagebox, simpledialog, ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .constants import MAX_CONSOLE_LINES
 from .key_capture import DETECTABLE_KEY_VKS, event_to_hotkey, pressed_detectable_vks, vk_to_key_name
-from .settings import AutoPotionSettings, CONTROLLER_BUTTON_CHOICES, normalize_controller_button_name, normalize_profile_name
+from .settings import (
+    SETTINGS_PATH,
+    AutoPotionSettings,
+    CONTROLLER_BUTTON_CHOICES,
+    copy_setting_values,
+    load_settings,
+    normalize_controller_button_name,
+    normalize_profile_name,
+    save_settings,
+)
 from .win_input import Point, parse_vk_key, user32
 
 class GuiConsoleWriter:
@@ -102,7 +113,9 @@ class AutoPotionSettingsGui:
         self.profile_select.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=(0, 4))
         self.profile_select.bind("<<ComboboxSelected>>", self._switch_profile)
         ttk.Button(profile_frame, text="新增", command=self.create_profile).grid(row=0, column=2, sticky="w", padx=(0, 4), pady=(0, 4))
-        ttk.Button(profile_frame, text="刪除", command=self.delete_profile).grid(row=0, column=3, sticky="w", pady=(0, 4))
+        ttk.Button(profile_frame, text="刪除", command=self.delete_profile).grid(row=0, column=3, sticky="w", padx=(0, 4), pady=(0, 4))
+        ttk.Button(profile_frame, text="匯入", command=self.import_settings).grid(row=0, column=4, sticky="w", padx=(0, 4), pady=(0, 4))
+        ttk.Button(profile_frame, text="匯出", command=self.export_settings).grid(row=0, column=5, sticky="w", pady=(0, 4))
 
         controls = ttk.Frame(frame)
         controls.grid(row=1, column=0, sticky="ew")
@@ -340,6 +353,49 @@ class AutoPotionSettingsGui:
             return
         self._sync_vars_from_settings()
         self.set_status(f"已刪除設定檔：{profile_name}")
+
+    def export_settings(self) -> None:
+        self.apply_to_settings()
+        self.settings.save_current_profile()
+        path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="匯出設定",
+            defaultextension=".json",
+            filetypes=(("JSON 設定檔", "*.json"), ("所有檔案", "*.*")),
+            initialfile="maple-star-settings.json",
+        )
+        if not path:
+            return
+        try:
+            save_settings(self.settings, Path(path))
+        except OSError as exc:
+            self.set_status(f"匯出設定失敗：{exc}")
+            return
+        self.set_status(f"已匯出設定：{path}")
+
+    def import_settings(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="匯入設定",
+            filetypes=(("JSON 設定檔", "*.json"), ("所有檔案", "*.*")),
+        )
+        if not path:
+            return
+        try:
+            raw = Path(path).read_text(encoding="utf-8")
+            if not isinstance(json.loads(raw), dict):
+                raise ValueError("設定檔根節點必須是 JSON object")
+            imported = load_settings(Path(path), save_migrations=False)
+            copy_setting_values(imported, self.settings)
+            self.settings.active_profile = imported.active_profile
+            self.settings.profiles = imported.profiles
+            save_settings(self.settings, SETTINGS_PATH)
+        except Exception as exc:
+            self.set_status(f"匯入設定失敗：{exc}")
+            return
+
+        self._sync_vars_from_settings()
+        self.set_status(f"已匯入設定：{path}")
 
     def start_key_detection(self, target: tk.StringVar, label: str) -> str:
         self.cancel_key_detection()

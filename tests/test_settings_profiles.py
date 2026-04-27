@@ -27,6 +27,19 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertIn("Default", saved["profiles"])
         self.assertEqual(saved["profiles"]["Default"]["hp_key"], "9")
 
+    def test_load_settings_can_skip_writing_migrations(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            original = json.dumps({"hp_key": "9"})
+            settings_path.write_text(original, encoding="utf-8")
+
+            with patch("builtins.print"):
+                settings = load_settings(settings_path, save_migrations=False)
+            saved = settings_path.read_text(encoding="utf-8")
+
+        self.assertEqual(settings.hp_key, "9")
+        self.assertEqual(saved, original)
+
     def test_apply_profile_saves_current_profile_before_switching(self):
         settings = AutoPotionSettings(hp_key="9", active_profile="Main")
         settings.save_current_profile()
