@@ -5,6 +5,7 @@ import sys
 import time
 import winsound
 from ctypes import wintypes
+from dataclasses import dataclass
 from typing import Callable
 
 import mss
@@ -60,6 +61,19 @@ from .gui import AutoPotionSettingsGui, GuiConsoleWriter
 from .settings import AutoPotionSettings, load_settings, save_settings
 from .win_input import Msg, Point, tap_hotkey, user32
 
+
+@dataclass
+class BarDetectionDebug:
+    bar_type: str
+    source: str = "--"
+    region: tuple[int, int, int, int] | None = None
+    percent: float | None = None
+    success: bool = False
+    reason: str = "尚未偵測"
+    require_clear_tail: bool = False
+    tail_clear: bool | None = None
+
+
 def normalize_bar_percent(percent: float) -> float:
     percent = max(0.0, min(100.0, percent))
     if percent >= FULL_BAR_SNAP_PERCENT:
@@ -102,6 +116,10 @@ class AutoPotionController:
         self.last_toggle_hotkey_at = -999.0
         self.emergency_stop_requested = False
         self.last_action = "啟動"
+        self.last_bar_debug: dict[str, BarDetectionDebug] = {
+            "hp": BarDetectionDebug("hp"),
+            "mp": BarDetectionDebug("mp"),
+        }
         self.bottom_bar_regions: dict[str, tuple[int, int, int, int]] = {}
         self.bottom_bar_regions_at = -999.0
         self.fade_guard_hits = 0
@@ -261,6 +279,10 @@ class AutoPotionController:
             hp_percent = self._capture_bar_percent(HP_BAR_REGION, "hp")
             mp_percent = self._capture_bar_percent(MP_BAR_REGION, "mp")
             self.gui.set_current_percentages(hp_percent, mp_percent)
+            self.gui.set_bar_detection_debug(
+                self._bar_detection_debug_text("hp"),
+                self._bar_detection_debug_text("mp"),
+            )
             if hp_percent is None or mp_percent is None:
                 self.gui.set_status("HP/MP 條偵測不穩定，略過錯誤取樣")
             else:
@@ -359,23 +381,43 @@ class AutoPotionController:
     ) -> float | None:
         paired_region = self._find_bottom_bar_pair_regions().get(bar_type)
         if paired_region is not None:
-            percent = self._capture_bar_percent_from_region(paired_region, bar_type, require_clear_tail)
+            percent = self._capture_bar_percent_from_region(
+                paired_region,
+                bar_type,
+                require_clear_tail,
+                "成對搜尋",
+            )
             if percent is not None:
                 return percent
 
         left, top, width, height = self._scale_region_to_foreground_client(base_region)
-        percent = self._capture_bar_percent_from_region((left, top, width, height), bar_type, require_clear_tail)
+        percent = self._capture_bar_percent_from_region(
+            (left, top, width, height),
+            bar_type,
+            require_clear_tail,
+            "client 比例縮放",
+        )
         if percent is not None:
             return percent
 
         dynamic_region = self._find_bar_region_near_bottom(bar_type)
         if dynamic_region is not None:
-            percent = self._capture_bar_percent_from_region(dynamic_region, bar_type, require_clear_tail)
+            percent = self._capture_bar_percent_from_region(
+                dynamic_region,
+                bar_type,
+                require_clear_tail,
+                "底部動態搜尋",
+            )
             if percent is not None:
                 return percent
 
         left, top, width, height = self._scale_region_to_foreground_game(base_region)
-        return self._capture_bar_percent_from_region((left, top, width, height), bar_type, require_clear_tail)
+        return self._capture_bar_percent_from_region(
+            (left, top, width, height),
+            bar_type,
+            require_clear_tail,
+            "game bounds fallback",
+        )
 
     def _find_bottom_bar_pair_regions(self) -> dict[str, tuple[int, int, int, int]]:
         now = time.monotonic()
@@ -458,11 +500,23 @@ class AutoPotionController:
         region: tuple[int, int, int, int],
         bar_type: str,
         require_clear_tail: bool = False,
+        source: str = "指定區域",
     ) -> float | None:
         left, top, width, height = region
         image = np.asarray(self.sct.grab({"left": left, "top": top, "width": width, "height": height}))
         mask = self._bar_color_mask(image, bar_type)
-        return self._percent_from_bar_mask(mask, image, require_clear_tail)
+        percent, reason, tail_clear = self._percent_from_bar_mask_result(mask, image, require_clear_tail)
+        self._set_bar_detection_debug(
+            bar_type,
+            source=source,
+            region=region,
+            percent=percent,
+            success=percent is not None,
+            reason=reason,
+            require_clear_tail=require_clear_tail,
+            tail_clear=tail_clear,
+        )
+        return percent
 
     def _percent_from_bar_mask(
         self,
@@ -470,16 +524,25 @@ class AutoPotionController:
         image: np.ndarray | None = None,
         require_clear_tail: bool = False,
     ) -> float | None:
+        percent, _reason, _tail_clear = self._percent_from_bar_mask_result(mask, image, require_clear_tail)
+        return percent
+
+    def _percent_from_bar_mask_result(
+        self,
+        mask: np.ndarray,
+        image: np.ndarray | None = None,
+        require_clear_tail: bool = False,
+    ) -> tuple[float | None, str, bool | None]:
         _height, width = mask.shape
         column_filled = mask.mean(axis=0) > BAR_COLUMN_FILL_MIN_RATIO
         filled_indexes = np.flatnonzero(column_filled)
         if filled_indexes.size == 0:
-            return None
+            return None, "找不到符合顏色的填滿欄位", None
 
         left_tolerance = max(2, round(width * BAR_LEFT_EDGE_TOLERANCE_RATIO))
         first_filled = int(filled_indexes[0])
         if first_filled > left_tolerance:
-            return None
+            return None, f"左邊界不符：first={first_filled}", None
 
         closed_columns = column_filled.copy()
         max_gap = max(1, round(width * BAR_MAX_INTERNAL_GAP_RATIO))
@@ -495,19 +558,55 @@ class AutoPotionController:
 
         segment_width = end - start + 1
         if segment_width <= 0:
-            return None
+            return None, "填滿區段寬度無效", None
 
         segment_density = float(column_filled[start : end + 1].mean())
         if segment_density < BAR_MIN_SEGMENT_DENSITY:
-            return None
+            return None, f"區段密度過低：{segment_density:.2f}", None
 
         if not self._bar_run_has_horizontal_body(mask, start, end):
-            return None
+            return None, "水平 body 不足", None
 
-        if require_clear_tail and image is not None and self._bar_tail_looks_obstructed(image, end):
-            return None
+        tail_clear: bool | None = None
+        if require_clear_tail and image is not None:
+            tail_clear = not self._bar_tail_looks_obstructed(image, end)
+            if not tail_clear:
+                return None, "尾段疑似被遮擋", tail_clear
 
-        return normalize_bar_percent(float((end + 1) / width * 100.0))
+        return normalize_bar_percent(float((end + 1) / width * 100.0)), "OK", tail_clear
+
+    def _set_bar_detection_debug(
+        self,
+        bar_type: str,
+        *,
+        source: str,
+        region: tuple[int, int, int, int] | None,
+        percent: float | None,
+        success: bool,
+        reason: str,
+        require_clear_tail: bool,
+        tail_clear: bool | None,
+    ) -> None:
+        self.last_bar_debug[bar_type] = BarDetectionDebug(
+            bar_type=bar_type,
+            source=source,
+            region=region,
+            percent=percent,
+            success=success,
+            reason=reason,
+            require_clear_tail=require_clear_tail,
+            tail_clear=tail_clear,
+        )
+
+    def _bar_detection_debug_text(self, bar_type: str) -> str:
+        debug = self.last_bar_debug.get(bar_type, BarDetectionDebug(bar_type))
+        label = "HP" if bar_type == "hp" else "MP"
+        percent = "--" if debug.percent is None else f"{debug.percent:.0f}%"
+        region = "--" if debug.region is None else ",".join(str(value) for value in debug.region)
+        tail = ""
+        if debug.require_clear_tail:
+            tail = " | tail=OK" if debug.tail_clear else " | tail=FAIL"
+        return f"{label}: {debug.source} | {percent} | {region} | {debug.reason}{tail}"
 
     def _bar_run_has_horizontal_body(self, mask: np.ndarray, start: int, end: int) -> bool:
         if end < start:
