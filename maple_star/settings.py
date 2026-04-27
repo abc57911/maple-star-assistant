@@ -69,6 +69,11 @@ def normalize_region_override(value: object) -> tuple[int, int, int, int] | None
     return left, top, width, height
 
 
+def offset_region(region: tuple[int, int, int, int], dx: int = 0, dy: int = 0) -> tuple[int, int, int, int]:
+    left, top, width, height = region
+    return max(0, left + dx), max(0, top + dy), width, height
+
+
 @dataclass
 class AutoPotionSettings:
     hp_enabled: bool = True
