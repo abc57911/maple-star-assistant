@@ -12,6 +12,41 @@ def app_base_dir() -> Path:
 
 
 SETTINGS_PATH = app_base_dir() / "settings.json"
+CONTROLLER_BUTTON_CHOICES = (
+    "A",
+    "B",
+    "X",
+    "Y",
+    "LB",
+    "RB",
+    "BACK",
+    "START",
+    "HOME",
+    "L3",
+    "R3",
+    "DPAD_UP",
+    "DPAD_DOWN",
+    "DPAD_LEFT",
+    "DPAD_RIGHT",
+)
+CONTROLLER_BUTTON_ALIASES = {
+    "LEFT_SHOULDER": "LB",
+    "RIGHT_SHOULDER": "RB",
+    "GUIDE": "HOME",
+    "SELECT": "BACK",
+}
+
+
+def normalize_controller_button_name(value: object, fallback: str) -> str:
+    if not isinstance(value, str):
+        return fallback
+    normalized = value.strip().upper().replace(" ", "_").replace("-", "_")
+    normalized = CONTROLLER_BUTTON_ALIASES.get(normalized, normalized)
+    if normalized in CONTROLLER_BUTTON_CHOICES:
+        return normalized
+    return fallback
+
+
 @dataclass
 class AutoPotionSettings:
     hp_enabled: bool = True
@@ -25,14 +60,16 @@ class AutoPotionSettings:
     mp_cooldown_seconds: float = 0.2
     rb_jump_key: str = "X"
     rb_skill_key: str = "C"
+    rb_controller_button: str = "RB"
     rb_skill_delay_seconds: float = 0.2
     rb_jump_interval_seconds: float = 0.66
     lb_enabled: bool = False
     lb_jump_key: str = "X"
     lb_skill_key: str = "C"
+    lb_controller_button: str = "LB"
     lb_skill_delay_seconds: float = 0.2
 
-    def snapshot(self) -> tuple[bool, bool, bool, float, float, str, str, float, float, str, str, float, float, bool, str, str, float]:
+    def snapshot(self) -> tuple[bool, bool, bool, float, float, str, str, float, float, str, str, str, float, float, bool, str, str, str, float]:
         return (
             self.hp_enabled,
             self.mp_enabled,
@@ -45,11 +82,13 @@ class AutoPotionSettings:
             self.mp_cooldown_seconds,
             self.rb_jump_key,
             self.rb_skill_key,
+            self.rb_controller_button,
             self.rb_skill_delay_seconds,
             self.rb_jump_interval_seconds,
             self.lb_enabled,
             self.lb_jump_key,
             self.lb_skill_key,
+            self.lb_controller_button,
             self.lb_skill_delay_seconds,
         )
 
@@ -66,11 +105,13 @@ class AutoPotionSettings:
             "mp_cooldown_seconds": self.mp_cooldown_seconds,
             "rb_jump_key": self.rb_jump_key,
             "rb_skill_key": self.rb_skill_key,
+            "rb_controller_button": self.rb_controller_button,
             "rb_skill_delay_seconds": self.rb_skill_delay_seconds,
             "rb_jump_interval_seconds": self.rb_jump_interval_seconds,
             "lb_enabled": self.lb_enabled,
             "lb_jump_key": self.lb_jump_key,
             "lb_skill_key": self.lb_skill_key,
+            "lb_controller_button": self.lb_controller_button,
             "lb_skill_delay_seconds": self.lb_skill_delay_seconds,
         }
 
@@ -127,11 +168,13 @@ def load_settings(path: Path = SETTINGS_PATH) -> AutoPotionSettings:
         mp_cooldown_seconds=_read_float(raw, "mp_cooldown_seconds", settings.mp_cooldown_seconds, 0.05, 60.0),
         rb_jump_key=_read_string(raw, "rb_jump_key", settings.rb_jump_key),
         rb_skill_key=_read_string(raw, "rb_skill_key", settings.rb_skill_key),
+        rb_controller_button=normalize_controller_button_name(raw.get("rb_controller_button"), settings.rb_controller_button),
         rb_skill_delay_seconds=_read_float(raw, "rb_skill_delay_seconds", settings.rb_skill_delay_seconds, 0.0, 10.0),
         rb_jump_interval_seconds=_read_float(raw, "rb_jump_interval_seconds", settings.rb_jump_interval_seconds, 0.05, 10.0),
         lb_enabled=_read_bool(raw, "lb_enabled", settings.lb_enabled),
         lb_jump_key=_read_string(raw, "lb_jump_key", settings.lb_jump_key),
         lb_skill_key=_read_string(raw, "lb_skill_key", settings.lb_skill_key),
+        lb_controller_button=normalize_controller_button_name(raw.get("lb_controller_button"), settings.lb_controller_button),
         lb_skill_delay_seconds=_read_float(raw, "lb_skill_delay_seconds", settings.lb_skill_delay_seconds, 0.0, 10.0),
     )
     expected = loaded_settings.to_json_dict()

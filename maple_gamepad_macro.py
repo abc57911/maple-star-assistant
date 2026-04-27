@@ -17,35 +17,44 @@ except ImportError:
 
 
 TARGET_TITLE_KEYWORD = "MapleStory Worlds"
-RB_BUTTON = pygame.CONTROLLER_BUTTON_RIGHTSHOULDER
-LB_BUTTON = pygame.CONTROLLER_BUTTON_LEFTSHOULDER
 JUMP_KEY_HOLD_SECONDS = 0.05
 POLL_INTERVAL_SECONDS = 0.01
 MACRO_TIMING_GUARD_SECONDS = 0.12
 
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
-BUTTON_NAMES = {
-    pygame.CONTROLLER_BUTTON_A: "A",
-    pygame.CONTROLLER_BUTTON_B: "B",
-    pygame.CONTROLLER_BUTTON_X: "X",
-    pygame.CONTROLLER_BUTTON_Y: "Y",
-    pygame.CONTROLLER_BUTTON_LEFTSHOULDER: "LB",
-    pygame.CONTROLLER_BUTTON_RIGHTSHOULDER: "RB",
-    pygame.CONTROLLER_BUTTON_BACK: "BACK",
-    pygame.CONTROLLER_BUTTON_START: "START",
-    pygame.CONTROLLER_BUTTON_GUIDE: "HOME",
-    pygame.CONTROLLER_BUTTON_LEFTSTICK: "L3",
-    pygame.CONTROLLER_BUTTON_RIGHTSTICK: "R3",
-    pygame.CONTROLLER_BUTTON_DPAD_UP: "DPAD_UP",
-    pygame.CONTROLLER_BUTTON_DPAD_DOWN: "DPAD_DOWN",
-    pygame.CONTROLLER_BUTTON_DPAD_LEFT: "DPAD_LEFT",
-    pygame.CONTROLLER_BUTTON_DPAD_RIGHT: "DPAD_RIGHT",
+VK_DISPLAY_NAMES = {
+    0x2E: "Delete",
+    0x23: "End",
 }
+for code in range(0x30, 0x3A):
+    VK_DISPLAY_NAMES[code] = chr(code)
+for code in range(0x41, 0x5B):
+    VK_DISPLAY_NAMES[code] = chr(code)
+for index in range(1, 25):
+    VK_DISPLAY_NAMES[0x70 + index - 1] = f"F{index}"
+TRACKED_HELD_KEYS: set[int] = set()
+CONTROLLER_BUTTONS_BY_NAME = {
+    "A": pygame.CONTROLLER_BUTTON_A,
+    "B": pygame.CONTROLLER_BUTTON_B,
+    "X": pygame.CONTROLLER_BUTTON_X,
+    "Y": pygame.CONTROLLER_BUTTON_Y,
+    "LB": pygame.CONTROLLER_BUTTON_LEFTSHOULDER,
+    "RB": pygame.CONTROLLER_BUTTON_RIGHTSHOULDER,
+    "BACK": pygame.CONTROLLER_BUTTON_BACK,
+    "START": pygame.CONTROLLER_BUTTON_START,
+    "HOME": pygame.CONTROLLER_BUTTON_GUIDE,
+    "L3": pygame.CONTROLLER_BUTTON_LEFTSTICK,
+    "R3": pygame.CONTROLLER_BUTTON_RIGHTSTICK,
+    "DPAD_UP": pygame.CONTROLLER_BUTTON_DPAD_UP,
+    "DPAD_DOWN": pygame.CONTROLLER_BUTTON_DPAD_DOWN,
+    "DPAD_LEFT": pygame.CONTROLLER_BUTTON_DPAD_LEFT,
+    "DPAD_RIGHT": pygame.CONTROLLER_BUTTON_DPAD_RIGHT,
+}
+BUTTON_NAMES = {button: name for name, button in CONTROLLER_BUTTONS_BY_NAME.items()}
 
 
 class ControllerButtonBinding(Protocol):
-    button: int
     name: str
 
     def on_button_down(self) -> None: ...
@@ -168,6 +177,7 @@ def key_down(vk_code: int) -> None:
     sent = user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(Input))
     if sent != 1:
         raise ctypes.WinError(ctypes.get_last_error())
+    TRACKED_HELD_KEYS.add(vk_code)
 
 
 def key_up(vk_code: int) -> None:
@@ -175,10 +185,29 @@ def key_up(vk_code: int) -> None:
     sent = user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(Input))
     if sent != 1:
         raise ctypes.WinError(ctypes.get_last_error())
+    TRACKED_HELD_KEYS.discard(vk_code)
+
+
+def key_display_name(vk_code: int) -> str:
+    return VK_DISPLAY_NAMES.get(vk_code, f"VK{vk_code}")
+
+
+def tracked_held_keys_text() -> str:
+    if not TRACKED_HELD_KEYS:
+        return "--"
+    return ", ".join(key_display_name(vk_code) for vk_code in sorted(TRACKED_HELD_KEYS))
+
+
+def release_tracked_keys() -> None:
+    for vk_code in tuple(TRACKED_HELD_KEYS):
+        try:
+            key_up(vk_code)
+        except Exception as exc:
+            print(f"釋放按鍵 {key_display_name(vk_code)} 失敗：{exc}")
+            TRACKED_HELD_KEYS.discard(vk_code)
 
 
 class RBJumpSlashMacro:
-    button = RB_BUTTON
     name = "RB"
 
     def __init__(self, settings: AutoPotionSettings) -> None:
@@ -335,9 +364,21 @@ class RBJumpSlashMacro:
         if was_active:
             print(f"停止 {self.name} function")
 
+    def status_text(self) -> str:
+        if not self.active:
+            return ""
+        state = []
+        if self.x_is_down:
+            key_name = key_display_name(self.held_jump_vk) if self.held_jump_vk is not None else "jump"
+            state.append(f"{key_name} down")
+        if self.next_c_at is not None:
+            state.append("待技能")
+        if self.rb_is_down:
+            state.append("循環")
+        return f"{self.name}({', '.join(state) or 'active'})"
+
 
 class LBJumpSkillMacro:
-    button = LB_BUTTON
     name = "LB"
 
     def __init__(self, settings: AutoPotionSettings) -> None:
@@ -428,6 +469,17 @@ class LBJumpSkillMacro:
             self.jump_is_down = False
             self.held_jump_vk = None
 
+    def status_text(self) -> str:
+        if not self.active:
+            return ""
+        state = []
+        if self.jump_is_down:
+            key_name = key_display_name(self.held_jump_vk) if self.held_jump_vk is not None else "jump"
+            state.append(f"{key_name} down")
+        if self.skill_at is not None:
+            state.append("待技能")
+        return f"{self.name}({', '.join(state) or 'active'})"
+
     def _parse_configured_key(self, key: str, label: str) -> int | None:
         try:
             return parse_vk_key(key)
@@ -460,20 +512,58 @@ def main() -> None:
     controllers_by_id = open_connected_controllers()
     rb_macro = RBJumpSlashMacro(auto_potion.settings)
     lb_macro = LBJumpSkillMacro(auto_potion.settings)
-    controller_button_bindings: dict[int, ControllerButtonBinding] = {
-        rb_macro.button: rb_macro,
-        lb_macro.button: lb_macro,
-    }
+    all_button_bindings: tuple[ControllerButtonBinding, ...] = (rb_macro, lb_macro)
+    controller_button_bindings: dict[int, ControllerButtonBinding] = {}
+    current_controller_button_settings: tuple[str, str, bool, bool] | None = None
 
     print("只在 MapleStory Worlds 為前景視窗時生效。")
-    print("RB 按住時腳本每 0.66 秒短按 X 跳躍，並在每次跳躍 0.2 秒後按 C。按 Ctrl+C 結束。")
-    print("LB 按下時腳本跳躍一次，並在設定延遲後按技能鍵。")
+    print(
+        f"RB function 由 {auto_potion.settings.rb_controller_button} 觸發，每 "
+        f"{auto_potion.settings.rb_jump_interval_seconds:g} 秒短按 "
+        f"{auto_potion.settings.rb_jump_key} 跳躍，並在每次跳躍 "
+        f"{auto_potion.settings.rb_skill_delay_seconds:g} 秒後按 {auto_potion.settings.rb_skill_key}。"
+    )
+    print(f"LB function 由 {auto_potion.settings.lb_controller_button} 觸發，按下時腳本跳躍一次，並在設定延遲後按技能鍵。")
     print("自動喝水設定視窗已開啟，可即時調整 HP/MP 閾值、快捷鍵與冷卻時間。")
-    print("按 F11 可暫停/恢復所有腳本功能。")
+    print("按 F11 可暫停/恢復所有腳本功能；按 F12 可硬停止並釋放按鍵。按 Ctrl+C 結束。")
+
+    def configured_controller_button(button_name_value: str) -> int | None:
+        return CONTROLLER_BUTTONS_BY_NAME.get(button_name_value)
+
+    def sync_controller_button_bindings() -> None:
+        nonlocal controller_button_bindings, current_controller_button_settings
+        new_settings = (
+            auto_potion.settings.rb_controller_button,
+            auto_potion.settings.lb_controller_button,
+            auto_potion.settings.rb_enabled,
+            auto_potion.settings.lb_enabled,
+        )
+        if current_controller_button_settings == new_settings:
+            return
+
+        if current_controller_button_settings is not None:
+            stop_all_bindings("手把觸發鍵設定已變更，停止目前巨集並重建綁定")
+
+        bindings: dict[int, ControllerButtonBinding] = {}
+        rb_button = configured_controller_button(auto_potion.settings.rb_controller_button)
+        lb_button = configured_controller_button(auto_potion.settings.lb_controller_button)
+        if auto_potion.settings.rb_enabled and rb_button is not None:
+            bindings[rb_button] = rb_macro
+        if auto_potion.settings.lb_enabled and lb_button is not None:
+            if lb_button in bindings:
+                lb_macro.stop()
+                print(
+                    f"LB function 觸發鍵 {auto_potion.settings.lb_controller_button} "
+                    "與 RB function 重複，已略過 LB 綁定"
+                )
+            else:
+                bindings[lb_button] = lb_macro
+        controller_button_bindings = bindings
+        current_controller_button_settings = new_settings
 
     def update_active_bindings() -> None:
         now = time.monotonic()
-        for binding in controller_button_bindings.values():
+        for binding in all_button_bindings:
             if not auto_potion.scripts_enabled:
                 continue
             if binding is rb_macro and not auto_potion.settings.rb_enabled:
@@ -482,9 +572,34 @@ def main() -> None:
                 continue
             binding.update(now)
 
+    def stop_all_bindings(reason: str) -> None:
+        print(reason)
+        for binding in all_button_bindings:
+            binding.stop()
+        release_tracked_keys()
+
+    def macro_status_text() -> str:
+        statuses = []
+        for binding in all_button_bindings:
+            status_text = getattr(binding, "status_text", lambda: "")()
+            if status_text:
+                statuses.append(status_text)
+        return " / ".join(statuses) if statuses else "--"
+
+    def refresh_runtime_info() -> None:
+        title = foreground_window_title()
+        auto_potion.gui.set_runtime_info(
+            scripts_enabled=auto_potion.scripts_enabled,
+            target_active=TARGET_TITLE_KEYWORD in title,
+            foreground_title=title,
+            macro_status=macro_status_text(),
+            held_keys=tracked_held_keys_text(),
+            last_action=auto_potion.last_action,
+        )
+
     def next_binding_deadline_at() -> float | None:
         deadlines: list[float] = []
-        for binding in controller_button_bindings.values():
+        for binding in all_button_bindings:
             if not auto_potion.scripts_enabled:
                 continue
             if binding is rb_macro and not auto_potion.settings.rb_enabled:
@@ -500,12 +615,18 @@ def main() -> None:
 
     try:
         while True:
+            sync_controller_button_bindings()
+            auto_potion.poll_control_hotkeys()
+            if auto_potion.consume_emergency_stop_requested():
+                stop_all_bindings("F12：停止所有手把巨集並釋放按鍵")
             update_active_bindings()
 
             now = time.monotonic()
             next_deadline = next_binding_deadline_at()
             if next_deadline is None or next_deadline - now > MACRO_TIMING_GUARD_SECONDS:
                 auto_potion.update(now)
+                if auto_potion.consume_emergency_stop_requested():
+                    stop_all_bindings("F12：停止所有手把巨集並釋放按鍵")
             if auto_potion.is_closed():
                 break
 
@@ -515,6 +636,7 @@ def main() -> None:
                 lb_macro.stop()
 
             update_active_bindings()
+            refresh_runtime_info()
 
             for event in pygame.event.get():
                 if event.type == pygame.CONTROLLERDEVICEADDED:
@@ -528,7 +650,7 @@ def main() -> None:
                     pad = controllers_by_id.pop(controller_id, None)
                     name = pad.name if pad else "unknown"
                     print(f"[C{controller_id}] 已斷線：{name}")
-                    for binding in controller_button_bindings.values():
+                    for binding in all_button_bindings:
                         binding.stop()
 
                 elif event.type == pygame.CONTROLLERBUTTONDOWN:
@@ -562,8 +684,9 @@ def main() -> None:
             time.sleep(POLL_INTERVAL_SECONDS)
     finally:
         auto_potion.cleanup()
-        for binding in controller_button_bindings.values():
+        for binding in all_button_bindings:
             binding.cleanup()
+        release_tracked_keys()
 
 
 if __name__ == "__main__":
