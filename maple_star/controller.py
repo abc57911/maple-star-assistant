@@ -117,7 +117,6 @@ class AutoPotionController:
         self.settings = settings or load_settings()
         self.gui = AutoPotionSettingsGui(self.settings)
         self.gui.set_bar_preview_provider(self.capture_bar_preview_images)
-        self.gui.set_bar_region_provider(self.current_bar_detection_regions)
         self.sct = mss.mss()
         self.next_capture_at = 0.0
         self.last_hp_drink_at = -999.0
@@ -136,7 +135,6 @@ class AutoPotionController:
             "hp": BarDetectionDebug("hp"),
             "mp": BarDetectionDebug("mp"),
         }
-        self.bar_override_warnings: dict[str, str] = {"hp": "", "mp": ""}
         self.bottom_bar_regions: dict[str, tuple[int, int, int, int]] = {}
         self.bottom_bar_regions_at = -999.0
         self.fade_guard_hits = 0
@@ -396,22 +394,6 @@ class AutoPotionController:
         bar_type: str,
         require_clear_tail: bool = False,
     ) -> float | None:
-        override_region = self._bar_region_override(bar_type)
-        if override_region is not None:
-            percent = self._capture_bar_percent_from_region(
-                override_region,
-                bar_type,
-                require_clear_tail,
-                "手動覆寫",
-            )
-            if percent is not None:
-                self.bar_override_warnings[bar_type] = ""
-                return percent
-            reason = self.last_bar_debug.get(bar_type, BarDetectionDebug(bar_type)).reason
-            self.bar_override_warnings[bar_type] = f"手動覆寫失敗，已 fallback：{reason}"
-        else:
-            self.bar_override_warnings[bar_type] = ""
-
         paired_region = self._find_bottom_bar_pair_regions().get(bar_type)
         if paired_region is not None:
             percent = self._capture_bar_percent_from_region(
@@ -639,14 +621,7 @@ class AutoPotionController:
         tail = ""
         if debug.require_clear_tail:
             tail = " | tail=OK" if debug.tail_clear else " | tail=FAIL"
-        warning = getattr(self, "bar_override_warnings", {}).get(bar_type, "")
-        warning_text = f" | {warning}" if warning else ""
-        return f"{label}: {debug.source} | {percent} | {region} | {debug.reason}{tail}{warning_text}"
-
-    def _bar_region_override(self, bar_type: str) -> tuple[int, int, int, int] | None:
-        if bar_type == "hp":
-            return self.settings.hp_region_override
-        return self.settings.mp_region_override
+        return f"{label}: {debug.source} | {percent} | {region} | {debug.reason}{tail}"
 
     def current_bar_detection_regions(self) -> dict[str, tuple[int, int, int, int] | None]:
         return {
