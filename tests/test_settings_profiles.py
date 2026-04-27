@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from maple_star.settings import AutoPotionSettings, load_settings
+from maple_star.settings import AutoPotionSettings, load_settings, offset_region
 
 
 class SettingsProfileTests(unittest.TestCase):
@@ -58,6 +58,10 @@ class SettingsProfileTests(unittest.TestCase):
 
         self.assertEqual(settings.hp_region_override, (1, 2, 3, 4))
         self.assertEqual(settings.mp_region_override, (5, 6, 7, 8))
+
+    def test_offset_region_keeps_size_and_clamps_origin(self):
+        self.assertEqual(offset_region((1, 2, 3, 4), -5, -5), (0, 0, 3, 4))
+        self.assertEqual(offset_region((1, 2, 3, 4), 2, 3), (3, 5, 3, 4))
 
     def test_apply_profile_saves_current_profile_before_switching(self):
         settings = AutoPotionSettings(hp_key="9", active_profile="Main")
