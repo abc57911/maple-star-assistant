@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import ctypes
 import sys
 import time
@@ -96,7 +95,7 @@ def loading_screen_metrics(image: np.ndarray) -> tuple[float, float, float]:
     )
 
 
-def bgra_image_to_ppm_base64(image: np.ndarray, scale: int = 3) -> bytes:
+def bgra_image_to_ppm_data(image: np.ndarray, scale: int = 3) -> bytes:
     if image.ndim != 3 or image.shape[2] < 3:
         raise ValueError("預覽圖片格式無效")
     scale = max(1, int(scale))
@@ -105,7 +104,7 @@ def bgra_image_to_ppm_base64(image: np.ndarray, scale: int = 3) -> bytes:
         rgb = np.repeat(np.repeat(rgb, scale, axis=0), scale, axis=1)
     height, width, _channels = rgb.shape
     header = f"P6\n{width} {height}\n255\n".encode("ascii")
-    return base64.b64encode(header + np.ascontiguousarray(rgb).tobytes())
+    return header + np.ascontiguousarray(rgb).tobytes()
 
 
 class AutoPotionController:
@@ -684,7 +683,7 @@ class AutoPotionController:
                 previews[bar_type] = {
                     "label": label,
                     "debug": self._bar_detection_debug_text(bar_type),
-                    "image": bgra_image_to_ppm_base64(image),
+                    "image": bgra_image_to_ppm_data(image),
                     "error": "",
                 }
             except Exception as exc:
