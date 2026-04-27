@@ -1,5 +1,8 @@
 __pycache__/
 *.py[cod]
+.venv*/
+.paddleocr/
+models/
 build/
 dist/
 release/

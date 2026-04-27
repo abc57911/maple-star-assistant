@@ -1,8 +1,9 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from maple_star.controller import AutoPotionController
+from maple_star.controller import AutoPotionController, ExperienceOcrJob
 from maple_star.constants import ASYNC_KEY_DOWN_MASK
+from maple_star.experience import ExperienceSnapshot, ExperienceTextReading
 from maple_star.settings import AutoPotionSettings
 
 
@@ -79,17 +80,21 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.gui.is_detecting_key.return_value = True
         controller.toggle_hotkey_was_down = True
         controller.emergency_stop_hotkey_was_down = True
+        controller.experience_toggle_hotkey_was_down = True
         controller._discard_control_hotkey_messages = Mock()
         controller.emergency_stop = Mock()
         controller._try_toggle_scripts_enabled = Mock()
+        controller._try_toggle_experience_efficiency = Mock()
 
         controller.poll_control_hotkeys()
 
         controller._discard_control_hotkey_messages.assert_called_once()
         controller.emergency_stop.assert_not_called()
         controller._try_toggle_scripts_enabled.assert_not_called()
+        controller._try_toggle_experience_efficiency.assert_not_called()
         self.assertFalse(controller.toggle_hotkey_was_down)
         self.assertFalse(controller.emergency_stop_hotkey_was_down)
+        self.assertFalse(controller.experience_toggle_hotkey_was_down)
 
     def test_control_hotkeys_are_ignored_once_after_key_capture_finishes(self):
         controller = self.make_controller([])
@@ -99,6 +104,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._sync_control_hotkey_down_states = Mock()
         controller.emergency_stop = Mock()
         controller._try_toggle_scripts_enabled = Mock()
+        controller._try_toggle_experience_efficiency = Mock()
 
         controller.poll_control_hotkeys()
 
@@ -106,6 +112,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._sync_control_hotkey_down_states.assert_called_once()
         controller.emergency_stop.assert_not_called()
         controller._try_toggle_scripts_enabled.assert_not_called()
+        controller._try_toggle_experience_efficiency.assert_not_called()
 
     def test_control_hotkeys_stay_ignored_until_captured_key_is_released(self):
         controller = self.make_controller([])
@@ -113,11 +120,14 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.gui.consume_key_detection_finished.side_effect = [True, False, False]
         controller.registered_toggle_hotkey_vk = 0x7A
         controller.registered_emergency_stop_hotkey_vk = 0x13
+        controller.registered_experience_toggle_hotkey_vk = 0x79
         controller.toggle_hotkey_was_down = False
         controller.emergency_stop_hotkey_was_down = False
+        controller.experience_toggle_hotkey_was_down = False
         controller._discard_control_hotkey_messages = Mock()
         controller.emergency_stop = Mock()
         controller._try_toggle_scripts_enabled = Mock()
+        controller._try_toggle_experience_efficiency = Mock()
 
         with patch("maple_star.controller.user32.GetAsyncKeyState", return_value=ASYNC_KEY_DOWN_MASK):
             controller.poll_control_hotkeys()
@@ -125,8 +135,10 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         self.assertTrue(controller.control_hotkeys_suppressed_until_release)
         self.assertTrue(controller.toggle_hotkey_was_down)
+        self.assertTrue(controller.experience_toggle_hotkey_was_down)
         controller.emergency_stop.assert_not_called()
         controller._try_toggle_scripts_enabled.assert_not_called()
+        controller._try_toggle_experience_efficiency.assert_not_called()
 
         with patch("maple_star.controller.user32.GetAsyncKeyState", return_value=0):
             controller.poll_control_hotkeys()
@@ -134,6 +146,105 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertFalse(controller.control_hotkeys_suppressed_until_release)
         controller.emergency_stop.assert_not_called()
         controller._try_toggle_scripts_enabled.assert_not_called()
+        controller._try_toggle_experience_efficiency.assert_not_called()
+
+    def test_experience_hotkey_toggles_exp_efficiency(self):
+        controller = self.make_controller([])
+        controller.registered_toggle_hotkey_vk = 0x7A
+        controller.registered_emergency_stop_hotkey_vk = 0x13
+        controller.registered_experience_toggle_hotkey_vk = 0x79
+        controller.toggle_hotkey_was_down = False
+        controller.emergency_stop_hotkey_was_down = False
+        controller.experience_toggle_hotkey_was_down = False
+        controller.last_experience_toggle_hotkey_at = -999.0
+        controller._try_toggle_scripts_enabled = Mock()
+        controller.emergency_stop = Mock()
+        controller._try_toggle_experience_efficiency = Mock()
+
+        def key_state(vk_code):
+            return ASYNC_KEY_DOWN_MASK if vk_code == 0x79 else 0
+
+        with patch("maple_star.controller.user32.GetAsyncKeyState", side_effect=key_state):
+            controller.poll_control_hotkeys()
+
+        controller.emergency_stop.assert_not_called()
+        controller._try_toggle_scripts_enabled.assert_not_called()
+        controller._try_toggle_experience_efficiency.assert_called_once()
+
+    def test_toggle_experience_efficiency_preserves_statistics_when_disabling(self):
+        controller = self.make_controller([])
+        controller.settings.exp_efficiency_enabled = True
+        controller.next_experience_capture_at = 999.0
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot(sample_count=2)
+        controller._stop_experience_ocr_job = Mock()
+
+        with patch("builtins.print"):
+            controller.toggle_experience_efficiency()
+
+        controller.gui.set_exp_efficiency_enabled.assert_called_once_with(False)
+        controller._stop_experience_ocr_job.assert_called_once()
+        controller.gui.set_experience_snapshot.assert_called_once()
+        snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
+        self.assertEqual(snapshot.status, "已停用，保留統計")
+        self.assertEqual(controller.last_action, "F10 經驗統計停用")
+
+    def test_experience_ocr_uses_ui_percent_from_reading(self):
+        class DoneFuture:
+            def done(self):
+                return True
+
+            def result(self):
+                return ExperienceTextReading(current_exp=132553, percent=18.36, success=True)
+
+        controller = self.make_controller([])
+        controller.experience_ocr_job = ExperienceOcrJob(submitted_at=0.0, future=DoneFuture())
+        controller.next_experience_capture_at = 0.0
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.add_reading.return_value = True
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot(sample_count=1)
+
+        self.assertTrue(controller._process_experience_ocr_job(8.0))
+
+        controller.experience_tracker.add_reading.assert_called_once_with(8.0, 132553, 18.36)
+        controller.gui.set_experience_snapshot.assert_called_once()
+
+    def test_experience_text_region_crops_to_right_side_text_band(self):
+        controller = self.make_controller([])
+        controller.bottom_bar_regions = {
+            "hp": (486, 1025, 253, 28),
+            "mp": (795, 1025, 253, 28),
+        }
+        controller._foreground_client_bounds = Mock(return_value=(0, 0, 1920, 1080))
+
+        region = controller._experience_text_region()
+
+        self.assertIsNotNone(region)
+        assert region is not None
+        left, top, width, height = region
+        self.assertGreater(left, 486)
+        self.assertGreaterEqual(top, 1053)
+        self.assertLess(width, 1048 - 486)
+        self.assertGreaterEqual(height, 14)
+
+    def test_bottom_bar_pair_rejects_right_side_shortcut_colors(self):
+        controller = self.make_controller([])
+
+        regions = controller._bottom_bar_pair_regions_from_candidates(
+            hp_candidates=[(761, 100, 134), (179, 118, 220)],
+            mp_candidates=[(906, 100, 134), (488, 118, 220)],
+            hp_mask=None,
+            mp_mask=None,
+            search_left=307,
+            search_top=900,
+            search_width=1344,
+            search_height=180,
+            client_width=1920,
+            client_height=1080,
+        )
+
+        self.assertLess(regions["hp"][0], 700)
+        self.assertLess(regions["mp"][0], 1000)
 
 
 if __name__ == "__main__":
