@@ -61,6 +61,7 @@ class AutoPotionSettingsGui:
         self.toggle_notice_after_id: str | None = None
         self.bar_preview_window: tk.Toplevel | None = None
         self.bar_preview_provider: Callable[[], dict[str, dict[str, object]]] | None = None
+        self.bar_region_provider: Callable[[], dict[str, tuple[int, int, int, int] | None]] | None = None
         self.bar_preview_labels: dict[str, ttk.Label] = {}
         self.bar_preview_texts: dict[str, ttk.Label] = {}
         self.bar_preview_images: list[tk.PhotoImage] = []
@@ -136,7 +137,11 @@ class AutoPotionSettingsGui:
         detection_frame.columnconfigure(0, weight=1)
         ttk.Label(detection_frame, textvariable=self.hp_detection_status).grid(row=0, column=0, sticky="w", padx=8, pady=(4, 2))
         ttk.Label(detection_frame, textvariable=self.mp_detection_status).grid(row=1, column=0, sticky="w", padx=8, pady=(2, 4))
-        ttk.Button(detection_frame, text="預覽", command=self.show_bar_preview).grid(row=0, column=1, rowspan=2, sticky="e", padx=8, pady=4)
+        ttk.Button(detection_frame, text="鎖定HP", command=lambda: self.lock_bar_region("hp")).grid(row=0, column=1, sticky="e", padx=(8, 2), pady=(4, 2))
+        ttk.Button(detection_frame, text="清除HP", command=lambda: self.clear_bar_region("hp")).grid(row=0, column=2, sticky="e", padx=2, pady=(4, 2))
+        ttk.Button(detection_frame, text="鎖定MP", command=lambda: self.lock_bar_region("mp")).grid(row=1, column=1, sticky="e", padx=(8, 2), pady=(2, 4))
+        ttk.Button(detection_frame, text="清除MP", command=lambda: self.clear_bar_region("mp")).grid(row=1, column=2, sticky="e", padx=2, pady=(2, 4))
+        ttk.Button(detection_frame, text="預覽", command=self.show_bar_preview).grid(row=0, column=3, rowspan=2, sticky="e", padx=8, pady=4)
 
         rb_frame = ttk.LabelFrame(frame, text="RB function")
         rb_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
@@ -305,6 +310,36 @@ class AutoPotionSettingsGui:
 
     def set_bar_preview_provider(self, provider: Callable[[], dict[str, dict[str, object]]]) -> None:
         self.bar_preview_provider = provider
+
+    def set_bar_region_provider(self, provider: Callable[[], dict[str, tuple[int, int, int, int] | None]]) -> None:
+        self.bar_region_provider = provider
+
+    def lock_bar_region(self, bar_type: str) -> None:
+        if self.bar_region_provider is None:
+            self.set_status("尚未連接偵測區域來源")
+            return
+        region = self.bar_region_provider().get(bar_type)
+        if region is None:
+            self.set_status("尚無可鎖定的偵測區域")
+            return
+        if bar_type == "hp":
+            self.settings.hp_region_override = region
+            label = "HP"
+        else:
+            self.settings.mp_region_override = region
+            label = "MP"
+        self.settings.save_current_profile()
+        self.set_status(f"已鎖定 {label} 偵測區域：{region}")
+
+    def clear_bar_region(self, bar_type: str) -> None:
+        if bar_type == "hp":
+            self.settings.hp_region_override = None
+            label = "HP"
+        else:
+            self.settings.mp_region_override = None
+            label = "MP"
+        self.settings.save_current_profile()
+        self.set_status(f"已清除 {label} 手動偵測區域")
 
     def show_bar_preview(self) -> None:
         if self.bar_preview_provider is None:
