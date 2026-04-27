@@ -31,7 +31,7 @@ class BarDetectionDebugTests(unittest.TestCase):
         controller = self.make_controller()
         controller._set_bar_detection_debug(
             "hp",
-            source="client 比例縮放",
+            source="自動定位",
             region=(1, 2, 3, 4),
             percent=55.5,
             success=True,
@@ -42,10 +42,43 @@ class BarDetectionDebugTests(unittest.TestCase):
 
         text = controller._bar_detection_debug_text("hp")
 
-        self.assertIn("HP: client 比例縮放", text)
+        self.assertIn("HP: 自動定位", text)
         self.assertIn("56%", text)
         self.assertIn("1,2,3,4", text)
         self.assertIn("OK", text)
+
+    def test_bottom_bar_pair_regions_are_derived_from_candidate_pair(self):
+        controller = self.make_controller()
+
+        regions = controller._bottom_bar_pair_regions_from_candidates(
+            hp_candidates=[(120, 70, 90)],
+            mp_candidates=[(360, 72, 85)],
+            search_left=10,
+            search_top=900,
+            search_width=700,
+            search_height=120,
+            client_width=1000,
+            client_height=800,
+        )
+
+        self.assertEqual(set(regions), {"hp", "mp"})
+        self.assertLess(regions["hp"][0], regions["mp"][0])
+        self.assertEqual(regions["hp"][1], regions["mp"][1])
+        self.assertEqual(regions["hp"][2:], regions["mp"][2:])
+        self.assertGreaterEqual(regions["hp"][2], 70)
+        self.assertLessEqual(regions["hp"][2], 200)
+
+    def test_capture_bar_percent_reports_auto_locator_failure(self):
+        controller = self.make_controller()
+        controller._find_bottom_bar_pair_regions = Mock(return_value={})
+
+        percent = controller._capture_bar_percent("hp")
+
+        self.assertIsNone(percent)
+        debug = controller.last_bar_debug["hp"]
+        self.assertEqual(debug.source, "自動定位")
+        self.assertIsNone(debug.region)
+        self.assertEqual(debug.reason, "找不到 HP/MP 成對 HUD 條")
 
     def test_bgra_image_to_ppm_data_scales_preview(self):
         image = np.array([[[10, 20, 30, 255]]], dtype=np.uint8)
