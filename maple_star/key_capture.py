@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tkinter as tk
 
-from .constants import ASYNC_KEY_DOWN_MASK, VK_F11, VK_F12
+from .constants import ASYNC_KEY_DOWN_MASK
 from .win_input import user32
 
 KEYSYM_ALIASES = {
@@ -45,6 +45,7 @@ VK_DISPLAY_NAMES = {
     0x08: "Backspace",
     0x09: "Tab",
     0x0D: "Enter",
+    0x13: "Pause",
     0x1B: "Escape",
     0x20: "Space",
     0x21: "PageUp",
@@ -76,7 +77,7 @@ for code in range(0x41, 0x5B):
 for index in range(1, 25):
     VK_DISPLAY_NAMES[0x70 + index - 1] = f"F{index}"
 
-DETECTABLE_KEY_VKS = tuple(code for code in VK_DISPLAY_NAMES if code not in {VK_F11, VK_F12})
+DETECTABLE_KEY_VKS = tuple(VK_DISPLAY_NAMES)
 def event_to_hotkey(event: tk.Event) -> str | None:
     keysym = str(event.keysym)
     if keysym in MODIFIER_KEYSYMS:

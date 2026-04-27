@@ -57,9 +57,11 @@ class AutoPotionSettingsGui:
         self.detecting_key_target: tk.StringVar | None = None
         self.detecting_key_label = ""
         self.key_detection_window: tk.Toplevel | None = None
+        self.key_detection_just_finished = False
+        self.key_detection_release_vks: set[int] = set()
         self.toggle_notice_window: tk.Toplevel | None = None
         self.toggle_notice_after_id: str | None = None
-        self.bar_preview_provider: Callable[[], dict[str, dict[str, object]]] | None = None
+        self.bar_preview_provider: Callable[[bool], dict[str, dict[str, object]]] | None = None
         self.bar_preview_labels: dict[str, ttk.Label] = {}
         self.bar_preview_images: list[tk.PhotoImage] = []
         self.bar_preview_has_snapshot = False
@@ -88,6 +90,8 @@ class AutoPotionSettingsGui:
         self.lb_skill_key = tk.StringVar(value=settings.lb_skill_key)
         self.lb_controller_button = tk.StringVar(value=settings.lb_controller_button)
         self.lb_skill_delay = tk.StringVar(value=f"{settings.lb_skill_delay_seconds:g}")
+        self.toggle_hotkey = tk.StringVar(value=settings.toggle_hotkey)
+        self.emergency_stop_hotkey = tk.StringVar(value=settings.emergency_stop_hotkey)
         self.hp_current = tk.StringVar(value="HP: --%")
         self.mp_current = tk.StringVar(value="MP: --%")
         self.status = tk.StringVar(value="只在楓星為前景視窗時生效")
@@ -104,10 +108,29 @@ class AutoPotionSettingsGui:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(8, weight=1)
+        frame.rowconfigure(9, weight=1)
+
+        control_hotkey_frame = ttk.LabelFrame(frame, text="全域熱鍵")
+        control_hotkey_frame.grid(row=0, column=0, sticky="ew")
+        control_hotkey_frame.columnconfigure(8, weight=1)
+        ttk.Label(control_hotkey_frame, text="暫停/恢復").grid(row=0, column=0, sticky="w", padx=(8, 4), pady=6)
+        toggle_entry = ttk.Entry(control_hotkey_frame, width=9, textvariable=self.toggle_hotkey)
+        toggle_entry.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=6)
+        toggle_entry.bind(
+            "<Button-1>",
+            lambda _event: self.start_key_detection(self.toggle_hotkey, "暫停/恢復熱鍵"),
+        )
+        ttk.Label(control_hotkey_frame, text="硬停止").grid(row=0, column=3, sticky="w", padx=(16, 4), pady=6)
+        emergency_entry = ttk.Entry(control_hotkey_frame, width=9, textvariable=self.emergency_stop_hotkey)
+        emergency_entry.grid(row=0, column=4, sticky="w", padx=(0, 8), pady=6)
+        emergency_entry.bind(
+            "<Button-1>",
+            lambda _event: self.start_key_detection(self.emergency_stop_hotkey, "硬停止熱鍵"),
+        )
+        ttk.Label(control_hotkey_frame, text="硬停止會暫停腳本並釋放按鍵").grid(row=0, column=6, sticky="w", padx=(16, 0), pady=6)
 
         profile_frame = ttk.Frame(frame)
-        profile_frame.grid(row=0, column=0, sticky="ew")
+        profile_frame.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         profile_frame.columnconfigure(1, weight=1)
         ttk.Label(profile_frame, text="設定檔").grid(row=0, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
         self.profile_select = ttk.Combobox(
@@ -125,13 +148,13 @@ class AutoPotionSettingsGui:
         ttk.Button(profile_frame, text="匯出", command=self.export_settings).grid(row=0, column=5, sticky="w", pady=(0, 4))
 
         controls = ttk.Frame(frame)
-        controls.grid(row=1, column=0, sticky="ew")
+        controls.grid(row=2, column=0, sticky="ew")
         controls.columnconfigure(1, weight=1)
         self._build_row(controls, 0, "紅水", self.hp_enabled, self.hp_threshold, self.hp_threshold_text, self.hp_key, self.hp_cooldown, self.hp_current)
         self._build_row(controls, 1, "藍水", self.mp_enabled, self.mp_threshold, self.mp_threshold_text, self.mp_key, self.mp_cooldown, self.mp_current)
 
         detection_frame = ttk.LabelFrame(frame, text="偵測診斷")
-        detection_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        detection_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         detection_frame.columnconfigure(0, weight=1)
         ttk.Label(detection_frame, textvariable=self.hp_detection_status).grid(row=0, column=0, sticky="w", padx=8, pady=(4, 2))
         self.bar_preview_labels["hp"] = ttk.Label(detection_frame, text="尚未刷新預覽")
@@ -142,7 +165,7 @@ class AutoPotionSettingsGui:
         ttk.Button(detection_frame, text="刷新預覽", command=self.refresh_bar_preview).grid(row=0, column=1, rowspan=4, sticky="ne", padx=8, pady=4)
 
         rb_frame = ttk.LabelFrame(frame, text="RB function")
-        rb_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        rb_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         for column in range(13):
             rb_frame.columnconfigure(column, weight=0)
         rb_frame.columnconfigure(12, weight=1)
@@ -156,7 +179,7 @@ class AutoPotionSettingsGui:
         self._build_seconds_stepper(rb_frame, 1, 8, self.rb_jump_interval, 0.05, 10.0, pady=(0, 8))
 
         lb_frame = ttk.LabelFrame(frame, text="LB function")
-        lb_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        lb_frame.grid(row=5, column=0, sticky="ew", pady=(8, 0))
         for column in range(13):
             lb_frame.columnconfigure(column, weight=0)
         lb_frame.columnconfigure(12, weight=1)
@@ -167,8 +190,7 @@ class AutoPotionSettingsGui:
         ttk.Label(lb_frame, text="技能延遲").grid(row=0, column=7, sticky="w", padx=(12, 4), pady=6)
         self._build_seconds_stepper(lb_frame, 0, 8, self.lb_skill_delay, 0.0, 10.0)
 
-        ttk.Label(frame, text="F11：暫停/恢復所有腳本功能；F12：硬停止並釋放按鍵").grid(row=5, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.status).grid(row=6, column=0, sticky="w", pady=(2, 4))
+        ttk.Label(frame, textvariable=self.status).grid(row=6, column=0, sticky="w", pady=(8, 4))
 
         runtime_frame = ttk.Frame(frame)
         runtime_frame.grid(row=7, column=0, sticky="ew", pady=(0, 6))
@@ -181,7 +203,7 @@ class AutoPotionSettingsGui:
         ttk.Label(runtime_frame, textvariable=self.runtime_last_action_status).grid(row=0, column=4, sticky="w")
 
         console_frame = ttk.LabelFrame(frame, text="Console")
-        console_frame.grid(row=8, column=0, sticky="nsew")
+        console_frame.grid(row=9, column=0, sticky="nsew")
         console_frame.columnconfigure(0, weight=1)
         console_frame.rowconfigure(0, weight=1)
         self.console = tk.Text(console_frame, height=10, width=92, state="disabled", wrap="word")
@@ -305,40 +327,63 @@ class AutoPotionSettingsGui:
         self.closed = True
         self.root.destroy()
 
-    def set_bar_preview_provider(self, provider: Callable[[], dict[str, dict[str, object]]]) -> None:
+    def set_bar_preview_provider(self, provider: Callable[[bool], dict[str, dict[str, object]]]) -> None:
         self.bar_preview_provider = provider
+
+    def is_detecting_key(self) -> bool:
+        return self.detecting_key_target is not None
+
+    def consume_key_detection_finished(self) -> bool:
+        if not self.key_detection_just_finished:
+            return False
+        self.key_detection_just_finished = False
+        return True
+
+    def is_key_detection_release_pending(self) -> bool:
+        if not self.key_detection_release_vks:
+            return False
+        if self.key_detection_release_vks & pressed_detectable_vks():
+            return True
+        self.key_detection_release_vks = set()
+        return False
 
     def refresh_bar_preview_once(self) -> None:
         if self.bar_preview_has_snapshot:
             return
-        self.refresh_bar_preview()
+        self._refresh_bar_preview(make_target_topmost=False)
 
     def refresh_bar_preview(self) -> None:
+        self._refresh_bar_preview(make_target_topmost=True)
+
+    def _refresh_bar_preview(self, make_target_topmost: bool) -> None:
         if self.bar_preview_provider is None:
             self.set_status("尚未連接偵測預覽來源")
             return
         try:
-            previews = self.bar_preview_provider()
+            previews = self.bar_preview_provider(make_target_topmost)
         except Exception as exc:
             self.set_status(f"偵測預覽失敗：{exc}")
             return
 
-        self.bar_preview_images = []
-        has_image = False
+        image_payloads: dict[str, bytes] = {}
         for bar_type in ("hp", "mp"):
             preview = previews.get(bar_type, {})
             image_data = preview.get("image")
-            if isinstance(image_data, bytes):
-                image = tk.PhotoImage(data=image_data, format="PPM")
-                self.bar_preview_images.append(image)
-                self.bar_preview_labels[bar_type].configure(image=image, text="")
-                has_image = True
-            else:
-                error = str(preview.get("error") or "尚無預覽圖片")
-                self.bar_preview_labels[bar_type].configure(image="", text=error)
+            if not isinstance(image_data, bytes):
+                self.set_status("HP/MP 預覽未更新：尚未同時抓到 HP/MP 條")
+                return
+            image_payloads[bar_type] = image_data
 
-        if has_image:
-            self.bar_preview_has_snapshot = True
+        next_images = {
+            bar_type: tk.PhotoImage(data=image_payloads[bar_type], format="PPM")
+            for bar_type in ("hp", "mp")
+        }
+        self.bar_preview_images = []
+        for bar_type in ("hp", "mp"):
+            image = next_images[bar_type]
+            self.bar_preview_images.append(image)
+            self.bar_preview_labels[bar_type].configure(image=image, text="")
+        self.bar_preview_has_snapshot = True
 
     def _refresh_profile_select(self) -> None:
         self.profile_select.configure(values=self.settings.profile_names())
@@ -367,6 +412,8 @@ class AutoPotionSettingsGui:
         self.lb_skill_key.set(self.settings.lb_skill_key)
         self.lb_controller_button.set(self.settings.lb_controller_button)
         self.lb_skill_delay.set(f"{self.settings.lb_skill_delay_seconds:g}")
+        self.toggle_hotkey.set(self.settings.toggle_hotkey)
+        self.emergency_stop_hotkey.set(self.settings.emergency_stop_hotkey)
         self._refresh_profile_select()
 
     def _switch_profile(self, _event: tk.Event | None = None) -> str:
@@ -510,8 +557,14 @@ class AutoPotionSettingsGui:
     def _finish_key_detection(self, hotkey: str) -> None:
         if self.detecting_key_target is None:
             return
+        try:
+            release_vk = parse_vk_key(hotkey)
+        except ValueError:
+            release_vk = 0
         self.detecting_key_target.set(hotkey)
         self.set_status(f"{self.detecting_key_label} 快捷鍵已設定為 {hotkey}")
+        self.key_detection_just_finished = True
+        self.key_detection_release_vks = {release_vk} if release_vk else set()
         self.cancel_key_detection(keep_status=True)
 
     def cancel_key_detection(self, keep_status: bool = False) -> None:
@@ -601,6 +654,10 @@ class AutoPotionSettingsGui:
             0.0,
             10.0,
         )
+        self.settings.toggle_hotkey = self.toggle_hotkey.get().strip() or self.settings.toggle_hotkey
+        self.settings.emergency_stop_hotkey = (
+            self.emergency_stop_hotkey.get().strip() or self.settings.emergency_stop_hotkey
+        )
 
     def _read_cooldown(self, var: tk.StringVar, fallback: float) -> float:
         return self._read_seconds(var, fallback, 0.05, 60.0)
@@ -689,7 +746,7 @@ class AutoPotionSettingsGui:
         except tk.TclError as exc:
             now = time.monotonic()
             if now - self.last_gui_error_at >= 2.0:
-                print(f"F11 提示顯示失敗，已略過：{exc}", file=sys.__stdout__)
+                print(f"熱鍵提示顯示失敗，已略過：{exc}", file=sys.__stdout__)
                 self.last_gui_error_at = now
 
     def _toggle_notice_position(

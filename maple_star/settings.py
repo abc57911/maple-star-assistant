@@ -13,6 +13,8 @@ def app_base_dir() -> Path:
 
 SETTINGS_PATH = app_base_dir() / "settings.json"
 DEFAULT_PROFILE_NAME = "Default"
+DEFAULT_TOGGLE_HOTKEY = "F11"
+DEFAULT_EMERGENCY_STOP_HOTKEY = "Pause"
 CONTROLLER_BUTTON_CHOICES = (
     "A",
     "B",
@@ -76,10 +78,12 @@ class AutoPotionSettings:
     lb_skill_key: str = "C"
     lb_controller_button: str = "LB"
     lb_skill_delay_seconds: float = 0.2
+    toggle_hotkey: str = DEFAULT_TOGGLE_HOTKEY
+    emergency_stop_hotkey: str = DEFAULT_EMERGENCY_STOP_HOTKEY
     active_profile: str = DEFAULT_PROFILE_NAME
     profiles: dict[str, dict[str, object]] = field(default_factory=dict)
 
-    def snapshot(self) -> tuple[bool, bool, bool, float, float, str, str, float, float, str, str, str, float, float, bool, str, str, str, float, str, str]:
+    def snapshot(self) -> tuple[bool, bool, bool, float, float, str, str, float, float, str, str, str, float, float, bool, str, str, str, float, str, str, str, str]:
         return (
             self.hp_enabled,
             self.mp_enabled,
@@ -100,6 +104,8 @@ class AutoPotionSettings:
             self.lb_skill_key,
             self.lb_controller_button,
             self.lb_skill_delay_seconds,
+            self.toggle_hotkey,
+            self.emergency_stop_hotkey,
             self.active_profile,
             json.dumps(self.profiles, ensure_ascii=False, sort_keys=True),
         )
@@ -132,6 +138,8 @@ class AutoPotionSettings:
             "lb_skill_key": self.lb_skill_key,
             "lb_controller_button": self.lb_controller_button,
             "lb_skill_delay_seconds": self.lb_skill_delay_seconds,
+            "toggle_hotkey": self.toggle_hotkey,
+            "emergency_stop_hotkey": self.emergency_stop_hotkey,
             "active_profile": normalize_profile_name(self.active_profile),
             "profiles": profiles,
         }
@@ -204,6 +212,10 @@ PROFILE_SETTING_KEYS = (
     "lb_controller_button",
     "lb_skill_delay_seconds",
 )
+GLOBAL_SETTING_KEYS = (
+    "toggle_hotkey",
+    "emergency_stop_hotkey",
+)
 
 
 def profile_payload_from_settings(settings: AutoPotionSettings) -> dict[str, object]:
@@ -211,7 +223,7 @@ def profile_payload_from_settings(settings: AutoPotionSettings) -> dict[str, obj
 
 
 def copy_setting_values(source: AutoPotionSettings, target: AutoPotionSettings) -> None:
-    for key in PROFILE_SETTING_KEYS:
+    for key in PROFILE_SETTING_KEYS + GLOBAL_SETTING_KEYS:
         setattr(target, key, getattr(source, key))
 
 
@@ -282,6 +294,8 @@ def settings_from_profile_payload(
     values = _read_profile_payload(payload, fallback)
     return AutoPotionSettings(
         **values,
+        toggle_hotkey=fallback.toggle_hotkey,
+        emergency_stop_hotkey=fallback.emergency_stop_hotkey,
         active_profile=normalize_profile_name(active_profile),
         profiles=profiles,
     )
@@ -329,6 +343,8 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
         lb_skill_key=_read_string(raw, "lb_skill_key", settings.lb_skill_key),
         lb_controller_button=normalize_controller_button_name(raw.get("lb_controller_button"), settings.lb_controller_button),
         lb_skill_delay_seconds=_read_float(raw, "lb_skill_delay_seconds", settings.lb_skill_delay_seconds, 0.0, 10.0),
+        toggle_hotkey=_read_string(raw, "toggle_hotkey", settings.toggle_hotkey),
+        emergency_stop_hotkey=_read_string(raw, "emergency_stop_hotkey", settings.emergency_stop_hotkey),
         active_profile=normalize_profile_name(raw.get("active_profile"), DEFAULT_PROFILE_NAME),
     )
     profiles = _read_profiles(raw.get("profiles"), base_settings)

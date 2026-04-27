@@ -24,8 +24,12 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(settings.hp_key, "9")
         self.assertEqual(settings.mp_key, "0")
         self.assertTrue(settings.rb_enabled)
+        self.assertEqual(settings.toggle_hotkey, "F11")
+        self.assertEqual(settings.emergency_stop_hotkey, "Pause")
         self.assertIn("Default", saved["profiles"])
         self.assertEqual(saved["profiles"]["Default"]["hp_key"], "9")
+        self.assertEqual(saved["toggle_hotkey"], "F11")
+        self.assertEqual(saved["emergency_stop_hotkey"], "Pause")
 
     def test_load_settings_can_skip_writing_migrations(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -71,3 +75,12 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(settings.active_profile, "Main")
         self.assertEqual(settings.hp_key, "9")
         self.assertNotIn("Boss", settings.profiles)
+
+    def test_control_hotkeys_are_global_not_profile_payload(self):
+        settings = AutoPotionSettings(toggle_hotkey="F10", emergency_stop_hotkey="Pause")
+        payload = settings.to_json_dict()
+
+        self.assertEqual(payload["toggle_hotkey"], "F10")
+        self.assertEqual(payload["emergency_stop_hotkey"], "Pause")
+        self.assertNotIn("toggle_hotkey", payload["profiles"]["Default"])
+        self.assertNotIn("emergency_stop_hotkey", payload["profiles"]["Default"])
