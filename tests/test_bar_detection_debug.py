@@ -1,11 +1,10 @@
 import unittest
 from unittest.mock import Mock
 
-import base64
-
 import numpy as np
+import tkinter as tk
 
-from maple_star.controller import AutoPotionController, BarDetectionDebug, bgra_image_to_ppm_base64
+from maple_star.controller import AutoPotionController, BarDetectionDebug, bgra_image_to_ppm_data
 
 
 class BarDetectionDebugTests(unittest.TestCase):
@@ -48,14 +47,25 @@ class BarDetectionDebugTests(unittest.TestCase):
         self.assertIn("1,2,3,4", text)
         self.assertIn("OK", text)
 
-    def test_bgra_image_to_ppm_base64_scales_preview(self):
+    def test_bgra_image_to_ppm_data_scales_preview(self):
         image = np.array([[[10, 20, 30, 255]]], dtype=np.uint8)
 
-        encoded = bgra_image_to_ppm_base64(image, scale=2)
-        decoded = base64.b64decode(encoded)
+        data = bgra_image_to_ppm_data(image, scale=2)
 
-        self.assertTrue(decoded.startswith(b"P6\n2 2\n255\n"))
-        self.assertEqual(decoded[-12:], bytes([30, 20, 10]) * 4)
+        self.assertTrue(data.startswith(b"P6\n2 2\n255\n"))
+        self.assertEqual(data[-12:], bytes([30, 20, 10]) * 4)
+
+    def test_bgra_image_to_ppm_data_loads_in_tk_photo_image(self):
+        image = np.array([[[10, 20, 30, 255]]], dtype=np.uint8)
+        data = bgra_image_to_ppm_data(image, scale=2)
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            photo = tk.PhotoImage(data=data, format="PPM")
+            self.assertEqual(photo.width(), 2)
+            self.assertEqual(photo.height(), 2)
+        finally:
+            root.destroy()
 
     def test_capture_bar_percent_uses_manual_override_first(self):
         controller = self.make_controller()
