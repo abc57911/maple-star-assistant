@@ -91,13 +91,15 @@ class AutoPotionSettingsGui:
         self.runtime_macro_status = tk.StringVar(value="巨集：--")
         self.runtime_held_keys_status = tk.StringVar(value="按住：--")
         self.runtime_last_action_status = tk.StringVar(value="最近動作：啟動")
+        self.hp_detection_status = tk.StringVar(value="HP: --")
+        self.mp_detection_status = tk.StringVar(value="MP: --")
 
         frame = ttk.Frame(self.root, padding=12)
         frame.grid(row=0, column=0, sticky="nsew")
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(7, weight=1)
+        frame.rowconfigure(8, weight=1)
 
         profile_frame = ttk.Frame(frame)
         profile_frame.grid(row=0, column=0, sticky="ew")
@@ -123,8 +125,14 @@ class AutoPotionSettingsGui:
         self._build_row(controls, 0, "紅水", self.hp_enabled, self.hp_threshold, self.hp_threshold_text, self.hp_key, self.hp_cooldown, self.hp_current)
         self._build_row(controls, 1, "藍水", self.mp_enabled, self.mp_threshold, self.mp_threshold_text, self.mp_key, self.mp_cooldown, self.mp_current)
 
+        detection_frame = ttk.LabelFrame(frame, text="偵測診斷")
+        detection_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        detection_frame.columnconfigure(0, weight=1)
+        ttk.Label(detection_frame, textvariable=self.hp_detection_status).grid(row=0, column=0, sticky="w", padx=8, pady=(4, 2))
+        ttk.Label(detection_frame, textvariable=self.mp_detection_status).grid(row=1, column=0, sticky="w", padx=8, pady=(2, 4))
+
         rb_frame = ttk.LabelFrame(frame, text="RB function")
-        rb_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        rb_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         for column in range(13):
             rb_frame.columnconfigure(column, weight=0)
         rb_frame.columnconfigure(12, weight=1)
@@ -138,7 +146,7 @@ class AutoPotionSettingsGui:
         self._build_seconds_stepper(rb_frame, 1, 8, self.rb_jump_interval, 0.05, 10.0, pady=(0, 8))
 
         lb_frame = ttk.LabelFrame(frame, text="LB function")
-        lb_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        lb_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         for column in range(13):
             lb_frame.columnconfigure(column, weight=0)
         lb_frame.columnconfigure(12, weight=1)
@@ -149,11 +157,11 @@ class AutoPotionSettingsGui:
         ttk.Label(lb_frame, text="技能延遲").grid(row=0, column=7, sticky="w", padx=(12, 4), pady=6)
         self._build_seconds_stepper(lb_frame, 0, 8, self.lb_skill_delay, 0.0, 10.0)
 
-        ttk.Label(frame, text="F11：暫停/恢復所有腳本功能；F12：硬停止並釋放按鍵").grid(row=4, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.status).grid(row=5, column=0, sticky="w", pady=(2, 4))
+        ttk.Label(frame, text="F11：暫停/恢復所有腳本功能；F12：硬停止並釋放按鍵").grid(row=5, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.status).grid(row=6, column=0, sticky="w", pady=(2, 4))
 
         runtime_frame = ttk.Frame(frame)
-        runtime_frame.grid(row=6, column=0, sticky="ew", pady=(0, 6))
+        runtime_frame.grid(row=7, column=0, sticky="ew", pady=(0, 6))
         for column in range(5):
             runtime_frame.columnconfigure(column, weight=1)
         ttk.Label(runtime_frame, textvariable=self.runtime_script_status).grid(row=0, column=0, sticky="w", padx=(0, 12))
@@ -163,7 +171,7 @@ class AutoPotionSettingsGui:
         ttk.Label(runtime_frame, textvariable=self.runtime_last_action_status).grid(row=0, column=4, sticky="w")
 
         console_frame = ttk.LabelFrame(frame, text="Console")
-        console_frame.grid(row=7, column=0, sticky="nsew")
+        console_frame.grid(row=8, column=0, sticky="nsew")
         console_frame.columnconfigure(0, weight=1)
         console_frame.rowconfigure(0, weight=1)
         self.console = tk.Text(console_frame, height=10, width=92, state="disabled", wrap="word")
@@ -572,6 +580,10 @@ class AutoPotionSettingsGui:
     def set_current_percentages(self, hp_percent: float | None, mp_percent: float | None) -> None:
         self.hp_current.set("HP: --%" if hp_percent is None else f"HP: {hp_percent:.0f}%")
         self.mp_current.set("MP: --%" if mp_percent is None else f"MP: {mp_percent:.0f}%")
+
+    def set_bar_detection_debug(self, hp_debug: str, mp_debug: str) -> None:
+        self.hp_detection_status.set(hp_debug)
+        self.mp_detection_status.set(mp_debug)
 
     def set_status(self, message: str) -> None:
         self.status.set(message)
