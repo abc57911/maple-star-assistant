@@ -5,11 +5,11 @@ import sys
 import time
 import tkinter as tk
 from ctypes import wintypes
-from tkinter import ttk
+from tkinter import messagebox, simpledialog, ttk
 
 from .constants import MAX_CONSOLE_LINES
 from .key_capture import DETECTABLE_KEY_VKS, event_to_hotkey, pressed_detectable_vks, vk_to_key_name
-from .settings import AutoPotionSettings, CONTROLLER_BUTTON_CHOICES, normalize_controller_button_name
+from .settings import AutoPotionSettings, CONTROLLER_BUTTON_CHOICES, normalize_controller_button_name, normalize_profile_name
 from .win_input import Point, parse_vk_key, user32
 
 class GuiConsoleWriter:
@@ -50,6 +50,7 @@ class AutoPotionSettingsGui:
         self.detecting_vk_down: set[int] = set()
         self.last_gui_error_at = -999.0
 
+        self.active_profile = tk.StringVar(value=settings.active_profile)
         self.hp_enabled = tk.BooleanVar(value=settings.hp_enabled)
         self.mp_enabled = tk.BooleanVar(value=settings.mp_enabled)
         self.rb_enabled = tk.BooleanVar(value=settings.rb_enabled)
@@ -85,16 +86,32 @@ class AutoPotionSettingsGui:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(6, weight=1)
+        frame.rowconfigure(7, weight=1)
+
+        profile_frame = ttk.Frame(frame)
+        profile_frame.grid(row=0, column=0, sticky="ew")
+        profile_frame.columnconfigure(1, weight=1)
+        ttk.Label(profile_frame, text="設定檔").grid(row=0, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
+        self.profile_select = ttk.Combobox(
+            profile_frame,
+            textvariable=self.active_profile,
+            values=self.settings.profile_names(),
+            state="readonly",
+            width=18,
+        )
+        self.profile_select.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=(0, 4))
+        self.profile_select.bind("<<ComboboxSelected>>", self._switch_profile)
+        ttk.Button(profile_frame, text="新增", command=self.create_profile).grid(row=0, column=2, sticky="w", padx=(0, 4), pady=(0, 4))
+        ttk.Button(profile_frame, text="刪除", command=self.delete_profile).grid(row=0, column=3, sticky="w", pady=(0, 4))
 
         controls = ttk.Frame(frame)
-        controls.grid(row=0, column=0, sticky="ew")
+        controls.grid(row=1, column=0, sticky="ew")
         controls.columnconfigure(1, weight=1)
         self._build_row(controls, 0, "紅水", self.hp_enabled, self.hp_threshold, self.hp_threshold_text, self.hp_key, self.hp_cooldown, self.hp_current)
         self._build_row(controls, 1, "藍水", self.mp_enabled, self.mp_threshold, self.mp_threshold_text, self.mp_key, self.mp_cooldown, self.mp_current)
 
         rb_frame = ttk.LabelFrame(frame, text="RB function")
-        rb_frame.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        rb_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         for column in range(13):
             rb_frame.columnconfigure(column, weight=0)
         rb_frame.columnconfigure(12, weight=1)
@@ -108,7 +125,7 @@ class AutoPotionSettingsGui:
         self._build_seconds_stepper(rb_frame, 1, 8, self.rb_jump_interval, 0.05, 10.0, pady=(0, 8))
 
         lb_frame = ttk.LabelFrame(frame, text="LB function")
-        lb_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        lb_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         for column in range(13):
             lb_frame.columnconfigure(column, weight=0)
         lb_frame.columnconfigure(12, weight=1)
@@ -119,11 +136,11 @@ class AutoPotionSettingsGui:
         ttk.Label(lb_frame, text="技能延遲").grid(row=0, column=7, sticky="w", padx=(12, 4), pady=6)
         self._build_seconds_stepper(lb_frame, 0, 8, self.lb_skill_delay, 0.0, 10.0)
 
-        ttk.Label(frame, text="F11：暫停/恢復所有腳本功能；F12：硬停止並釋放按鍵").grid(row=3, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(frame, textvariable=self.status).grid(row=4, column=0, sticky="w", pady=(2, 4))
+        ttk.Label(frame, text="F11：暫停/恢復所有腳本功能；F12：硬停止並釋放按鍵").grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(frame, textvariable=self.status).grid(row=5, column=0, sticky="w", pady=(2, 4))
 
         runtime_frame = ttk.Frame(frame)
-        runtime_frame.grid(row=5, column=0, sticky="ew", pady=(0, 6))
+        runtime_frame.grid(row=6, column=0, sticky="ew", pady=(0, 6))
         for column in range(5):
             runtime_frame.columnconfigure(column, weight=1)
         ttk.Label(runtime_frame, textvariable=self.runtime_script_status).grid(row=0, column=0, sticky="w", padx=(0, 12))
@@ -133,7 +150,7 @@ class AutoPotionSettingsGui:
         ttk.Label(runtime_frame, textvariable=self.runtime_last_action_status).grid(row=0, column=4, sticky="w")
 
         console_frame = ttk.LabelFrame(frame, text="Console")
-        console_frame.grid(row=6, column=0, sticky="nsew")
+        console_frame.grid(row=7, column=0, sticky="nsew")
         console_frame.columnconfigure(0, weight=1)
         console_frame.rowconfigure(0, weight=1)
         self.console = tk.Text(console_frame, height=10, width=92, state="disabled", wrap="word")
@@ -256,6 +273,73 @@ class AutoPotionSettingsGui:
         self._destroy_toggle_notice()
         self.closed = True
         self.root.destroy()
+
+    def _refresh_profile_select(self) -> None:
+        self.profile_select.configure(values=self.settings.profile_names())
+        self.active_profile.set(self.settings.active_profile)
+
+    def _sync_vars_from_settings(self) -> None:
+        self.active_profile.set(self.settings.active_profile)
+        self.hp_enabled.set(self.settings.hp_enabled)
+        self.mp_enabled.set(self.settings.mp_enabled)
+        self.rb_enabled.set(self.settings.rb_enabled)
+        self.lb_enabled.set(self.settings.lb_enabled)
+        self.hp_threshold.set(self.settings.hp_threshold_percent)
+        self.mp_threshold.set(self.settings.mp_threshold_percent)
+        self.hp_threshold_text.set(f"{self.settings.hp_threshold_percent:.0f}")
+        self.mp_threshold_text.set(f"{self.settings.mp_threshold_percent:.0f}")
+        self.hp_key.set(self.settings.hp_key)
+        self.mp_key.set(self.settings.mp_key)
+        self.hp_cooldown.set(f"{self.settings.hp_cooldown_seconds:g}")
+        self.mp_cooldown.set(f"{self.settings.mp_cooldown_seconds:g}")
+        self.rb_jump_key.set(self.settings.rb_jump_key)
+        self.rb_skill_key.set(self.settings.rb_skill_key)
+        self.rb_controller_button.set(self.settings.rb_controller_button)
+        self.rb_skill_delay.set(f"{self.settings.rb_skill_delay_seconds:g}")
+        self.rb_jump_interval.set(f"{self.settings.rb_jump_interval_seconds:g}")
+        self.lb_jump_key.set(self.settings.lb_jump_key)
+        self.lb_skill_key.set(self.settings.lb_skill_key)
+        self.lb_controller_button.set(self.settings.lb_controller_button)
+        self.lb_skill_delay.set(f"{self.settings.lb_skill_delay_seconds:g}")
+        self._refresh_profile_select()
+
+    def _switch_profile(self, _event: tk.Event | None = None) -> str:
+        target_profile = normalize_profile_name(self.active_profile.get(), self.settings.active_profile)
+        if target_profile == self.settings.active_profile:
+            return "break"
+        self.apply_to_settings()
+        if self.settings.apply_profile(target_profile):
+            self._sync_vars_from_settings()
+            self.set_status(f"已切換設定檔：{target_profile}")
+        else:
+            self._refresh_profile_select()
+            self.set_status("設定檔切換失敗")
+        return "break"
+
+    def create_profile(self) -> None:
+        self.apply_to_settings()
+        name = simpledialog.askstring("新增設定檔", "設定檔名稱", parent=self.root)
+        profile_name = normalize_profile_name(name, "")
+        if not profile_name:
+            return
+        if not self.settings.create_profile(profile_name):
+            self.set_status(f"設定檔已存在：{profile_name}")
+            return
+        self._sync_vars_from_settings()
+        self.set_status(f"已新增設定檔：{profile_name}")
+
+    def delete_profile(self) -> None:
+        profile_name = normalize_profile_name(self.active_profile.get(), self.settings.active_profile)
+        if len(self.settings.profile_names()) <= 1:
+            self.set_status("至少需保留一個設定檔")
+            return
+        if not messagebox.askyesno("刪除設定檔", f"刪除設定檔「{profile_name}」？", parent=self.root):
+            return
+        if not self.settings.delete_profile(profile_name):
+            self.set_status("設定檔刪除失敗")
+            return
+        self._sync_vars_from_settings()
+        self.set_status(f"已刪除設定檔：{profile_name}")
 
     def start_key_detection(self, target: tk.StringVar, label: str) -> str:
         self.cancel_key_detection()

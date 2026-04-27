@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 def app_base_dir() -> Path:
@@ -12,6 +12,7 @@ def app_base_dir() -> Path:
 
 
 SETTINGS_PATH = app_base_dir() / "settings.json"
+DEFAULT_PROFILE_NAME = "Default"
 CONTROLLER_BUTTON_CHOICES = (
     "A",
     "B",
@@ -47,6 +48,13 @@ def normalize_controller_button_name(value: object, fallback: str) -> str:
     return fallback
 
 
+def normalize_profile_name(value: object, fallback: str = DEFAULT_PROFILE_NAME) -> str:
+    if not isinstance(value, str):
+        return fallback
+    normalized = value.strip()
+    return normalized or fallback
+
+
 @dataclass
 class AutoPotionSettings:
     hp_enabled: bool = True
@@ -68,8 +76,10 @@ class AutoPotionSettings:
     lb_skill_key: str = "C"
     lb_controller_button: str = "LB"
     lb_skill_delay_seconds: float = 0.2
+    active_profile: str = DEFAULT_PROFILE_NAME
+    profiles: dict[str, dict[str, object]] = field(default_factory=dict)
 
-    def snapshot(self) -> tuple[bool, bool, bool, float, float, str, str, float, float, str, str, str, float, float, bool, str, str, str, float]:
+    def snapshot(self) -> tuple[bool, bool, bool, float, float, str, str, float, float, str, str, str, float, float, bool, str, str, str, float, str, str]:
         return (
             self.hp_enabled,
             self.mp_enabled,
@@ -90,9 +100,18 @@ class AutoPotionSettings:
             self.lb_skill_key,
             self.lb_controller_button,
             self.lb_skill_delay_seconds,
+            self.active_profile,
+            json.dumps(self.profiles, ensure_ascii=False, sort_keys=True),
         )
 
     def to_json_dict(self) -> dict[str, object]:
+        current_values = profile_payload_from_settings(self)
+        profiles = {
+            name: dict(payload)
+            for name, payload in self.profiles.items()
+            if isinstance(name, str) and isinstance(payload, dict)
+        }
+        profiles[normalize_profile_name(self.active_profile)] = current_values
         return {
             "hp_enabled": self.hp_enabled,
             "mp_enabled": self.mp_enabled,
@@ -113,7 +132,87 @@ class AutoPotionSettings:
             "lb_skill_key": self.lb_skill_key,
             "lb_controller_button": self.lb_controller_button,
             "lb_skill_delay_seconds": self.lb_skill_delay_seconds,
+            "active_profile": normalize_profile_name(self.active_profile),
+            "profiles": profiles,
         }
+
+    def save_current_profile(self) -> None:
+        self.active_profile = normalize_profile_name(self.active_profile)
+        self.profiles[self.active_profile] = profile_payload_from_settings(self)
+
+    def profile_names(self) -> list[str]:
+        names = {
+            normalize_profile_name(name)
+            for name in self.profiles
+            if isinstance(name, str) and normalize_profile_name(name)
+        }
+        names.add(normalize_profile_name(self.active_profile))
+        return sorted(names, key=lambda name: (name != DEFAULT_PROFILE_NAME, name.lower()))
+
+    def apply_profile(self, name: str) -> bool:
+        target_name = normalize_profile_name(name)
+        payload = self.profiles.get(target_name)
+        if not isinstance(payload, dict):
+            return False
+        self.save_current_profile()
+        loaded = settings_from_profile_payload(payload, self, target_name, self.profiles)
+        copy_setting_values(loaded, self)
+        self.active_profile = target_name
+        return True
+
+    def create_profile(self, name: str) -> bool:
+        target_name = normalize_profile_name(name)
+        if target_name in self.profiles:
+            return False
+        self.save_current_profile()
+        self.profiles[target_name] = profile_payload_from_settings(self)
+        self.active_profile = target_name
+        return True
+
+    def delete_profile(self, name: str) -> bool:
+        target_name = normalize_profile_name(name)
+        if target_name not in self.profiles or len(self.profile_names()) <= 1:
+            return False
+        del self.profiles[target_name]
+        if self.active_profile == target_name:
+            next_name = sorted(self.profiles, key=lambda name: (name != DEFAULT_PROFILE_NAME, name.lower()))[0]
+            payload = self.profiles[next_name]
+            loaded = settings_from_profile_payload(payload, self, next_name, self.profiles)
+            copy_setting_values(loaded, self)
+            self.active_profile = next_name
+        return True
+
+
+PROFILE_SETTING_KEYS = (
+    "hp_enabled",
+    "mp_enabled",
+    "rb_enabled",
+    "hp_threshold_percent",
+    "mp_threshold_percent",
+    "hp_key",
+    "mp_key",
+    "hp_cooldown_seconds",
+    "mp_cooldown_seconds",
+    "rb_jump_key",
+    "rb_skill_key",
+    "rb_controller_button",
+    "rb_skill_delay_seconds",
+    "rb_jump_interval_seconds",
+    "lb_enabled",
+    "lb_jump_key",
+    "lb_skill_key",
+    "lb_controller_button",
+    "lb_skill_delay_seconds",
+)
+
+
+def profile_payload_from_settings(settings: AutoPotionSettings) -> dict[str, object]:
+    return {key: getattr(settings, key) for key in PROFILE_SETTING_KEYS}
+
+
+def copy_setting_values(source: AutoPotionSettings, target: AutoPotionSettings) -> None:
+    for key in PROFILE_SETTING_KEYS:
+        setattr(target, key, getattr(source, key))
 
 
 def _read_bool(data: dict[str, object], key: str, fallback: bool) -> bool:
@@ -137,6 +236,57 @@ def _read_string(data: dict[str, object], key: str, fallback: str) -> str:
     return value or fallback
 
 
+def _read_profile_payload(raw: object, fallback: AutoPotionSettings) -> dict[str, object]:
+    data = raw if isinstance(raw, dict) else {}
+    return {
+        "hp_enabled": _read_bool(data, "hp_enabled", fallback.hp_enabled),
+        "mp_enabled": _read_bool(data, "mp_enabled", fallback.mp_enabled),
+        "rb_enabled": _read_bool(data, "rb_enabled", fallback.rb_enabled),
+        "hp_threshold_percent": _read_float(data, "hp_threshold_percent", fallback.hp_threshold_percent, 1.0, 100.0),
+        "mp_threshold_percent": _read_float(data, "mp_threshold_percent", fallback.mp_threshold_percent, 1.0, 100.0),
+        "hp_key": _read_string(data, "hp_key", fallback.hp_key),
+        "mp_key": _read_string(data, "mp_key", fallback.mp_key),
+        "hp_cooldown_seconds": _read_float(data, "hp_cooldown_seconds", fallback.hp_cooldown_seconds, 0.05, 60.0),
+        "mp_cooldown_seconds": _read_float(data, "mp_cooldown_seconds", fallback.mp_cooldown_seconds, 0.05, 60.0),
+        "rb_jump_key": _read_string(data, "rb_jump_key", fallback.rb_jump_key),
+        "rb_skill_key": _read_string(data, "rb_skill_key", fallback.rb_skill_key),
+        "rb_controller_button": normalize_controller_button_name(data.get("rb_controller_button"), fallback.rb_controller_button),
+        "rb_skill_delay_seconds": _read_float(data, "rb_skill_delay_seconds", fallback.rb_skill_delay_seconds, 0.0, 10.0),
+        "rb_jump_interval_seconds": _read_float(data, "rb_jump_interval_seconds", fallback.rb_jump_interval_seconds, 0.05, 10.0),
+        "lb_enabled": _read_bool(data, "lb_enabled", fallback.lb_enabled),
+        "lb_jump_key": _read_string(data, "lb_jump_key", fallback.lb_jump_key),
+        "lb_skill_key": _read_string(data, "lb_skill_key", fallback.lb_skill_key),
+        "lb_controller_button": normalize_controller_button_name(data.get("lb_controller_button"), fallback.lb_controller_button),
+        "lb_skill_delay_seconds": _read_float(data, "lb_skill_delay_seconds", fallback.lb_skill_delay_seconds, 0.0, 10.0),
+    }
+
+
+def _read_profiles(raw: object, fallback: AutoPotionSettings) -> dict[str, dict[str, object]]:
+    if not isinstance(raw, dict):
+        return {}
+    profiles: dict[str, dict[str, object]] = {}
+    for name, payload in raw.items():
+        profile_name = normalize_profile_name(name, "")
+        if not profile_name:
+            continue
+        profiles[profile_name] = _read_profile_payload(payload, fallback)
+    return profiles
+
+
+def settings_from_profile_payload(
+    payload: dict[str, object],
+    fallback: AutoPotionSettings,
+    active_profile: str,
+    profiles: dict[str, dict[str, object]],
+) -> AutoPotionSettings:
+    values = _read_profile_payload(payload, fallback)
+    return AutoPotionSettings(
+        **values,
+        active_profile=normalize_profile_name(active_profile),
+        profiles=profiles,
+    )
+
+
 def load_settings(path: Path = SETTINGS_PATH) -> AutoPotionSettings:
     settings = AutoPotionSettings()
     if not path.exists():
@@ -156,7 +306,7 @@ def load_settings(path: Path = SETTINGS_PATH) -> AutoPotionSettings:
         save_settings(settings, path)
         return settings
 
-    loaded_settings = AutoPotionSettings(
+    base_settings = AutoPotionSettings(
         hp_enabled=_read_bool(raw, "hp_enabled", settings.hp_enabled),
         mp_enabled=_read_bool(raw, "mp_enabled", settings.mp_enabled),
         rb_enabled=_read_bool(raw, "rb_enabled", settings.rb_enabled),
@@ -176,6 +326,17 @@ def load_settings(path: Path = SETTINGS_PATH) -> AutoPotionSettings:
         lb_skill_key=_read_string(raw, "lb_skill_key", settings.lb_skill_key),
         lb_controller_button=normalize_controller_button_name(raw.get("lb_controller_button"), settings.lb_controller_button),
         lb_skill_delay_seconds=_read_float(raw, "lb_skill_delay_seconds", settings.lb_skill_delay_seconds, 0.0, 10.0),
+        active_profile=normalize_profile_name(raw.get("active_profile"), DEFAULT_PROFILE_NAME),
+    )
+    profiles = _read_profiles(raw.get("profiles"), base_settings)
+    if base_settings.active_profile not in profiles:
+        profiles[base_settings.active_profile] = profile_payload_from_settings(base_settings)
+
+    loaded_settings = settings_from_profile_payload(
+        profiles[base_settings.active_profile],
+        base_settings,
+        base_settings.active_profile,
+        profiles,
     )
     expected = loaded_settings.to_json_dict()
     needs_save = any(
