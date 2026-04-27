@@ -299,6 +299,7 @@ class AutoPotionController:
                 self.gui.set_status("HP/MP 條偵測不穩定，略過錯誤取樣")
             else:
                 self.gui.set_status("自動喝水監控中")
+                self.gui.refresh_bar_preview_once()
             self._maybe_drink_hp(now, hp_percent)
             self._maybe_drink_mp(now, mp_percent)
         except Exception as exc:
