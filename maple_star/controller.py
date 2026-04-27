@@ -729,7 +729,7 @@ class AutoPotionController:
                 previews[bar_type] = {
                     "label": label,
                     "debug": self._bar_detection_debug_text(bar_type),
-                    "image": bgra_image_to_ppm_data(image),
+                    "image": bgra_image_to_ppm_data(image, scale=2),
                     "error": "",
                 }
             except Exception as exc:

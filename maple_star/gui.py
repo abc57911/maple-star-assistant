@@ -61,7 +61,6 @@ class AutoPotionSettingsGui:
         self.toggle_notice_after_id: str | None = None
         self.bar_preview_provider: Callable[[], dict[str, dict[str, object]]] | None = None
         self.bar_preview_labels: dict[str, ttk.Label] = {}
-        self.bar_preview_texts: dict[str, ttk.Label] = {}
         self.bar_preview_images: list[tk.PhotoImage] = []
         self.bar_preview_has_snapshot = False
         self.detecting_vk_down: set[int] = set()
@@ -135,16 +134,12 @@ class AutoPotionSettingsGui:
         detection_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         detection_frame.columnconfigure(0, weight=1)
         ttk.Label(detection_frame, textvariable=self.hp_detection_status).grid(row=0, column=0, sticky="w", padx=8, pady=(4, 2))
-        self.bar_preview_texts["hp"] = ttk.Label(detection_frame, text="HP 預覽：尚未刷新")
-        self.bar_preview_texts["hp"].grid(row=1, column=0, sticky="w", padx=8, pady=(0, 2))
         self.bar_preview_labels["hp"] = ttk.Label(detection_frame, text="尚未刷新預覽")
-        self.bar_preview_labels["hp"].grid(row=2, column=0, sticky="w", padx=8, pady=(0, 6))
-        ttk.Label(detection_frame, textvariable=self.mp_detection_status).grid(row=3, column=0, sticky="w", padx=8, pady=(2, 2))
-        self.bar_preview_texts["mp"] = ttk.Label(detection_frame, text="MP 預覽：尚未刷新")
-        self.bar_preview_texts["mp"].grid(row=4, column=0, sticky="w", padx=8, pady=(0, 2))
+        self.bar_preview_labels["hp"].grid(row=1, column=0, sticky="w", padx=8, pady=(0, 6))
+        ttk.Label(detection_frame, textvariable=self.mp_detection_status).grid(row=2, column=0, sticky="w", padx=8, pady=(2, 2))
         self.bar_preview_labels["mp"] = ttk.Label(detection_frame, text="尚未刷新預覽")
-        self.bar_preview_labels["mp"].grid(row=5, column=0, sticky="w", padx=8, pady=(0, 6))
-        ttk.Button(detection_frame, text="刷新預覽", command=self.refresh_bar_preview).grid(row=0, column=1, rowspan=6, sticky="ne", padx=8, pady=4)
+        self.bar_preview_labels["mp"].grid(row=3, column=0, sticky="w", padx=8, pady=(0, 6))
+        ttk.Button(detection_frame, text="刷新預覽", command=self.refresh_bar_preview).grid(row=0, column=1, rowspan=4, sticky="ne", padx=8, pady=4)
 
         rb_frame = ttk.LabelFrame(frame, text="RB function")
         rb_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
@@ -332,11 +327,6 @@ class AutoPotionSettingsGui:
         has_image = False
         for bar_type in ("hp", "mp"):
             preview = previews.get(bar_type, {})
-            text = str(preview.get("debug") or preview.get("error") or "--")
-            if preview.get("error"):
-                text = f"{text} | {preview['error']}"
-            self.bar_preview_texts[bar_type].configure(text=text)
-
             image_data = preview.get("image")
             if isinstance(image_data, bytes):
                 image = tk.PhotoImage(data=image_data, format="PPM")
@@ -344,7 +334,8 @@ class AutoPotionSettingsGui:
                 self.bar_preview_labels[bar_type].configure(image=image, text="")
                 has_image = True
             else:
-                self.bar_preview_labels[bar_type].configure(image="", text="尚無預覽圖片")
+                error = str(preview.get("error") or "尚無預覽圖片")
+                self.bar_preview_labels[bar_type].configure(image="", text=error)
 
         if has_image:
             self.bar_preview_has_snapshot = True
