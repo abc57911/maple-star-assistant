@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import Mock
 
 import base64
 
@@ -54,3 +55,18 @@ class BarDetectionDebugTests(unittest.TestCase):
 
         self.assertTrue(decoded.startswith(b"P6\n2 2\n255\n"))
         self.assertEqual(decoded[-12:], bytes([30, 20, 10]) * 4)
+
+    def test_capture_bar_percent_uses_manual_override_first(self):
+        controller = self.make_controller()
+        controller.settings = Mock(hp_region_override=(1, 2, 3, 4), mp_region_override=None)
+        controller._capture_bar_percent_from_region = Mock(return_value=42.0)
+
+        percent = controller._capture_bar_percent((10, 20, 30, 40), "hp")
+
+        self.assertEqual(percent, 42.0)
+        controller._capture_bar_percent_from_region.assert_called_once_with(
+            (1, 2, 3, 4),
+            "hp",
+            False,
+            "手動覆寫",
+        )
