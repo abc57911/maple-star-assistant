@@ -1,8 +1,10 @@
 import unittest
 
+import base64
+
 import numpy as np
 
-from maple_star.controller import AutoPotionController, BarDetectionDebug
+from maple_star.controller import AutoPotionController, BarDetectionDebug, bgra_image_to_ppm_base64
 
 
 class BarDetectionDebugTests(unittest.TestCase):
@@ -43,3 +45,12 @@ class BarDetectionDebugTests(unittest.TestCase):
         self.assertIn("56%", text)
         self.assertIn("1,2,3,4", text)
         self.assertIn("OK", text)
+
+    def test_bgra_image_to_ppm_base64_scales_preview(self):
+        image = np.array([[[10, 20, 30, 255]]], dtype=np.uint8)
+
+        encoded = bgra_image_to_ppm_base64(image, scale=2)
+        decoded = base64.b64decode(encoded)
+
+        self.assertTrue(decoded.startswith(b"P6\n2 2\n255\n"))
+        self.assertEqual(decoded[-12:], bytes([30, 20, 10]) * 4)
