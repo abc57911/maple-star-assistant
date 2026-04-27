@@ -8,6 +8,7 @@ import tkinter as tk
 from ctypes import wintypes
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from typing import Callable
 
 from .constants import MAX_CONSOLE_LINES
 from .key_capture import DETECTABLE_KEY_VKS, event_to_hotkey, pressed_detectable_vks, vk_to_key_name
@@ -58,6 +59,11 @@ class AutoPotionSettingsGui:
         self.key_detection_window: tk.Toplevel | None = None
         self.toggle_notice_window: tk.Toplevel | None = None
         self.toggle_notice_after_id: str | None = None
+        self.bar_preview_window: tk.Toplevel | None = None
+        self.bar_preview_provider: Callable[[], dict[str, dict[str, object]]] | None = None
+        self.bar_preview_labels: dict[str, ttk.Label] = {}
+        self.bar_preview_texts: dict[str, ttk.Label] = {}
+        self.bar_preview_images: list[tk.PhotoImage] = []
         self.detecting_vk_down: set[int] = set()
         self.last_gui_error_at = -999.0
 
@@ -130,6 +136,7 @@ class AutoPotionSettingsGui:
         detection_frame.columnconfigure(0, weight=1)
         ttk.Label(detection_frame, textvariable=self.hp_detection_status).grid(row=0, column=0, sticky="w", padx=8, pady=(4, 2))
         ttk.Label(detection_frame, textvariable=self.mp_detection_status).grid(row=1, column=0, sticky="w", padx=8, pady=(2, 4))
+        ttk.Button(detection_frame, text="預覽", command=self.show_bar_preview).grid(row=0, column=1, rowspan=2, sticky="e", padx=8, pady=4)
 
         rb_frame = ttk.LabelFrame(frame, text="RB function")
         rb_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
@@ -292,8 +299,81 @@ class AutoPotionSettingsGui:
     def close(self) -> None:
         self.cancel_key_detection()
         self._destroy_toggle_notice()
+        self._destroy_bar_preview()
         self.closed = True
         self.root.destroy()
+
+    def set_bar_preview_provider(self, provider: Callable[[], dict[str, dict[str, object]]]) -> None:
+        self.bar_preview_provider = provider
+
+    def show_bar_preview(self) -> None:
+        if self.bar_preview_provider is None:
+            self.set_status("尚未連接偵測預覽來源")
+            return
+        if self.bar_preview_window is not None:
+            try:
+                self.bar_preview_window.lift()
+                self.refresh_bar_preview()
+                return
+            except tk.TclError:
+                self.bar_preview_window = None
+
+        window = tk.Toplevel(self.root)
+        self.bar_preview_window = window
+        window.title("HP/MP 偵測預覽")
+        window.resizable(True, True)
+        window.protocol("WM_DELETE_WINDOW", self._destroy_bar_preview)
+
+        for row, bar_type in enumerate(("hp", "mp")):
+            frame = ttk.LabelFrame(window, text=bar_type.upper(), padding=8)
+            frame.grid(row=row, column=0, sticky="nsew", padx=8, pady=(8, 4))
+            frame.columnconfigure(0, weight=1)
+            text_label = ttk.Label(frame, text="", wraplength=760)
+            text_label.grid(row=0, column=0, sticky="w")
+            image_label = ttk.Label(frame)
+            image_label.grid(row=1, column=0, sticky="w", pady=(6, 0))
+            self.bar_preview_texts[bar_type] = text_label
+            self.bar_preview_labels[bar_type] = image_label
+
+        ttk.Button(window, text="重新擷取", command=self.refresh_bar_preview).grid(row=2, column=0, sticky="e", padx=8, pady=(4, 8))
+        self.refresh_bar_preview()
+
+    def refresh_bar_preview(self) -> None:
+        if self.bar_preview_provider is None or self.bar_preview_window is None:
+            return
+        try:
+            previews = self.bar_preview_provider()
+        except Exception as exc:
+            self.set_status(f"偵測預覽失敗：{exc}")
+            return
+
+        self.bar_preview_images = []
+        for bar_type in ("hp", "mp"):
+            preview = previews.get(bar_type, {})
+            text = str(preview.get("debug") or preview.get("error") or "--")
+            if preview.get("error"):
+                text = f"{text} | {preview['error']}"
+            self.bar_preview_texts[bar_type].configure(text=text)
+
+            image_data = preview.get("image")
+            if isinstance(image_data, bytes):
+                image = tk.PhotoImage(data=image_data, format="PPM")
+                self.bar_preview_images.append(image)
+                self.bar_preview_labels[bar_type].configure(image=image, text="")
+            else:
+                self.bar_preview_labels[bar_type].configure(image="", text="尚無預覽圖片")
+
+    def _destroy_bar_preview(self) -> None:
+        if self.bar_preview_window is None:
+            return
+        try:
+            self.bar_preview_window.destroy()
+        except tk.TclError:
+            pass
+        self.bar_preview_window = None
+        self.bar_preview_labels = {}
+        self.bar_preview_texts = {}
+        self.bar_preview_images = []
 
     def _refresh_profile_select(self) -> None:
         self.profile_select.configure(values=self.settings.profile_names())

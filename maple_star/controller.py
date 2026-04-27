@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import ctypes
 import sys
 import time
@@ -93,6 +94,20 @@ def loading_screen_metrics(image: np.ndarray) -> tuple[float, float, float]:
         float((luminance > 210.0).mean()),
         float((chroma < 25.0).mean()),
     )
+
+
+def bgra_image_to_ppm_base64(image: np.ndarray, scale: int = 3) -> bytes:
+    if image.ndim != 3 or image.shape[2] < 3:
+        raise ValueError("預覽圖片格式無效")
+    scale = max(1, int(scale))
+    rgb = image[:, :, :3][:, :, ::-1]
+    if scale > 1:
+        rgb = np.repeat(np.repeat(rgb, scale, axis=0), scale, axis=1)
+    height, width, _channels = rgb.shape
+    header = f"P6\n{width} {height}\n255\n".encode("ascii")
+    return base64.b64encode(header + np.ascontiguousarray(rgb).tobytes())
+
+
 class AutoPotionController:
     def __init__(
         self,
@@ -102,6 +117,7 @@ class AutoPotionController:
         self.is_target_window_active = is_target_window_active
         self.settings = settings or load_settings()
         self.gui = AutoPotionSettingsGui(self.settings)
+        self.gui.set_bar_preview_provider(self.capture_bar_preview_images)
         self.sct = mss.mss()
         self.next_capture_at = 0.0
         self.last_hp_drink_at = -999.0
@@ -607,6 +623,47 @@ class AutoPotionController:
         if debug.require_clear_tail:
             tail = " | tail=OK" if debug.tail_clear else " | tail=FAIL"
         return f"{label}: {debug.source} | {percent} | {region} | {debug.reason}{tail}"
+
+    def capture_bar_preview_images(self) -> dict[str, dict[str, object]]:
+        previews: dict[str, dict[str, object]] = {}
+        for bar_type in ("hp", "mp"):
+            debug = self.last_bar_debug.get(bar_type, BarDetectionDebug(bar_type))
+            label = "HP" if bar_type == "hp" else "MP"
+            if debug.region is None:
+                previews[bar_type] = {
+                    "label": label,
+                    "debug": self._bar_detection_debug_text(bar_type),
+                    "image": None,
+                    "error": "尚無可預覽的偵測區域",
+                }
+                continue
+
+            left, top, width, height = debug.region
+            try:
+                image = np.asarray(
+                    self.sct.grab(
+                        {
+                            "left": left,
+                            "top": top,
+                            "width": width,
+                            "height": height,
+                        }
+                    )
+                )
+                previews[bar_type] = {
+                    "label": label,
+                    "debug": self._bar_detection_debug_text(bar_type),
+                    "image": bgra_image_to_ppm_base64(image),
+                    "error": "",
+                }
+            except Exception as exc:
+                previews[bar_type] = {
+                    "label": label,
+                    "debug": self._bar_detection_debug_text(bar_type),
+                    "image": None,
+                    "error": str(exc),
+                }
+        return previews
 
     def _bar_run_has_horizontal_body(self, mask: np.ndarray, start: int, end: int) -> bool:
         if end < start:
