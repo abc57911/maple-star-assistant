@@ -287,10 +287,11 @@ def settings_from_profile_payload(
     )
 
 
-def load_settings(path: Path = SETTINGS_PATH) -> AutoPotionSettings:
+def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> AutoPotionSettings:
     settings = AutoPotionSettings()
     if not path.exists():
-        save_settings(settings, path)
+        if save_migrations:
+            save_settings(settings, path)
         print(f"已建立預設設定檔：{path}")
         return settings
 
@@ -298,12 +299,14 @@ def load_settings(path: Path = SETTINGS_PATH) -> AutoPotionSettings:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         print(f"讀取設定失敗，使用預設值：{exc}")
-        save_settings(settings, path)
+        if save_migrations:
+            save_settings(settings, path)
         return settings
 
     if not isinstance(raw, dict):
         print("設定檔格式錯誤，使用預設值")
-        save_settings(settings, path)
+        if save_migrations:
+            save_settings(settings, path)
         return settings
 
     base_settings = AutoPotionSettings(
@@ -346,7 +349,8 @@ def load_settings(path: Path = SETTINGS_PATH) -> AutoPotionSettings:
         for key, value in expected.items()
     )
     if needs_save:
-        save_settings(loaded_settings, path)
+        if save_migrations:
+            save_settings(loaded_settings, path)
         print("設定檔已補齊缺少或格式異常的參數")
     return loaded_settings
 
