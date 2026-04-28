@@ -26,11 +26,14 @@
 ## PaddleOCR 與經驗效率
 - 經驗效率功能使用 PaddleOCR，主要語言為繁體中文，模型設定預設使用 `chinese_cht` 與 PP-OCRv5 mobile det/rec。
 - 本機開發優先使用 `.venv-paddleocr`；不要把 venv、模型 cache 或下載模型提交。
+- 發行打包也必須使用 `.venv-paddleocr` 內的 Python 3.11-3.13；不要用系統 Python 3.14 打包，因為 PaddleOCR / PaddlePaddle 依賴不支援該環境。
 - PaddleOCR 初始化、辨識錯誤與低信心樣本應輸出到 GUI console 或狀態欄的短訊息，不應造成主 GUI 卡住。
 - OCR 背景工作需維持單 worker、低頻率擷取；調整 `EXPERIENCE_CAPTURE_INTERVAL_SECONDS` 或 OCR 前處理時，需注意 CPU 佔用。
 - EXP OCR 應優先抓 UI 顯示的 EXP 數字與百分比，不使用 EXP 綠條自行推算百分比。
 - EXP OCR 前處理的主路徑應保留完整文字 ROI、補邊並放大；二值化與 parser 容錯只作為 fallback，不應用 parser 掩蓋可在影像層修正的問題。
 - 經驗效率統計應維持最後可信結果；功能停用、OCR 短暫失敗或樣本被拒絕時，不應直接清空 1m、5m、1h 或 ETA。
+- PaddleX 會用 `importlib.metadata` 判斷 `paddlex[ocr-core]` 是否可用；PyInstaller 打包時必須保留 `imagesize`、`opencv-contrib-python`、`pyclipper`、`pypdfium2`、`python-bidi`、`shapely` 的 metadata，否則包內會誤報 `OCR requires additional dependencies`。
+- OpenCV 依賴需維持 `opencv-contrib-python==4.10.0.84`，除非已重新驗證 PaddleOCR / PaddleX 初始化與辨識路徑。
 
 ## 相容性注意事項
 - GUI 需能在遊戲切換前景、拖曳視窗、中文輸入法啟用時維持穩定。
@@ -70,7 +73,10 @@ git status --short
 
 ## 發行
 - 只有使用者明確要求打包時，才執行 `build_release.bat`。
-- 打包前確認 `build_release.bat` 仍會檢查入口檔與 `maple_star` package。
+- 打包前確認 `build_release.bat` 仍會使用 `.venv-paddleocr`、拒絕 Python 3.14+、檢查入口檔與 `maple_star` package。
+- 打包前確認 `build_release.bat` 仍保留 CustomTkinter 資源、PaddleOCR / Paddle / PaddleX hidden import / collect-all，以及 PaddleX `ocr-core` 依賴 metadata。
 - 發行包不應依賴預先存在的 `settings.json`。
 - 打包後確認 `release/MapleStar.zip` 存在，且 ZIP 內含 `MapleStar.exe` 與 `README.txt`。
+- 若調整 PaddleOCR、PaddleX、PyInstaller 或 requirements，打包後需用打包產物或等效 smoke test 驗證 `PaddleOCR(...)` 初始化成功；不能只檢查 ZIP 內是否有 `paddleocr` 目錄。
+- PyInstaller 可能列出 `lxml`、serving、TensorRT、GPU 或 doc parser 相關 warning；只要 `paddlex[ocr-core]` 依賴可用且 `PaddleOCR(...)` 初始化通過，這些選配 warning 不應視為 EXP OCR 發行阻斷。
 - 打包後再次確認 `git status --short`，避免 `*.spec`、`build/`、`dist/` 或 `release/` 污染工作樹。
