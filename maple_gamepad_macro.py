@@ -5,7 +5,7 @@ import queue
 import sys
 import time
 from ctypes import wintypes
-from typing import Protocol
+from typing import Callable, Protocol
 
 from auto_potion import AutoPotionController, AutoPotionSettings, parse_vk_key
 
@@ -17,6 +17,7 @@ from maple_star.controller_worker import (
     EVENT_DEVICE_REMOVED,
     EVENT_ERROR,
     EVENT_STATUS,
+    ControllerEventWorker,
     button_name,
     start_controller_event_worker,
     stop_controller_event_worker,
@@ -171,6 +172,60 @@ def release_tracked_keys() -> None:
         except Exception as exc:
             print(f"釋放按鍵 {key_display_name(vk_code)} 失敗：{exc}")
             TRACKED_HELD_KEYS.discard(vk_code)
+
+
+def sync_runtime_settings_before_controller_events(
+    auto_potion: AutoPotionController,
+    sync_controller_button_bindings: Callable[[], None],
+) -> bool:
+    if not auto_potion.gui.sync_after_event_processing():
+        return False
+    sync_controller_button_bindings()
+    return True
+
+
+def configured_controller_button(button_name_value: str) -> int | None:
+    return CONTROLLER_BUTTONS_BY_NAME.get(button_name_value)
+
+
+def build_controller_button_bindings(
+    settings: AutoPotionSettings,
+    rb_macro: ControllerButtonBinding,
+    lb_macro: ControllerButtonBinding,
+) -> dict[int, tuple[ControllerButtonBinding, ...]]:
+    bindings: dict[int, list[ControllerButtonBinding]] = {}
+    rb_button = configured_controller_button(settings.rb_controller_button)
+    lb_button = configured_controller_button(settings.lb_controller_button)
+    if settings.rb_enabled and rb_button is not None:
+        bindings.setdefault(rb_button, []).append(rb_macro)
+    if settings.lb_enabled and lb_button is not None:
+        bindings.setdefault(lb_button, []).append(lb_macro)
+    return {button: tuple(button_bindings) for button, button_bindings in bindings.items()}
+
+
+def is_controller_binding_enabled(
+    settings: AutoPotionSettings,
+    binding: ControllerButtonBinding,
+    rb_macro: ControllerButtonBinding,
+    lb_macro: ControllerButtonBinding,
+) -> bool:
+    if binding is rb_macro:
+        return settings.rb_enabled
+    if binding is lb_macro:
+        return settings.lb_enabled
+    return True
+
+
+def first_enabled_controller_binding(
+    bindings: tuple[ControllerButtonBinding, ...],
+    settings: AutoPotionSettings,
+    rb_macro: ControllerButtonBinding,
+    lb_macro: ControllerButtonBinding,
+) -> ControllerButtonBinding | None:
+    for binding in bindings:
+        if is_controller_binding_enabled(settings, binding, rb_macro, lb_macro):
+            return binding
+    return None
 
 
 class RBJumpSlashMacro:
@@ -457,22 +512,20 @@ class LBJumpSkillMacro:
 def main() -> None:
     auto_potion = AutoPotionController(is_target_window_active, target_window_provider=find_target_window)
     auto_potion.install_console_redirect()
-    controller_worker = start_controller_event_worker(POLL_INTERVAL_SECONDS)
+    controller_worker: ControllerEventWorker | None = None
     rb_macro = RBJumpSlashMacro(auto_potion.settings)
     lb_macro = LBJumpSkillMacro(auto_potion.settings)
     all_button_bindings: tuple[ControllerButtonBinding, ...] = (rb_macro, lb_macro)
-    controller_button_bindings: dict[int, ControllerButtonBinding] = {}
+    controller_button_bindings: dict[int, tuple[ControllerButtonBinding, ...]] = {}
     current_controller_button_settings: tuple[str, str, bool, bool] | None = None
     key_capture_actions_were_blocked = False
+    controller_worker_dead_reported = False
 
     print("只在 MapleStory Worlds 為前景視窗且偵測到遊戲 HUD 時生效。")
     print(
         f"按 {auto_potion.settings.toggle_hotkey} 可暫停/恢復所有腳本功能；"
         f"按 {auto_potion.settings.emergency_stop_hotkey} 可硬停止並釋放按鍵。按 Ctrl+C 結束。"
     )
-
-    def configured_controller_button(button_name_value: str) -> int | None:
-        return CONTROLLER_BUTTONS_BY_NAME.get(button_name_value)
 
     def sync_controller_button_bindings() -> None:
         nonlocal controller_button_bindings, current_controller_button_settings
@@ -485,24 +538,14 @@ def main() -> None:
         if current_controller_button_settings == new_settings:
             return
 
-        if current_controller_button_settings is not None:
+        if current_controller_button_settings is not None and current_controller_button_settings[:2] != new_settings[:2]:
             stop_all_bindings("手把觸發鍵設定已變更，停止目前巨集並重建綁定")
 
-        bindings: dict[int, ControllerButtonBinding] = {}
-        rb_button = configured_controller_button(auto_potion.settings.rb_controller_button)
-        lb_button = configured_controller_button(auto_potion.settings.lb_controller_button)
-        if auto_potion.settings.rb_enabled and rb_button is not None:
-            bindings[rb_button] = rb_macro
-        if auto_potion.settings.lb_enabled and lb_button is not None:
-            if lb_button in bindings:
-                lb_macro.stop()
-                print(
-                    f"LB function 觸發鍵 {auto_potion.settings.lb_controller_button} "
-                    "與 RB function 重複，已略過 LB 綁定"
-                )
-            else:
-                bindings[lb_button] = lb_macro
-        controller_button_bindings = bindings
+        controller_button_bindings = build_controller_button_bindings(
+            auto_potion.settings,
+            rb_macro,
+            lb_macro,
+        )
         current_controller_button_settings = new_settings
 
     def update_active_bindings() -> None:
@@ -523,6 +566,21 @@ def main() -> None:
         for binding in all_button_bindings:
             binding.stop()
         release_tracked_keys()
+
+    def any_combo_enabled() -> bool:
+        return auto_potion.settings.rb_enabled or auto_potion.settings.lb_enabled
+
+    def ensure_controller_worker_state() -> None:
+        nonlocal controller_worker, controller_worker_dead_reported
+        if not any_combo_enabled():
+            if controller_worker is not None:
+                stop_controller_event_worker(controller_worker)
+                controller_worker = None
+                controller_worker_dead_reported = False
+            return
+        if controller_worker is None:
+            controller_worker = start_controller_event_worker(POLL_INTERVAL_SECONDS)
+            controller_worker_dead_reported = False
 
     def macro_status_text() -> str:
         statuses = []
@@ -563,6 +621,8 @@ def main() -> None:
         return min(deadlines)
 
     def process_controller_events() -> None:
+        if controller_worker is None:
+            return
         for _ in range(128):
             try:
                 event_type, event_value, event_text = controller_worker.event_queue.get_nowait()
@@ -586,41 +646,47 @@ def main() -> None:
                     binding.stop()
 
             elif event_type == EVENT_BUTTON_DOWN and isinstance(event_value, int):
-                binding = controller_button_bindings.get(event_value)
-                if binding is not None:
-                    if auto_potion.is_key_capture_blocking_actions():
-                        binding.stop()
-                        continue
-                    if not auto_potion.scripts_enabled:
-                        print(f"忽略 {button_name(event_value)}：腳本已暫停")
-                        continue
-                    if not auto_potion.gameplay_hud_active:
-                        print(f"忽略 {button_name(event_value)}：未偵測到遊戲 HUD")
-                        continue
-                    if binding is rb_macro and not auto_potion.settings.rb_enabled:
-                        print("忽略 RB：RB function 未啟用")
-                        continue
-                    if binding is lb_macro and not auto_potion.settings.lb_enabled:
-                        print("忽略 LB：LB function 未啟用")
-                        continue
-                    binding.on_button_down()
+                button_bindings = controller_button_bindings.get(event_value, ())
+                if not button_bindings:
+                    continue
+                binding = first_enabled_controller_binding(
+                    button_bindings,
+                    auto_potion.settings,
+                    rb_macro,
+                    lb_macro,
+                )
+                if binding is None:
+                    continue
+                if auto_potion.is_key_capture_blocking_actions():
+                    binding.stop()
+                    continue
+                if not auto_potion.scripts_enabled:
+                    print(f"忽略 {button_name(event_value)}：腳本已暫停")
+                    continue
+                if not auto_potion.gameplay_hud_active:
+                    print(f"忽略 {button_name(event_value)}：未偵測到遊戲 HUD")
+                    continue
+                binding.on_button_down()
 
             elif event_type == EVENT_BUTTON_UP and isinstance(event_value, int):
-                binding = controller_button_bindings.get(event_value)
-                if binding is not None:
+                button_bindings = controller_button_bindings.get(event_value, ())
+                for binding in button_bindings:
                     if auto_potion.is_key_capture_blocking_actions():
                         binding.stop()
                         continue
                     if not auto_potion.can_run_actions():
                         binding.stop()
                         continue
-                    if binding is rb_macro and not auto_potion.settings.rb_enabled:
-                        binding.stop()
-                        continue
-                    if binding is lb_macro and not auto_potion.settings.lb_enabled:
-                        binding.stop()
+                    if not is_controller_binding_enabled(auto_potion.settings, binding, rb_macro, lb_macro):
                         continue
                     binding.on_button_up()
+
+    def report_controller_worker_if_dead() -> None:
+        nonlocal controller_worker_dead_reported
+        if controller_worker is None or controller_worker_dead_reported or controller_worker.process.is_alive():
+            return
+        controller_worker_dead_reported = True
+        print(f"手把監聽 worker 已停止，exitcode={controller_worker.process.exitcode}")
 
     def next_loop_delay_ms() -> int:
         if auto_potion.gui.is_window_interaction_active():
@@ -640,7 +706,9 @@ def main() -> None:
 
             window_interaction_active = auto_potion.gui.is_window_interaction_active()
             if not window_interaction_active:
-                sync_controller_button_bindings()
+                if not sync_runtime_settings_before_controller_events(auto_potion, sync_controller_button_bindings):
+                    return
+                ensure_controller_worker_state()
             auto_potion.poll_control_hotkeys()
             key_capture_actions_blocked = auto_potion.is_key_capture_blocking_actions()
             if key_capture_actions_blocked and not key_capture_actions_were_blocked:
@@ -670,6 +738,7 @@ def main() -> None:
                 update_active_bindings()
                 refresh_runtime_info()
                 process_controller_events()
+                report_controller_worker_if_dead()
         except Exception as exc:
             print(f"主迴圈錯誤：{exc}")
             if not auto_potion.is_closed():
@@ -686,7 +755,8 @@ def main() -> None:
         for binding in all_button_bindings:
             binding.cleanup()
         release_tracked_keys()
-        stop_controller_event_worker(controller_worker)
+        if controller_worker is not None:
+            stop_controller_event_worker(controller_worker)
 
 
 if __name__ == "__main__":

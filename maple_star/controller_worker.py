@@ -96,11 +96,14 @@ def run_controller_event_worker(event_queue: mp.Queue, stop_event: mp.Event, pol
         return
 
     controllers_by_id: dict[int, Any] = {}
+    joysticks_by_id: dict[int, Any] = {}
     try:
         pygame.init()
         pygame.joystick.init()
         controller.init()
         controllers_by_id = _open_connected_controllers(controller, event_queue)
+        if not controllers_by_id:
+            joysticks_by_id = _open_connected_joysticks(pygame, event_queue)
 
         while not stop_event.is_set():
             for event in pygame.event.get():
@@ -123,11 +126,33 @@ def run_controller_event_worker(event_queue: mp.Queue, stop_event: mp.Event, pol
                 elif event.type == pygame.CONTROLLERBUTTONUP:
                     _put_event(event_queue, (EVENT_BUTTON_UP, int(event.button), None))
 
+                elif not controllers_by_id and event.type == pygame.JOYDEVICEADDED:
+                    pad = pygame.joystick.Joystick(event.device_index)
+                    pad.init()
+                    joystick_id = _joystick_instance_id(pad)
+                    joysticks_by_id[joystick_id] = pad
+                    _put_event(event_queue, (EVENT_DEVICE_ADDED, joystick_id, f"{pad.get_name()} (Joystick)"))
+
+                elif not controllers_by_id and event.type == pygame.JOYDEVICEREMOVED:
+                    joystick_id = int(getattr(event, "instance_id", getattr(event, "which", -1)))
+                    pad = joysticks_by_id.pop(joystick_id, None)
+                    name = f"{pad.get_name()} (Joystick)" if pad is not None else "unknown"
+                    _close_controller(pad)
+                    _put_event(event_queue, (EVENT_DEVICE_REMOVED, joystick_id, name))
+
+                elif not controllers_by_id and event.type == pygame.JOYBUTTONDOWN:
+                    _put_event(event_queue, (EVENT_BUTTON_DOWN, int(event.button), None))
+
+                elif not controllers_by_id and event.type == pygame.JOYBUTTONUP:
+                    _put_event(event_queue, (EVENT_BUTTON_UP, int(event.button), None))
+
             time.sleep(max(0.001, poll_interval_seconds))
     except Exception as exc:
         _put_event(event_queue, (EVENT_ERROR, None, f"手把監聽 worker 錯誤：{exc}"))
     finally:
         for pad in controllers_by_id.values():
+            _close_controller(pad)
+        for pad in joysticks_by_id.values():
             _close_controller(pad)
         try:
             controller.quit()
@@ -151,6 +176,28 @@ def _open_connected_controllers(controller: Any, event_queue: mp.Queue) -> dict[
             _put_event(event_queue, (EVENT_DEVICE_ADDED, int(pad.id), str(pad.name)))
 
     return controllers_by_id
+
+
+def _open_connected_joysticks(pygame: Any, event_queue: mp.Queue) -> dict[int, Any]:
+    joysticks_by_id: dict[int, Any] = {}
+    count = int(pygame.joystick.get_count())
+    _put_event(event_queue, (EVENT_STATUS, None, f"偵測到 0 個 SDL Controller，改用 Joystick fallback：{count} 個裝置。"))
+
+    for index in range(count):
+        pad = pygame.joystick.Joystick(index)
+        pad.init()
+        joystick_id = _joystick_instance_id(pad)
+        joysticks_by_id[joystick_id] = pad
+        _put_event(event_queue, (EVENT_DEVICE_ADDED, joystick_id, f"{pad.get_name()} (Joystick)"))
+
+    return joysticks_by_id
+
+
+def _joystick_instance_id(pad: Any) -> int:
+    try:
+        return int(pad.get_instance_id())
+    except Exception:
+        return int(pad.get_id())
 
 
 def _close_controller(pad: Any) -> None:

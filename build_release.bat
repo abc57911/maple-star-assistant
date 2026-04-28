@@ -19,11 +19,17 @@ if errorlevel 1 (
     if errorlevel 1 exit /b 1
 )
 
+python -c "import PIL" >nul 2>nul
+if errorlevel 1 (
+    python -m pip install "Pillow>=10.0.0"
+    if errorlevel 1 exit /b 1
+)
+
 for /f "usebackq delims=" %%I in (`python -c "import customtkinter, pathlib; print(pathlib.Path(customtkinter.__file__).resolve().parent)"`) do set CUSTOMTKINTER_DIR=%%I
 if not defined CUSTOMTKINTER_DIR exit /b 1
 if not exist "%CUSTOMTKINTER_DIR%" exit /b 1
 
-python -m PyInstaller --noconfirm --clean --windowed --onedir --name "%APP_NAME%" --add-data "%CUSTOMTKINTER_DIR%;customtkinter/" main.pyw
+python -m PyInstaller --noconfirm --clean --windowed --onedir --name "%APP_NAME%" --hidden-import PIL.Image --add-data "%CUSTOMTKINTER_DIR%;customtkinter/" main.pyw
 if errorlevel 1 exit /b 1
 
 if not exist "%DIST_APP_DIR%" exit /b 1

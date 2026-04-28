@@ -870,11 +870,13 @@ class AutoPotionSettingsGui:
         variable: tk.BooleanVar,
         *,
         width: int = 92,
+        command: Callable[[], None] | None = None,
     ) -> ctk.CTkCheckBox:
         return ctk.CTkCheckBox(
             parent,
             text=text,
             variable=variable,
+            command=command or self.apply_to_settings,
             width=width,
             height=26,
             checkbox_width=18,
