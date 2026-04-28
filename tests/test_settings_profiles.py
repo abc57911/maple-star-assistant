@@ -27,17 +27,30 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(settings.toggle_hotkey, "F11")
         self.assertEqual(settings.emergency_stop_hotkey, "Pause")
         self.assertEqual(settings.experience_toggle_hotkey, "F10")
+        self.assertFalse(settings.console_collapsed)
+        self.assertFalse(settings.compact_experience_mode)
+        self.assertFalse(settings.window_topmost)
         self.assertIn("Default", saved["profiles"])
         self.assertEqual(saved["profiles"]["Default"]["hp_key"], "9")
         self.assertFalse(saved["profiles"]["Default"]["exp_efficiency_enabled"])
         self.assertEqual(saved["toggle_hotkey"], "F11")
         self.assertEqual(saved["emergency_stop_hotkey"], "Pause")
         self.assertEqual(saved["experience_toggle_hotkey"], "F10")
+        self.assertFalse(saved["console_collapsed"])
+        self.assertFalse(saved["compact_experience_mode"])
+        self.assertFalse(saved["window_topmost"])
 
     def test_load_settings_can_skip_writing_migrations(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_path = Path(temp_dir) / "settings.json"
-            original = json.dumps({"hp_key": "9"})
+            original = json.dumps(
+                {
+                    "hp_key": "9",
+                    "console_collapsed": True,
+                    "compact_experience_mode": True,
+                    "window_topmost": True,
+                }
+            )
             settings_path.write_text(original, encoding="utf-8")
 
             with patch("builtins.print"):
@@ -45,6 +58,9 @@ class SettingsProfileTests(unittest.TestCase):
             saved = settings_path.read_text(encoding="utf-8")
 
         self.assertEqual(settings.hp_key, "9")
+        self.assertTrue(settings.console_collapsed)
+        self.assertTrue(settings.compact_experience_mode)
+        self.assertTrue(settings.window_topmost)
         self.assertEqual(saved, original)
 
     def test_apply_profile_saves_current_profile_before_switching(self):
@@ -84,12 +100,21 @@ class SettingsProfileTests(unittest.TestCase):
             toggle_hotkey="F9",
             emergency_stop_hotkey="Pause",
             experience_toggle_hotkey="F10",
+            console_collapsed=True,
+            compact_experience_mode=True,
+            window_topmost=True,
         )
         payload = settings.to_json_dict()
 
         self.assertEqual(payload["toggle_hotkey"], "F9")
         self.assertEqual(payload["emergency_stop_hotkey"], "Pause")
         self.assertEqual(payload["experience_toggle_hotkey"], "F10")
+        self.assertTrue(payload["console_collapsed"])
+        self.assertTrue(payload["compact_experience_mode"])
+        self.assertTrue(payload["window_topmost"])
         self.assertNotIn("toggle_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("emergency_stop_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("experience_toggle_hotkey", payload["profiles"]["Default"])
+        self.assertNotIn("console_collapsed", payload["profiles"]["Default"])
+        self.assertNotIn("compact_experience_mode", payload["profiles"]["Default"])
+        self.assertNotIn("window_topmost", payload["profiles"]["Default"])

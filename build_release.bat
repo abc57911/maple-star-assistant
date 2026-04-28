@@ -19,7 +19,11 @@ if errorlevel 1 (
     if errorlevel 1 exit /b 1
 )
 
-python -m PyInstaller --noconfirm --clean --windowed --onedir --name "%APP_NAME%" main.pyw
+for /f "usebackq delims=" %%I in (`python -c "import customtkinter, pathlib; print(pathlib.Path(customtkinter.__file__).resolve().parent)"`) do set CUSTOMTKINTER_DIR=%%I
+if not defined CUSTOMTKINTER_DIR exit /b 1
+if not exist "%CUSTOMTKINTER_DIR%" exit /b 1
+
+python -m PyInstaller --noconfirm --clean --windowed --onedir --name "%APP_NAME%" --add-data "%CUSTOMTKINTER_DIR%;customtkinter/" main.pyw
 if errorlevel 1 exit /b 1
 
 if not exist "%DIST_APP_DIR%" exit /b 1

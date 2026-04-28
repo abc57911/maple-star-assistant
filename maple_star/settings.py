@@ -83,6 +83,9 @@ class AutoPotionSettings:
     toggle_hotkey: str = DEFAULT_TOGGLE_HOTKEY
     emergency_stop_hotkey: str = DEFAULT_EMERGENCY_STOP_HOTKEY
     experience_toggle_hotkey: str = DEFAULT_EXPERIENCE_TOGGLE_HOTKEY
+    console_collapsed: bool = False
+    compact_experience_mode: bool = False
+    window_topmost: bool = False
     active_profile: str = DEFAULT_PROFILE_NAME
     profiles: dict[str, dict[str, object]] = field(default_factory=dict)
 
@@ -111,6 +114,9 @@ class AutoPotionSettings:
             self.toggle_hotkey,
             self.emergency_stop_hotkey,
             self.experience_toggle_hotkey,
+            self.console_collapsed,
+            self.compact_experience_mode,
+            self.window_topmost,
             self.active_profile,
             json.dumps(self.profiles, ensure_ascii=False, sort_keys=True),
         )
@@ -147,6 +153,9 @@ class AutoPotionSettings:
             "toggle_hotkey": self.toggle_hotkey,
             "emergency_stop_hotkey": self.emergency_stop_hotkey,
             "experience_toggle_hotkey": self.experience_toggle_hotkey,
+            "console_collapsed": self.console_collapsed,
+            "compact_experience_mode": self.compact_experience_mode,
+            "window_topmost": self.window_topmost,
             "active_profile": normalize_profile_name(self.active_profile),
             "profiles": profiles,
         }
@@ -224,6 +233,9 @@ GLOBAL_SETTING_KEYS = (
     "toggle_hotkey",
     "emergency_stop_hotkey",
     "experience_toggle_hotkey",
+    "console_collapsed",
+    "compact_experience_mode",
+    "window_topmost",
 )
 
 
@@ -307,6 +319,9 @@ def settings_from_profile_payload(
         toggle_hotkey=fallback.toggle_hotkey,
         emergency_stop_hotkey=fallback.emergency_stop_hotkey,
         experience_toggle_hotkey=fallback.experience_toggle_hotkey,
+        console_collapsed=fallback.console_collapsed,
+        compact_experience_mode=fallback.compact_experience_mode,
+        window_topmost=fallback.window_topmost,
         active_profile=normalize_profile_name(active_profile),
         profiles=profiles,
     )
@@ -362,6 +377,9 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
             "experience_toggle_hotkey",
             settings.experience_toggle_hotkey,
         ),
+        console_collapsed=_read_bool(raw, "console_collapsed", settings.console_collapsed),
+        compact_experience_mode=_read_bool(raw, "compact_experience_mode", settings.compact_experience_mode),
+        window_topmost=_read_bool(raw, "window_topmost", settings.window_topmost),
         active_profile=normalize_profile_name(raw.get("active_profile"), DEFAULT_PROFILE_NAME),
     )
     profiles = _read_profiles(raw.get("profiles"), base_settings)
