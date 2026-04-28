@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import ctypes
+import io
 import json
 import sys
 import time
 import tkinter as tk
 from ctypes import wintypes
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog
 from typing import Callable
+
+import customtkinter as ctk
 
 from .constants import MAX_CONSOLE_LINES
 from .experience import ExperienceSnapshot, format_eta, format_exp
@@ -24,6 +27,78 @@ from .settings import (
     save_settings,
 )
 from .win_input import Point, parse_vk_key, user32
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("dark-blue")
+
+FONT_FAMILY = "Noto Sans TC"
+MONO_FONT_FAMILY = "Noto Sans TC"
+CONSOLE_FONT_FAMILY = "Noto Sans TC"
+APP_BG = "#09111f"
+PANEL_BG = "#101b2d"
+PANEL_BG_ALT = "#0d1728"
+PANEL_BORDER = "#243653"
+SECTION_HEADER_BG = "#172943"
+SECTION_HEADER_BORDER = "#355579"
+HEADER_TEXT = "#e5f2ff"
+BODY_TEXT = "#d6e3f0"
+MUTED_TEXT = "#8da2b8"
+ACCENT_BLUE = "#2f8cff"
+ACCENT_GREEN = "#18b981"
+HP_RED = "#ff5b6e"
+MP_BLUE = "#45a3ff"
+WARNING_YELLOW = "#f6c44f"
+BUTTON_BG = "#1f6feb"
+BUTTON_HOVER = "#2d81ff"
+BUTTON_BORDER = "#4b7fb8"
+SECONDARY_BUTTON_BG = "#23486f"
+SECONDARY_BUTTON_HOVER = "#2c5c8d"
+ENTRY_BG = "#0b1424"
+CONSOLE_BG = "#050b14"
+CONSOLE_TEXT = "#b8f7d4"
+INFO_ICON_BG = "#153a63"
+INFO_ICON_HOVER = "#1e5c95"
+TOOLTIP_BG = "#0f2138"
+TOOLTIP_BORDER = "#3c648d"
+HOTKEY_ENTRY_WIDTH = 72
+PROFILE_COMBO_WIDTH = 138
+PERCENT_ENTRY_WIDTH = 46
+POTION_KEY_ENTRY_WIDTH = 76
+COMBO_KEY_ENTRY_WIDTH = 58
+SECONDS_ENTRY_WIDTH = 46
+CONTROLLER_COMBO_WIDTH = 100
+LEFT_PANEL_MAX_WIDTH = 720
+COMPACT_PANEL_WIDTH = 520
+CONSOLE_MIN_WIDTH = 320
+EXP_PANEL_WIDTH = 420
+DETECTION_PANEL_WIDTH = 292
+MONITOR_PANEL_HEIGHT = 180
+WINDOW_EXPANDED_MIN_WIDTH = LEFT_PANEL_MAX_WIDTH + CONSOLE_MIN_WIDTH + 40
+WINDOW_COLLAPSED_MIN_WIDTH = LEFT_PANEL_MAX_WIDTH + 32
+WINDOW_MIN_WIDTH = WINDOW_EXPANDED_MIN_WIDTH
+WINDOW_MIN_HEIGHT = 800
+WINDOW_DEFAULT_WIDTH = 1240
+WINDOW_DEFAULT_HEIGHT = 835
+WINDOW_COLLAPSED_WIDTH = WINDOW_COLLAPSED_MIN_WIDTH
+COMPACT_WINDOW_MIN_WIDTH = COMPACT_PANEL_WIDTH + 24
+COMPACT_WINDOW_MIN_HEIGHT = 190
+COMPACT_WINDOW_WIDTH = COMPACT_WINDOW_MIN_WIDTH
+COMPACT_WINDOW_HEIGHT = COMPACT_WINDOW_MIN_HEIGHT
+SECTION_RADIUS = 10
+CONTROL_RADIUS = 7
+SECTION_PAD_X = 12
+SECTION_PAD_Y = 10
+UI_FONT = (FONT_FAMILY, 13)
+SMALL_FONT = (FONT_FAMILY, 12)
+BUTTON_FONT = (FONT_FAMILY, 13)
+TITLE_FONT = (FONT_FAMILY, 13, "bold")
+MONO_FONT = (MONO_FONT_FAMILY, 12)
+EXP_FONT = (FONT_FAMILY, 14)
+EXP_MONO_FONT = (MONO_FONT_FAMILY, 13)
+CONSOLE_FONT = (CONSOLE_FONT_FAMILY, 14)
+WINDOW_INTERACTION_GRACE_SECONDS = 0.12
+RESIZE_SETTLE_DELAY_MS = 140
+
 
 class GuiConsoleWriter:
     def __init__(self, gui: AutoPotionSettingsGui, original: object | None = None) -> None:
@@ -51,24 +126,57 @@ class AutoPotionSettingsGui:
     def __init__(self, settings: AutoPotionSettings) -> None:
         self.settings = settings
         self.closed = False
-        self.root = tk.Tk()
-        self.root.title("自動喝水設定")
+        self.root = ctk.CTk(fg_color=APP_BG)
+        self.root.title("大雞雞專用")
         self.root.resizable(True, True)
+        self.root.minsize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
+        self.root.geometry(f"{WINDOW_DEFAULT_WIDTH}x{WINDOW_DEFAULT_HEIGHT}")
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.detecting_key_target: tk.StringVar | None = None
         self.detecting_key_label = ""
-        self.key_detection_window: tk.Toplevel | None = None
+        self.key_detection_window: ctk.CTkToplevel | None = None
         self.key_detection_just_finished = False
         self.key_detection_release_vks: set[int] = set()
-        self.toggle_notice_window: tk.Toplevel | None = None
+        self.toggle_notice_window: ctk.CTkToplevel | None = None
         self.toggle_notice_after_id: str | None = None
         self.bar_preview_provider: Callable[[bool], dict[str, dict[str, object]]] | None = None
         self.experience_reset_handler: Callable[[], None] | None = None
-        self.bar_preview_labels: dict[str, ttk.Label] = {}
-        self.bar_preview_images: list[tk.PhotoImage] = []
+        self.bar_preview_labels: dict[str, ctk.CTkLabel] = {}
+        self.bar_preview_images: list[ctk.CTkImage] = []
         self.bar_preview_has_snapshot = False
         self.detecting_vk_down: set[int] = set()
         self.last_gui_error_at = -999.0
+        self.window_interaction_pause_until = 0.0
+        self.content_frame: ctk.CTkFrame | None = None
+        self.controls_frame: ctk.CTkFrame | None = None
+        self.monitor_frame: ctk.CTkFrame | None = None
+        self.exp_section: ctk.CTkFrame | None = None
+        self.detection_section: ctk.CTkFrame | None = None
+        self.full_panel_widgets: list[tk.Misc] = []
+        self.panel_mode_button: ctk.CTkButton | None = None
+        self.topmost_button: ctk.CTkButton | None = None
+        self.console_section: ctk.CTkFrame | None = None
+        self.console_title_label: ctk.CTkLabel | None = None
+        self.console_toggle_button: ctk.CTkButton | None = None
+        self.console_restore_button: ctk.CTkButton | None = None
+        self.console_frame: ctk.CTkFrame | None = None
+        self.console_container: ctk.CTkFrame | None = None
+        self.console_scrollbar: ctk.CTkScrollbar | None = None
+        self.console_collapsed = False
+        self.console_resize_after_id: str | None = None
+        self.console_resize_frozen = False
+        self.resize_layout_suspended = False
+        self.suppress_resize_suspend_until = 0.0
+        self.expanded_window_width = WINDOW_DEFAULT_WIDTH
+        self.default_window_size = (WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT)
+        self.compact_experience_mode = False
+        self.window_topmost = False
+        self.last_root_size: tuple[int, int] | None = None
+        self.tooltip_window: ctk.CTkToplevel | None = None
+        self.tooltip_windows: list[ctk.CTkToplevel] = []
+        self.tooltip_anchor_widget: ctk.CTkBaseClass | None = None
+        self.tooltip_after_id: str | None = None
+        self.tooltip_hide_after_id: str | None = None
 
         self.active_profile = tk.StringVar(value=settings.active_profile)
         self.hp_enabled = tk.BooleanVar(value=settings.hp_enabled)
@@ -107,144 +215,834 @@ class AutoPotionSettingsGui:
         self.hp_detection_status = tk.StringVar(value="HP: --")
         self.mp_detection_status = tk.StringVar(value="MP: --")
         self.exp_current_status = tk.StringVar(value="EXP：--")
-        self.exp_rate_1m_status = tk.StringVar(value="1m：--")
         self.exp_rate_5m_status = tk.StringVar(value="5m：--")
+        self.exp_rate_10m_status = tk.StringVar(value="10m：--")
         self.exp_rate_1h_status = tk.StringVar(value="1h：--")
         self.exp_eta_status = tk.StringVar(value="升級預估：--")
         self.exp_reader_status = tk.StringVar(value="狀態：尚未開始")
 
-        frame = ttk.Frame(self.root, padding=12)
-        frame.grid(row=0, column=0, sticky="nsew")
+        frame = ctk.CTkFrame(self.root, fg_color=APP_BG, corner_radius=0)
+        frame.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        self.content_frame = frame
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
-        frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(9, weight=1)
+        self.root.bind("<Alt-F4>", lambda _event: self.close(), add="+")
+        frame.columnconfigure(0, weight=0, minsize=LEFT_PANEL_MAX_WIDTH)
+        frame.columnconfigure(1, weight=1, minsize=CONSOLE_MIN_WIDTH)
+        frame.rowconfigure(0, weight=1)
 
-        control_hotkey_frame = ttk.LabelFrame(frame, text="全域熱鍵")
-        control_hotkey_frame.grid(row=0, column=0, sticky="ew")
+        controls_frame = ctk.CTkFrame(frame, fg_color="transparent", width=LEFT_PANEL_MAX_WIDTH)
+        self.controls_frame = controls_frame
+        controls_frame.grid(row=0, column=0, sticky="nsw", padx=(0, 8))
+        controls_frame.grid_propagate(False)
+        controls_frame.columnconfigure(0, weight=1)
+
+        control_hotkey_section, _header, control_hotkey_frame = self._build_section(controls_frame, "全域熱鍵", row=0, pady=(0, 0))
+        for column in range(10):
+            control_hotkey_frame.columnconfigure(column, weight=0)
         control_hotkey_frame.columnconfigure(10, weight=1)
-        ttk.Label(control_hotkey_frame, text="暫停/恢復").grid(row=0, column=0, sticky="w", padx=(8, 4), pady=6)
-        toggle_entry = ttk.Entry(control_hotkey_frame, width=9, textvariable=self.toggle_hotkey)
+        self._label(control_hotkey_frame, "暫停/恢復").grid(row=0, column=0, sticky="w", padx=(0, 4), pady=6)
+        toggle_entry = self._entry(control_hotkey_frame, self.toggle_hotkey, width=HOTKEY_ENTRY_WIDTH, justify="center")
         toggle_entry.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=6)
         toggle_entry.bind(
             "<Button-1>",
             lambda _event: self.start_key_detection(self.toggle_hotkey, "暫停/恢復熱鍵"),
         )
-        ttk.Label(control_hotkey_frame, text="硬停止").grid(row=0, column=3, sticky="w", padx=(16, 4), pady=6)
-        emergency_entry = ttk.Entry(control_hotkey_frame, width=9, textvariable=self.emergency_stop_hotkey)
-        emergency_entry.grid(row=0, column=4, sticky="w", padx=(0, 8), pady=6)
+        self._info_icon(control_hotkey_frame, lambda: "硬停止會暫停腳本並釋放按鍵").grid(row=0, column=3, sticky="w", padx=(16, 4), pady=6)
+        self._label(control_hotkey_frame, "硬停止").grid(row=0, column=4, sticky="w", padx=(0, 4), pady=6)
+        emergency_entry = self._entry(control_hotkey_frame, self.emergency_stop_hotkey, width=HOTKEY_ENTRY_WIDTH, justify="center")
+        emergency_entry.grid(row=0, column=5, sticky="w", padx=(0, 8), pady=6)
         emergency_entry.bind(
             "<Button-1>",
             lambda _event: self.start_key_detection(self.emergency_stop_hotkey, "硬停止熱鍵"),
         )
-        ttk.Label(control_hotkey_frame, text="經驗統計").grid(row=0, column=6, sticky="w", padx=(16, 4), pady=6)
-        exp_toggle_entry = ttk.Entry(control_hotkey_frame, width=9, textvariable=self.experience_toggle_hotkey)
-        exp_toggle_entry.grid(row=0, column=7, sticky="w", padx=(0, 8), pady=6)
+        self._label(control_hotkey_frame, "經驗統計").grid(row=0, column=7, sticky="w", padx=(16, 4), pady=6)
+        exp_toggle_entry = self._entry(control_hotkey_frame, self.experience_toggle_hotkey, width=HOTKEY_ENTRY_WIDTH, justify="center")
+        exp_toggle_entry.grid(row=0, column=8, sticky="w", padx=(0, 8), pady=6)
         exp_toggle_entry.bind(
             "<Button-1>",
             lambda _event: self.start_key_detection(self.experience_toggle_hotkey, "經驗統計熱鍵"),
         )
-        ttk.Label(control_hotkey_frame, text="硬停止會暫停腳本並釋放按鍵").grid(row=0, column=9, sticky="w", padx=(16, 0), pady=6)
 
-        profile_frame = ttk.Frame(frame)
-        profile_frame.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        profile_frame.columnconfigure(1, weight=1)
-        ttk.Label(profile_frame, text="設定檔").grid(row=0, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
-        self.profile_select = ttk.Combobox(
+        profile_section, _header, profile_frame = self._build_section(controls_frame, "設定檔", row=1)
+        for column in range(7):
+            profile_frame.columnconfigure(column, weight=0)
+        profile_frame.columnconfigure(2, weight=1)
+        self._label(profile_frame, "目前").grid(row=0, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
+        self.profile_select = self._combo(
             profile_frame,
             textvariable=self.active_profile,
             values=self.settings.profile_names(),
-            state="readonly",
-            width=18,
+            width=PROFILE_COMBO_WIDTH,
+            command=lambda _value: self._switch_profile(),
         )
         self.profile_select.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=(0, 4))
         self.profile_select.bind("<<ComboboxSelected>>", self._switch_profile)
-        ttk.Button(profile_frame, text="新增", command=self.create_profile).grid(row=0, column=2, sticky="w", padx=(0, 4), pady=(0, 4))
-        ttk.Button(profile_frame, text="刪除", command=self.delete_profile).grid(row=0, column=3, sticky="w", padx=(0, 4), pady=(0, 4))
-        ttk.Button(profile_frame, text="匯入", command=self.import_settings).grid(row=0, column=4, sticky="w", padx=(0, 4), pady=(0, 4))
-        ttk.Button(profile_frame, text="匯出", command=self.export_settings).grid(row=0, column=5, sticky="w", pady=(0, 4))
+        self._button(profile_frame, "新增", self.create_profile, width=64).grid(row=0, column=3, sticky="w", padx=(0, 4), pady=(0, 4))
+        self._button(profile_frame, "刪除", self.delete_profile, width=64).grid(row=0, column=4, sticky="w", padx=(0, 4), pady=(0, 4))
+        self._button(profile_frame, "匯入", self.import_settings, width=64).grid(row=0, column=5, sticky="w", padx=(0, 4), pady=(0, 4))
+        self._button(profile_frame, "匯出", self.export_settings, width=64).grid(row=0, column=6, sticky="w", pady=(0, 4))
 
-        controls = ttk.Frame(frame)
-        controls.grid(row=2, column=0, sticky="ew")
+        potion_section, _header, controls = self._build_section(controls_frame, "藥水監控", row=2)
         controls.columnconfigure(1, weight=1)
         self._build_row(controls, 0, "紅水", self.hp_enabled, self.hp_threshold, self.hp_threshold_text, self.hp_key, self.hp_cooldown, self.hp_current)
         self._build_row(controls, 1, "藍水", self.mp_enabled, self.mp_threshold, self.mp_threshold_text, self.mp_key, self.mp_cooldown, self.mp_current)
 
-        detection_frame = ttk.LabelFrame(frame, text="偵測診斷")
-        detection_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        detection_frame.columnconfigure(0, weight=1)
-        ttk.Label(detection_frame, textvariable=self.hp_detection_status).grid(row=0, column=0, sticky="w", padx=8, pady=(4, 2))
-        self.bar_preview_labels["hp"] = ttk.Label(detection_frame, text="尚未刷新預覽")
-        self.bar_preview_labels["hp"].grid(row=1, column=0, sticky="w", padx=8, pady=(0, 6))
-        ttk.Label(detection_frame, textvariable=self.mp_detection_status).grid(row=2, column=0, sticky="w", padx=8, pady=(2, 2))
-        self.bar_preview_labels["mp"] = ttk.Label(detection_frame, text="尚未刷新預覽")
-        self.bar_preview_labels["mp"].grid(row=3, column=0, sticky="w", padx=8, pady=(0, 6))
-        ttk.Button(detection_frame, text="刷新預覽", command=self.refresh_bar_preview).grid(row=0, column=1, rowspan=4, sticky="ne", padx=8, pady=4)
+        monitor_frame = ctk.CTkFrame(controls_frame, fg_color="transparent")
+        self.monitor_frame = monitor_frame
+        monitor_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        monitor_frame.grid_propagate(False)
+        monitor_frame.configure(height=MONITOR_PANEL_HEIGHT)
+        monitor_frame.columnconfigure(0, weight=0, minsize=EXP_PANEL_WIDTH)
+        monitor_frame.columnconfigure(1, weight=0, minsize=DETECTION_PANEL_WIDTH)
 
-        exp_frame = ttk.LabelFrame(frame, text="經驗效率")
-        exp_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-        for column in range(6):
+        exp_section, exp_title, exp_frame = self._build_section(monitor_frame, "", row=0, column=0, sticky="nsew", padx=(0, 8), pady=0)
+        self.exp_section = exp_section
+        exp_section.configure(width=EXP_PANEL_WIDTH, height=MONITOR_PANEL_HEIGHT)
+        exp_section.grid_propagate(False)
+        self._checkbox(exp_title, "", self.exp_efficiency_enabled, width=20).grid(row=0, column=0, sticky="w", padx=(8, 0), pady=4)
+        self._title_label(exp_title, "經驗效率").grid(row=0, column=1, sticky="w", padx=(2, 0), pady=4)
+        self._button(exp_title, "重置統計", self.reset_experience_statistics, width=82).grid(row=0, column=2, sticky="w", padx=(8, 0), pady=4)
+        self.panel_mode_button = self._button(exp_title, "經驗模式", self.toggle_compact_experience_mode, width=82)
+        self.panel_mode_button.grid(row=0, column=98, sticky="e", padx=(8, 4), pady=4)
+        self.topmost_button = self._button(exp_title, "置頂", self.toggle_window_topmost, width=76)
+        self.topmost_button.grid(row=0, column=99, sticky="e", padx=(0, 8), pady=4)
+        for column in range(5):
             exp_frame.columnconfigure(column, weight=1 if column else 0)
-        ttk.Checkbutton(exp_frame, text="啟用", variable=self.exp_efficiency_enabled).grid(row=0, column=0, sticky="w", padx=(8, 12), pady=6)
-        ttk.Label(exp_frame, textvariable=self.exp_current_status).grid(row=0, column=1, sticky="w", padx=(0, 12), pady=6)
-        ttk.Label(exp_frame, textvariable=self.exp_rate_1m_status).grid(row=0, column=2, sticky="w", padx=(0, 12), pady=6)
-        ttk.Label(exp_frame, textvariable=self.exp_rate_5m_status).grid(row=0, column=3, sticky="w", padx=(0, 12), pady=6)
-        ttk.Label(exp_frame, textvariable=self.exp_rate_1h_status).grid(row=1, column=1, sticky="w", padx=(0, 12), pady=(0, 6))
-        ttk.Label(exp_frame, textvariable=self.exp_eta_status).grid(row=1, column=2, sticky="w", padx=(0, 12), pady=(0, 6))
-        ttk.Label(exp_frame, textvariable=self.exp_reader_status).grid(row=1, column=3, sticky="w", padx=(0, 12), pady=(0, 6))
-        ttk.Button(exp_frame, text="重置統計", command=self.reset_experience_statistics).grid(row=0, column=5, rowspan=2, sticky="e", padx=8, pady=6)
+        self._label(exp_frame, textvariable=self.exp_current_status, font=EXP_MONO_FONT, color=ACCENT_GREEN).grid(row=0, column=0, sticky="w", padx=(0, 12), pady=6)
+        self._label(exp_frame, textvariable=self.exp_eta_status, color=WARNING_YELLOW, font=EXP_FONT).grid(row=0, column=1, sticky="w", padx=(0, 12), pady=6)
+        self._label(exp_frame, textvariable=self.exp_rate_5m_status, font=EXP_MONO_FONT).grid(row=1, column=0, sticky="w", padx=(0, 12), pady=(0, 6))
+        self._label(exp_frame, textvariable=self.exp_rate_10m_status, font=EXP_MONO_FONT).grid(row=1, column=1, sticky="w", padx=(0, 12), pady=(0, 6))
+        self._label(exp_frame, textvariable=self.exp_rate_1h_status, font=EXP_MONO_FONT).grid(row=1, column=2, sticky="w", padx=(0, 12), pady=(0, 6))
+        self._label(exp_frame, textvariable=self.exp_reader_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=2, column=0, columnspan=4, sticky="w", padx=(0, 12), pady=(0, 6))
 
-        rb_frame = ttk.LabelFrame(frame, text="RB function")
-        rb_frame.grid(row=5, column=0, sticky="ew", pady=(8, 0))
-        for column in range(13):
-            rb_frame.columnconfigure(column, weight=0)
-        rb_frame.columnconfigure(12, weight=1)
-        ttk.Checkbutton(rb_frame, text="啟用", variable=self.rb_enabled).grid(row=0, column=0, sticky="w", padx=(8, 12), pady=6)
-        self._build_controller_button_select(rb_frame, 0, 1, "觸發", self.rb_controller_button)
-        self._build_key_entry(rb_frame, 0, 3, "跳躍鍵", self.rb_jump_key)
-        self._build_key_entry(rb_frame, 0, 5, "技能鍵", self.rb_skill_key)
-        ttk.Label(rb_frame, text="技能延遲").grid(row=0, column=7, sticky="w", padx=(12, 4), pady=6)
-        self._build_seconds_stepper(rb_frame, 0, 8, self.rb_skill_delay, 0.0, 10.0)
-        ttk.Label(rb_frame, text="跳躍間隔").grid(row=1, column=7, sticky="w", padx=(12, 4), pady=(0, 8))
-        self._build_seconds_stepper(rb_frame, 1, 8, self.rb_jump_interval, 0.05, 10.0, pady=(0, 8))
+        detection_section, detection_title, detection_frame = self._build_section(monitor_frame, "", row=0, column=1, sticky="nsew", pady=0)
+        self.detection_section = detection_section
+        detection_section.configure(width=DETECTION_PANEL_WIDTH, height=MONITOR_PANEL_HEIGHT)
+        detection_section.grid_propagate(False)
+        self._title_label(detection_title, "偵測診斷").grid(row=0, column=0, sticky="w", padx=(8, 0), pady=4)
+        self._button(detection_title, "刷新預覽", self.refresh_bar_preview, width=82).grid(row=0, column=1, sticky="w", padx=(8, 0), pady=4)
+        detection_frame.columnconfigure(0, weight=1)
+        self._label(detection_frame, textvariable=self.hp_detection_status, color=HP_RED, font=SMALL_FONT).grid(row=0, column=0, sticky="w", pady=(4, 2))
+        self.bar_preview_labels["hp"] = self._label(detection_frame, "尚未刷新預覽", color=MUTED_TEXT)
+        self.bar_preview_labels["hp"].grid(row=1, column=0, sticky="w", pady=(0, 6))
+        self._label(detection_frame, textvariable=self.mp_detection_status, color=MP_BLUE, font=SMALL_FONT).grid(row=2, column=0, sticky="w", pady=(2, 2))
+        self.bar_preview_labels["mp"] = self._label(detection_frame, "尚未刷新預覽", color=MUTED_TEXT)
+        self.bar_preview_labels["mp"].grid(row=3, column=0, sticky="w", pady=(0, 6))
 
-        lb_frame = ttk.LabelFrame(frame, text="LB function")
-        lb_frame.grid(row=6, column=0, sticky="ew", pady=(8, 0))
-        for column in range(13):
-            lb_frame.columnconfigure(column, weight=0)
-        lb_frame.columnconfigure(12, weight=1)
-        ttk.Checkbutton(lb_frame, text="啟用", variable=self.lb_enabled).grid(row=0, column=0, sticky="w", padx=(8, 12), pady=6)
-        self._build_controller_button_select(lb_frame, 0, 1, "觸發", self.lb_controller_button)
-        self._build_key_entry(lb_frame, 0, 3, "跳躍鍵", self.lb_jump_key)
-        self._build_key_entry(lb_frame, 0, 5, "技能鍵", self.lb_skill_key)
-        ttk.Label(lb_frame, text="技能延遲").grid(row=0, column=7, sticky="w", padx=(12, 4), pady=6)
-        self._build_seconds_stepper(lb_frame, 0, 8, self.lb_skill_delay, 0.0, 10.0)
+        combos_frame = ctk.CTkFrame(controls_frame, fg_color="transparent")
+        combos_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        combos_frame.columnconfigure(0, weight=1)
+        combos_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(frame, textvariable=self.status).grid(row=7, column=0, sticky="w", pady=(8, 4))
+        _section, combo_a_title, combo_a_frame = self._build_section(
+            combos_frame,
+            "",
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=(0, 8),
+            pady=0,
+        )
+        _section, combo_b_title, combo_b_frame = self._build_section(
+            combos_frame,
+            "",
+            row=0,
+            column=1,
+            sticky="nsew",
+            padx=(8, 0),
+            pady=0,
+        )
+        for combo_frame in (combo_a_frame, combo_b_frame):
+            for column in range(9):
+                combo_frame.columnconfigure(column, weight=0)
+            combo_frame.columnconfigure(8, weight=1)
 
-        runtime_frame = ttk.Frame(frame)
-        runtime_frame.grid(row=8, column=0, sticky="ew", pady=(0, 6))
+        self._checkbox(combo_a_title, "", self.rb_enabled, width=20).grid(row=0, column=0, sticky="w", padx=(8, 0), pady=4)
+        self._title_label(combo_a_title, "組合A").grid(row=0, column=1, sticky="w", padx=(2, 10), pady=4)
+        self._build_controller_button_select(combo_a_title, 0, 2, "觸發", self.rb_controller_button, pady=4)
+        self._info_icon(combo_a_title, self._combo_a_description).grid(row=0, column=99, sticky="e", padx=(8, 8), pady=4)
+        self._build_key_entry(combo_a_frame, 0, 0, "跳躍鍵", self.rb_jump_key, pady=(0, 6))
+        self._build_key_entry(combo_a_frame, 0, 2, "技能鍵", self.rb_skill_key, pady=(0, 6))
+        self._label(combo_a_frame, "技能延遲").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
+        self._build_seconds_stepper(combo_a_frame, 1, 1, self.rb_skill_delay, 0.0, 10.0, pady=(0, 4))
+        self._label(combo_a_frame, "跳躍間隔").grid(row=2, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
+        self._build_seconds_stepper(combo_a_frame, 2, 1, self.rb_jump_interval, 0.05, 10.0, pady=(0, 4))
+
+        self._checkbox(combo_b_title, "", self.lb_enabled, width=20).grid(row=0, column=0, sticky="w", padx=(8, 0), pady=4)
+        self._title_label(combo_b_title, "組合B").grid(row=0, column=1, sticky="w", padx=(2, 10), pady=4)
+        self._build_controller_button_select(combo_b_title, 0, 2, "觸發", self.lb_controller_button, pady=4)
+        self._info_icon(combo_b_title, self._combo_b_description).grid(row=0, column=99, sticky="e", padx=(8, 8), pady=4)
+        self._build_key_entry(combo_b_frame, 0, 0, "跳躍鍵", self.lb_jump_key, pady=(0, 6))
+        self._build_key_entry(combo_b_frame, 0, 2, "技能鍵", self.lb_skill_key, pady=(0, 6))
+        self._label(combo_b_frame, "技能延遲").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
+        self._build_seconds_stepper(combo_b_frame, 1, 1, self.lb_skill_delay, 0.0, 10.0, pady=(0, 4))
+
+        status_label = self._label(controls_frame, textvariable=self.status, color=WARNING_YELLOW)
+        status_label.grid(row=5, column=0, sticky="w", pady=(8, 4))
+
+        runtime_frame = ctk.CTkFrame(controls_frame, fg_color=PANEL_BG_ALT, corner_radius=SECTION_RADIUS, border_width=1, border_color=PANEL_BORDER)
+        runtime_frame.grid(row=6, column=0, sticky="ew", pady=(0, 6))
         for column in range(5):
             runtime_frame.columnconfigure(column, weight=1)
-        ttk.Label(runtime_frame, textvariable=self.runtime_script_status).grid(row=0, column=0, sticky="w", padx=(0, 12))
-        ttk.Label(runtime_frame, textvariable=self.runtime_foreground_status).grid(row=0, column=1, sticky="w", padx=(0, 12))
-        ttk.Label(runtime_frame, textvariable=self.runtime_macro_status).grid(row=0, column=2, sticky="w", padx=(0, 12))
-        ttk.Label(runtime_frame, textvariable=self.runtime_held_keys_status).grid(row=0, column=3, sticky="w", padx=(0, 12))
-        ttk.Label(runtime_frame, textvariable=self.runtime_last_action_status).grid(row=0, column=4, sticky="w")
+        self._label(runtime_frame, textvariable=self.runtime_script_status, color=ACCENT_GREEN).grid(row=0, column=0, sticky="w", padx=(10, 12), pady=8)
+        self._label(runtime_frame, textvariable=self.runtime_foreground_status).grid(row=0, column=1, sticky="w", padx=(0, 12), pady=8)
+        self._label(runtime_frame, textvariable=self.runtime_macro_status).grid(row=0, column=2, sticky="w", padx=(0, 12), pady=8)
+        self._label(runtime_frame, textvariable=self.runtime_held_keys_status).grid(row=0, column=3, sticky="w", padx=(0, 12), pady=8)
+        self._label(runtime_frame, textvariable=self.runtime_last_action_status, color=MUTED_TEXT).grid(row=0, column=4, sticky="w", padx=(0, 10), pady=8)
+        self.console_restore_button = self._button(runtime_frame, "Console ›", self.toggle_console_collapsed, width=92)
+        self.console_restore_button.grid(row=0, column=5, sticky="e", padx=(0, 10), pady=8)
+        self.console_restore_button.grid_remove()
+        self.full_panel_widgets = [
+            control_hotkey_section,
+            profile_section,
+            potion_section,
+            detection_section,
+            combos_frame,
+            status_label,
+            runtime_frame,
+        ]
 
-        console_frame = ttk.LabelFrame(frame, text="Console")
-        console_frame.grid(row=9, column=0, sticky="nsew")
+        console_section, console_header, console_frame = self._build_section(frame, "", row=0, column=1, sticky="nsew", padx=(8, 0), pady=0)
+        self.console_section = console_section
+        self.console_title_label = self._title_label(console_header, "Console")
+        self.console_title_label.grid(row=0, column=0, sticky="w", padx=8, pady=4)
+        self.console_toggle_button = self._button(
+            console_header,
+            "‹",
+            self.toggle_console_collapsed,
+            width=32,
+        )
+        self.console_toggle_button.grid(row=0, column=99, sticky="e", padx=(8, 8), pady=4)
+        self.console_frame = console_frame
         console_frame.columnconfigure(0, weight=1)
         console_frame.rowconfigure(0, weight=1)
-        self.console = tk.Text(console_frame, height=10, width=92, state="disabled", wrap="word")
-        scrollbar = ttk.Scrollbar(console_frame, orient="vertical", command=self.console.yview)
-        self.console.configure(yscrollcommand=scrollbar.set)
-        self.console.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.console_container = ctk.CTkFrame(
+            console_frame,
+            height=620,
+            width=CONSOLE_MIN_WIDTH,
+            fg_color=CONSOLE_BG,
+            border_width=1,
+            border_color=BUTTON_BORDER,
+            corner_radius=CONTROL_RADIUS,
+        )
+        self.console_container.grid(row=0, column=0, sticky="nsew")
+        self.console_container.columnconfigure(0, weight=1)
+        self.console_container.rowconfigure(0, weight=1)
+        self.console = tk.Text(
+            self.console_container,
+            height=1,
+            width=1,
+            state="disabled",
+            wrap="word",
+            bg=CONSOLE_BG,
+            fg=CONSOLE_TEXT,
+            insertbackground=CONSOLE_TEXT,
+            selectbackground=SECONDARY_BUTTON_BG,
+            selectforeground=HEADER_TEXT,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            padx=10,
+            pady=8,
+            font=CONSOLE_FONT,
+        )
+        self.console_scrollbar = ctk.CTkScrollbar(
+            self.console_container,
+            command=self.console.yview,
+            button_color=SECONDARY_BUTTON_BG,
+            button_hover_color=SECONDARY_BUTTON_HOVER,
+        )
+        self.console.configure(yscrollcommand=self.console_scrollbar.set)
+        self.console.grid(row=0, column=0, sticky="nsew", padx=(1, 0), pady=1)
+        self.console_scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 1), pady=1)
+        self.root.bind("<Configure>", self._on_root_configure, add="+")
+        self.set_window_topmost(settings.window_topmost)
+        self.set_console_collapsed(settings.console_collapsed)
+        self.set_compact_experience_mode(settings.compact_experience_mode)
+
+    def _on_root_configure(self, event: tk.Event) -> None:
+        if event.widget is not self.root:
+            return
+        current_size = (int(event.width), int(event.height))
+        size_changed = self.last_root_size is not None and current_size != self.last_root_size
+        self.last_root_size = current_size
+        self.window_interaction_pause_until = time.monotonic() + WINDOW_INTERACTION_GRACE_SECONDS
+        if size_changed and time.monotonic() >= self.suppress_resize_suspend_until:
+            self._suspend_layout_for_resize()
+        self._schedule_window_interaction_finish()
+
+    def is_window_interaction_active(self) -> bool:
+        return time.monotonic() < self.window_interaction_pause_until
+
+    def toggle_console_collapsed(self) -> None:
+        self.set_console_collapsed(not self.console_collapsed)
+
+    def set_console_collapsed(self, collapsed: bool) -> None:
+        if self.console_collapsed == collapsed:
+            self.settings.console_collapsed = collapsed
+            return
+        if collapsed:
+            self._unfreeze_console_resize()
+            self._remember_expanded_window_width()
+            self.console_collapsed = True
+            self.settings.console_collapsed = True
+            if not self.compact_experience_mode:
+                self._collapse_console_panel()
+                self._set_window_width(WINDOW_COLLAPSED_WIDTH)
+            return
+        self.console_collapsed = False
+        self.settings.console_collapsed = False
+        if not self.compact_experience_mode:
+            self._restore_console_panel()
+            self._set_window_width(max(WINDOW_EXPANDED_MIN_WIDTH, self.expanded_window_width))
+
+    def toggle_compact_experience_mode(self) -> None:
+        self.set_compact_experience_mode(not self.compact_experience_mode)
+
+    def set_compact_experience_mode(self, compact: bool) -> None:
+        if self.compact_experience_mode == compact:
+            self.settings.compact_experience_mode = compact
+            self._update_panel_mode_buttons()
+            return
+        if compact:
+            self._remember_default_window_size()
+            self.compact_experience_mode = True
+            self.settings.compact_experience_mode = True
+            self._enter_compact_experience_mode()
+            self._set_window_size(COMPACT_WINDOW_WIDTH, COMPACT_WINDOW_HEIGHT)
+            self._update_panel_mode_buttons()
+            return
+        self.compact_experience_mode = False
+        self.settings.compact_experience_mode = False
+        self._leave_compact_experience_mode()
+        width, height = self.default_window_size
+        if self.console_collapsed:
+            width = WINDOW_COLLAPSED_WIDTH
+        else:
+            width = max(WINDOW_EXPANDED_MIN_WIDTH, width)
+        self._set_window_size(width, max(WINDOW_MIN_HEIGHT, height))
+        self._update_panel_mode_buttons()
+
+    def toggle_window_topmost(self) -> None:
+        self.set_window_topmost(not self.window_topmost)
+
+    def set_window_topmost(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        self.window_topmost = enabled
+        self.settings.window_topmost = enabled
+        try:
+            self.root.attributes("-topmost", enabled)
+        except tk.TclError:
+            pass
+        self._update_panel_mode_buttons()
+
+    def _update_panel_mode_buttons(self) -> None:
+        try:
+            if self.panel_mode_button is not None:
+                self.panel_mode_button.configure(text="完整面板" if self.compact_experience_mode else "經驗模式")
+            if self.topmost_button is not None:
+                self.topmost_button.configure(text="取消置頂" if self.window_topmost else "置頂")
+        except tk.TclError:
+            return
+
+    def _remember_expanded_window_width(self) -> None:
+        try:
+            current_width = int(self.root.winfo_width())
+        except tk.TclError:
+            return
+        if current_width > WINDOW_COLLAPSED_MIN_WIDTH:
+            self.expanded_window_width = max(WINDOW_EXPANDED_MIN_WIDTH, current_width)
+
+    def _remember_default_window_size(self) -> None:
+        try:
+            width = int(self.root.winfo_width())
+            height = int(self.root.winfo_height())
+        except tk.TclError:
+            return
+        if width >= WINDOW_COLLAPSED_MIN_WIDTH and height >= COMPACT_WINDOW_MIN_HEIGHT:
+            self.default_window_size = (
+                max(WINDOW_COLLAPSED_MIN_WIDTH, width),
+                max(WINDOW_MIN_HEIGHT, height),
+            )
+
+    def _set_window_width(self, width: int) -> None:
+        try:
+            height = max(WINDOW_MIN_HEIGHT, int(self.root.winfo_height()))
+        except tk.TclError:
+            return
+        self._set_window_size(width, height)
+
+    def _set_window_size(self, width: int, height: int) -> None:
+        try:
+            self.suppress_resize_suspend_until = time.monotonic() + 0.25
+            self.root.geometry(f"{int(width)}x{int(height)}")
+        except tk.TclError:
+            return
+
+    def _enter_compact_experience_mode(self) -> None:
+        try:
+            self._unfreeze_console_resize()
+            self.root.minsize(COMPACT_WINDOW_MIN_WIDTH, COMPACT_WINDOW_MIN_HEIGHT)
+            if self.controls_frame is not None:
+                self.controls_frame.configure(width=COMPACT_PANEL_WIDTH)
+                self.controls_frame.grid_configure(padx=0)
+            if self.content_frame is not None:
+                self.content_frame.columnconfigure(0, weight=1, minsize=COMPACT_PANEL_WIDTH)
+                self.content_frame.columnconfigure(1, weight=0, minsize=0)
+            for widget in self.full_panel_widgets:
+                widget.grid_remove()
+            if self.console_section is not None:
+                self.console_section.grid_remove()
+            if self.console_restore_button is not None:
+                self.console_restore_button.grid_remove()
+            if self.monitor_frame is not None:
+                self.monitor_frame.grid_configure(row=0, column=0, sticky="nsew", pady=0)
+                self.monitor_frame.configure(height=MONITOR_PANEL_HEIGHT)
+                self.monitor_frame.columnconfigure(0, weight=0, minsize=COMPACT_PANEL_WIDTH)
+                self.monitor_frame.columnconfigure(1, weight=0, minsize=0)
+            if self.exp_section is not None:
+                self.exp_section.configure(width=COMPACT_PANEL_WIDTH, height=MONITOR_PANEL_HEIGHT)
+                self.exp_section.grid_configure(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        except tk.TclError:
+            return
+
+    def _leave_compact_experience_mode(self) -> None:
+        try:
+            if self.controls_frame is not None:
+                self.controls_frame.configure(width=LEFT_PANEL_MAX_WIDTH)
+                self.controls_frame.grid_configure(padx=(0, 8))
+            if self.content_frame is not None:
+                self.content_frame.columnconfigure(0, weight=0, minsize=LEFT_PANEL_MAX_WIDTH)
+            if self.monitor_frame is not None:
+                self.monitor_frame.grid_configure(row=3, column=0, sticky="ew", pady=(8, 0))
+                self.monitor_frame.configure(height=MONITOR_PANEL_HEIGHT)
+                self.monitor_frame.columnconfigure(0, weight=0, minsize=EXP_PANEL_WIDTH)
+                self.monitor_frame.columnconfigure(1, weight=0, minsize=DETECTION_PANEL_WIDTH)
+            if self.exp_section is not None:
+                self.exp_section.configure(width=EXP_PANEL_WIDTH, height=MONITOR_PANEL_HEIGHT)
+                self.exp_section.grid_configure(row=0, column=0, sticky="nsew", padx=(0, 8), pady=0)
+            if self.detection_section is not None:
+                self.detection_section.configure(width=DETECTION_PANEL_WIDTH, height=MONITOR_PANEL_HEIGHT)
+            for widget in self.full_panel_widgets:
+                widget.grid()
+            if self.console_collapsed:
+                self._collapse_console_panel()
+            else:
+                self._restore_console_panel()
+        except tk.TclError:
+            return
+
+    def _collapse_console_panel(self) -> None:
+        try:
+            self.root.minsize(WINDOW_COLLAPSED_MIN_WIDTH, WINDOW_MIN_HEIGHT)
+            if self.content_frame is not None:
+                self.content_frame.columnconfigure(1, weight=0, minsize=0)
+            if self.console_section is not None:
+                self.console_section.grid_remove()
+            if self.console_restore_button is not None:
+                self.console_restore_button.grid()
+        except tk.TclError:
+            return
+
+    def _restore_console_panel(self) -> None:
+        try:
+            self.root.minsize(WINDOW_EXPANDED_MIN_WIDTH, WINDOW_MIN_HEIGHT)
+            if self.content_frame is not None:
+                self.content_frame.columnconfigure(1, weight=1, minsize=CONSOLE_MIN_WIDTH)
+            if self.console_section is not None:
+                self.console_section.configure(width=CONSOLE_MIN_WIDTH)
+                self.console_section.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=0)
+            if self.console_title_label is not None:
+                self.console_title_label.grid()
+            if self.console_frame is not None:
+                self.console_frame.grid()
+            if self.console_toggle_button is not None:
+                self.console_toggle_button.configure(text="‹")
+            if self.console_restore_button is not None:
+                self.console_restore_button.grid_remove()
+        except tk.TclError:
+            return
+
+    def _suspend_layout_for_resize(self) -> None:
+        if self.resize_layout_suspended or self.content_frame is None:
+            return
+        try:
+            self._hide_tooltip()
+            self._unfreeze_console_resize()
+            self.content_frame.grid_remove()
+        except tk.TclError:
+            return
+        self.resize_layout_suspended = True
+
+    def _restore_layout_after_resize(self) -> None:
+        if not self.resize_layout_suspended or self.content_frame is None:
+            return
+        try:
+            self.content_frame.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+            self.suppress_resize_suspend_until = time.monotonic() + 0.08
+        except tk.TclError:
+            return
+        self.resize_layout_suspended = False
+
+    def _schedule_window_interaction_finish(self) -> None:
+        if self.console_resize_after_id is not None:
+            try:
+                self.root.after_cancel(self.console_resize_after_id)
+            except tk.TclError:
+                pass
+        self.console_resize_after_id = self.root.after(RESIZE_SETTLE_DELAY_MS, self._finish_window_interaction)
+
+    def _finish_window_interaction(self) -> None:
+        self.console_resize_after_id = None
+        self.window_interaction_pause_until = 0.0
+        self._restore_layout_after_resize()
+        self._unfreeze_console_resize()
+
+    def _unfreeze_console_resize(self) -> None:
+        if self.console_collapsed or not self.console_resize_frozen or self.console_container is None:
+            return
+        try:
+            if self.console_frame is not None:
+                self.console_frame.columnconfigure(0, weight=1)
+                self.console_frame.rowconfigure(0, weight=1)
+            self.console_container.configure(width=CONSOLE_MIN_WIDTH, height=620)
+            self.console_container.grid_configure(sticky="nsew")
+        except tk.TclError:
+            return
+        self.console_resize_frozen = False
+
+    def _build_section(
+        self,
+        parent: ctk.CTkFrame,
+        title: str,
+        *,
+        row: int,
+        column: int = 0,
+        sticky: str = "ew",
+        padx: int | tuple[int, int] = 0,
+        pady: int | tuple[int, int] = (8, 0),
+    ) -> tuple[ctk.CTkFrame, ctk.CTkFrame, ctk.CTkFrame]:
+        section = ctk.CTkFrame(
+            parent,
+            fg_color=PANEL_BG,
+            corner_radius=SECTION_RADIUS,
+            border_width=1,
+            border_color=PANEL_BORDER,
+        )
+        section.grid(row=row, column=column, sticky=sticky, padx=padx, pady=pady)
+        section.columnconfigure(0, weight=1)
+        section.rowconfigure(1, weight=1)
+
+        header = ctk.CTkFrame(
+            section,
+            fg_color=SECTION_HEADER_BG,
+            corner_radius=CONTROL_RADIUS,
+            border_width=1,
+            border_color=SECTION_HEADER_BORDER,
+        )
+        header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
+        header.columnconfigure(99, weight=1)
+
+        body = ctk.CTkFrame(section, fg_color="transparent")
+        body.grid(row=1, column=0, sticky="nsew", padx=SECTION_PAD_X, pady=(0, SECTION_PAD_Y))
+        body.columnconfigure(0, weight=1)
+
+        if title:
+            self._title_label(header, title).grid(row=0, column=0, sticky="w", padx=8, pady=4)
+
+        return section, header, body
+
+    def _title_label(self, parent: ctk.CTkFrame, text: str) -> ctk.CTkLabel:
+        return ctk.CTkLabel(
+            parent,
+            text=text,
+            text_color=HEADER_TEXT,
+            font=TITLE_FONT,
+            height=24,
+            anchor="w",
+        )
+
+    def _label(
+        self,
+        parent: ctk.CTkFrame | ctk.CTkToplevel,
+        text: str = "",
+        *,
+        textvariable: tk.StringVar | None = None,
+        color: str = BODY_TEXT,
+        font: tuple[str, int] | tuple[str, int, str] = UI_FONT,
+        width: int = 0,
+        anchor: str = "w",
+    ) -> ctk.CTkLabel:
+        return ctk.CTkLabel(
+            parent,
+            text=text,
+            textvariable=textvariable,
+            text_color=color,
+            font=font,
+            width=width,
+            height=24,
+            anchor=anchor,
+        )
+
+    def _button(
+        self,
+        parent: ctk.CTkFrame,
+        text: str,
+        command: Callable[[], object],
+        *,
+        width: int = 74,
+        primary: bool = False,
+    ) -> ctk.CTkButton:
+        fg_color = BUTTON_BG if primary else SECONDARY_BUTTON_BG
+        hover_color = BUTTON_HOVER if primary else SECONDARY_BUTTON_HOVER
+        return ctk.CTkButton(
+            parent,
+            text=text,
+            command=command,
+            width=width,
+            height=30,
+            corner_radius=CONTROL_RADIUS,
+            fg_color=fg_color,
+            hover_color=hover_color,
+            text_color=HEADER_TEXT,
+            border_width=1,
+            border_color=BUTTON_BORDER,
+            font=BUTTON_FONT,
+        )
+
+    def _entry(
+        self,
+        parent: ctk.CTkFrame,
+        textvariable: tk.StringVar,
+        *,
+        width: int = 82,
+        justify: str = "left",
+    ) -> ctk.CTkEntry:
+        return ctk.CTkEntry(
+            parent,
+            textvariable=textvariable,
+            width=width,
+            height=30,
+            corner_radius=CONTROL_RADIUS,
+            fg_color=ENTRY_BG,
+            border_color=PANEL_BORDER,
+            text_color=BODY_TEXT,
+            placeholder_text_color=MUTED_TEXT,
+            font=UI_FONT,
+            justify=justify,
+        )
+
+    def _combo(
+        self,
+        parent: ctk.CTkFrame,
+        *,
+        textvariable: tk.StringVar,
+        values: list[str] | tuple[str, ...],
+        width: int = 110,
+        command: Callable[[str], object] | None = None,
+    ) -> ctk.CTkComboBox:
+        return ctk.CTkComboBox(
+            parent,
+            variable=textvariable,
+            values=list(values),
+            command=command,
+            width=width,
+            height=30,
+            state="readonly",
+            corner_radius=CONTROL_RADIUS,
+            fg_color=ENTRY_BG,
+            border_color=PANEL_BORDER,
+            button_color=SECONDARY_BUTTON_BG,
+            button_hover_color=SECONDARY_BUTTON_HOVER,
+            dropdown_fg_color=PANEL_BG_ALT,
+            dropdown_hover_color=SECONDARY_BUTTON_HOVER,
+            dropdown_text_color=BODY_TEXT,
+            text_color=BODY_TEXT,
+            font=UI_FONT,
+            dropdown_font=UI_FONT,
+        )
+
+    def _checkbox(
+        self,
+        parent: ctk.CTkFrame,
+        text: str,
+        variable: tk.BooleanVar,
+        *,
+        width: int = 92,
+    ) -> ctk.CTkCheckBox:
+        return ctk.CTkCheckBox(
+            parent,
+            text=text,
+            variable=variable,
+            width=width,
+            height=26,
+            checkbox_width=18,
+            checkbox_height=18,
+            corner_radius=5,
+            border_width=2,
+            border_color=PANEL_BORDER,
+            fg_color=ACCENT_GREEN,
+            hover_color=SECONDARY_BUTTON_HOVER,
+            text_color=BODY_TEXT,
+            font=UI_FONT,
+        )
+
+    def _info_icon(self, parent: ctk.CTkFrame, text_provider: Callable[[], str]) -> ctk.CTkButton:
+        button = ctk.CTkButton(
+            parent,
+            text="🛈",
+            width=22,
+            height=22,
+            corner_radius=12,
+            fg_color=INFO_ICON_BG,
+            hover_color=INFO_ICON_HOVER,
+            border_width=1,
+            border_color=SECTION_HEADER_BORDER,
+            text_color=HEADER_TEXT,
+            font=(FONT_FAMILY, 14, "bold"),
+        )
+        button.bind("<Enter>", lambda _event, widget=button: self._handle_tooltip_enter(widget, text_provider))
+        button.bind("<Leave>", lambda _event, widget=button: self._schedule_tooltip_hide(widget))
+        return button
+
+    def _handle_tooltip_enter(self, widget: ctk.CTkBaseClass, text_provider: Callable[[], str]) -> None:
+        if self.tooltip_hide_after_id is not None:
+            try:
+                self.root.after_cancel(self.tooltip_hide_after_id)
+            except tk.TclError:
+                pass
+            self.tooltip_hide_after_id = None
+        if self.tooltip_anchor_widget is widget and self.tooltip_window is not None:
+            self._ensure_tooltip_pointer_check()
+            return
+        self._show_tooltip(widget, text_provider())
+
+    def _schedule_tooltip_hide(self, widget: ctk.CTkBaseClass) -> None:
+        if self.tooltip_anchor_widget is not widget:
+            return
+        if self.tooltip_hide_after_id is not None:
+            try:
+                self.root.after_cancel(self.tooltip_hide_after_id)
+            except tk.TclError:
+                pass
+        self.tooltip_hide_after_id = self.root.after(120, self._hide_tooltip_if_pointer_left)
+
+    def _show_tooltip(self, widget: ctk.CTkBaseClass, text: str) -> None:
+        self._hide_tooltip()
+        if self.closed:
+            return
+        tooltip = ctk.CTkToplevel(self.root, fg_color=TOOLTIP_BG)
+        self.tooltip_window = tooltip
+        self.tooltip_windows.append(tooltip)
+        self.tooltip_anchor_widget = widget
+        tooltip.withdraw()
+        tooltip.overrideredirect(True)
+        tooltip.attributes("-topmost", True)
+        bubble = ctk.CTkFrame(
+            tooltip,
+            fg_color=TOOLTIP_BG,
+            corner_radius=8,
+            border_width=1,
+            border_color=TOOLTIP_BORDER,
+        )
+        bubble.grid(row=0, column=0, sticky="nsew")
+        tooltip_label = ctk.CTkLabel(
+            bubble,
+            text=text,
+            text_color=HEADER_TEXT,
+            fg_color="transparent",
+            font=UI_FONT,
+            justify="left",
+            wraplength=320,
+            anchor="w",
+        )
+        tooltip_label.grid(row=0, column=0, sticky="nsew", padx=12, pady=8)
+        tooltip.update_idletasks()
+        x = widget.winfo_rootx() + widget.winfo_width() + 8
+        y = widget.winfo_rooty() - 2
+        tooltip.geometry(f"+{x}+{y}")
+        tooltip.deiconify()
+        self._ensure_tooltip_pointer_check()
+
+    def _hide_tooltip(self) -> None:
+        if self.tooltip_after_id is not None:
+            try:
+                self.root.after_cancel(self.tooltip_after_id)
+            except tk.TclError:
+                pass
+            self.tooltip_after_id = None
+        if self.tooltip_hide_after_id is not None:
+            try:
+                self.root.after_cancel(self.tooltip_hide_after_id)
+            except tk.TclError:
+                pass
+            self.tooltip_hide_after_id = None
+        windows = list(self.tooltip_windows)
+        if self.tooltip_window is not None and self.tooltip_window not in windows:
+            windows.append(self.tooltip_window)
+        for window in windows:
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+        self.tooltip_windows.clear()
+        self.tooltip_window = None
+        self.tooltip_anchor_widget = None
+
+    def _hide_tooltip_if_pointer_left(self) -> None:
+        self.tooltip_hide_after_id = None
+        if self.tooltip_anchor_widget is None:
+            self._hide_tooltip()
+            return
+        pointer_x = self.root.winfo_pointerx()
+        pointer_y = self.root.winfo_pointery()
+        if self._point_inside_widget(self.tooltip_anchor_widget, pointer_x, pointer_y):
+            self._ensure_tooltip_pointer_check()
+            return
+        self._hide_tooltip()
+
+    def _ensure_tooltip_pointer_check(self) -> None:
+        if self.tooltip_after_id is None and self.tooltip_window is not None:
+            self.tooltip_after_id = self.root.after(80, self._check_tooltip_pointer)
+
+    def _check_tooltip_pointer(self) -> None:
+        self.tooltip_after_id = None
+        if self.tooltip_window is None or self.tooltip_anchor_widget is None:
+            return
+        pointer_x = self.root.winfo_pointerx()
+        pointer_y = self.root.winfo_pointery()
+        if not self._point_inside_widget(self.tooltip_anchor_widget, pointer_x, pointer_y):
+            self._hide_tooltip()
+            return
+        self.tooltip_after_id = self.root.after(80, self._check_tooltip_pointer)
+
+    def _point_inside_widget(self, widget: tk.Misc, x: int, y: int) -> bool:
+        try:
+            left = widget.winfo_rootx()
+            top = widget.winfo_rooty()
+            right = left + widget.winfo_width()
+            bottom = top + widget.winfo_height()
+        except tk.TclError:
+            return False
+        return left <= x <= right and top <= y <= bottom
+
+    def _combo_a_description(self) -> str:
+        return (
+            f"按下 {self.rb_controller_button.get()} 時，每 {self.rb_jump_interval.get()} 秒短按 "
+            f"{self.rb_jump_key.get()} 跳躍，並在每次跳躍 {self.rb_skill_delay.get()} 秒後按 "
+            f"{self.rb_skill_key.get()}。"
+        )
+
+    def _combo_b_description(self) -> str:
+        return (
+            f"按下 {self.lb_controller_button.get()} 時短按 {self.lb_jump_key.get()} 跳躍一次，"
+            f"並在 {self.lb_skill_delay.get()} 秒後按 {self.lb_skill_key.get()}。"
+        )
 
     def _build_row(
         self,
-        parent: ttk.Frame,
+        parent: ctk.CTkFrame,
         row: int,
         label: str,
         enabled_var: tk.BooleanVar,
@@ -254,64 +1052,69 @@ class AutoPotionSettingsGui:
         cooldown_var: tk.StringVar,
         current_var: tk.StringVar,
     ) -> None:
-        ttk.Checkbutton(parent, text=label, variable=enabled_var).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-        scale = ttk.Scale(
+        self._checkbox(parent, label, enabled_var, width=70).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        scale = ctk.CTkSlider(
             parent,
             from_=1,
             to=100,
-            orient="horizontal",
             variable=threshold_var,
             command=lambda value, text=threshold_text: text.set(f"{float(value):.0f}"),
-            length=160,
+            width=170,
+            height=18,
+            fg_color=ENTRY_BG,
+            progress_color=ACCENT_BLUE,
+            button_color=ACCENT_BLUE,
+            button_hover_color=BUTTON_HOVER,
         )
         scale.grid(row=row, column=1, sticky="ew", padx=(0, 8), pady=4)
-        entry = ttk.Entry(parent, width=5, textvariable=threshold_text)
+        entry = self._entry(parent, threshold_text, width=PERCENT_ENTRY_WIDTH)
         entry.grid(row=row, column=2, sticky="w", padx=(0, 4), pady=4)
-        ttk.Label(parent, text="%").grid(row=row, column=3, sticky="w", padx=(0, 10), pady=4)
-        key_entry = ttk.Entry(parent, width=10, textvariable=key_var)
+        self._label(parent, "%").grid(row=row, column=3, sticky="w", padx=(0, 10), pady=4)
+        key_entry = self._entry(parent, key_var, width=POTION_KEY_ENTRY_WIDTH, justify="center")
         key_entry.grid(row=row, column=4, sticky="w", padx=(0, 8), pady=4)
         key_entry.bind("<Button-1>", lambda _event, var=key_var, name=label: self.start_key_detection(var, name))
-        ttk.Entry(parent, width=6, textvariable=cooldown_var).grid(row=row, column=5, sticky="w", padx=(0, 4), pady=4)
-        ttk.Label(parent, text="秒").grid(row=row, column=6, sticky="w", pady=4)
-        ttk.Label(parent, textvariable=current_var, width=9).grid(row=row, column=7, sticky="e", padx=(12, 0), pady=4)
+        self._entry(parent, cooldown_var, width=SECONDS_ENTRY_WIDTH).grid(row=row, column=5, sticky="w", padx=(0, 4), pady=4)
+        self._label(parent, "秒").grid(row=row, column=6, sticky="w", pady=4)
+        self._label(parent, textvariable=current_var, width=82, anchor="e", font=MONO_FONT).grid(row=row, column=7, sticky="e", padx=(12, 0), pady=4)
 
         entry.bind("<Return>", lambda _event, var=threshold_var, text=threshold_text: self._apply_percent_text(var, text))
         entry.bind("<FocusOut>", lambda _event, var=threshold_var, text=threshold_text: self._apply_percent_text(var, text))
 
     def _build_key_entry(
         self,
-        parent: ttk.Frame,
+        parent: ctk.CTkFrame,
         row: int,
         column: int,
         label: str,
         key_var: tk.StringVar,
+        pady: int | tuple[int, int] = 6,
     ) -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=column, sticky="w", padx=(0, 4), pady=6)
-        key_entry = ttk.Entry(parent, width=9, textvariable=key_var)
-        key_entry.grid(row=row, column=column + 1, sticky="w", padx=(0, 8), pady=6)
+        self._label(parent, label).grid(row=row, column=column, sticky="w", padx=(0, 4), pady=pady)
+        key_entry = self._entry(parent, key_var, width=COMBO_KEY_ENTRY_WIDTH, justify="center")
+        key_entry.grid(row=row, column=column + 1, sticky="w", padx=(0, 8), pady=pady)
         key_entry.bind("<Button-1>", lambda _event, var=key_var, name=label: self.start_key_detection(var, name))
 
     def _build_controller_button_select(
         self,
-        parent: ttk.Frame,
+        parent: ctk.CTkFrame,
         row: int,
         column: int,
         label: str,
         button_var: tk.StringVar,
+        pady: int | tuple[int, int] = 6,
     ) -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=column, sticky="w", padx=(0, 4), pady=6)
-        button_select = ttk.Combobox(
+        self._label(parent, label).grid(row=row, column=column, sticky="w", padx=(0, 4), pady=pady)
+        button_select = self._combo(
             parent,
-            width=9,
             textvariable=button_var,
             values=CONTROLLER_BUTTON_CHOICES,
-            state="readonly",
+            width=CONTROLLER_COMBO_WIDTH,
         )
-        button_select.grid(row=row, column=column + 1, sticky="w", padx=(0, 8), pady=6)
+        button_select.grid(row=row, column=column + 1, sticky="w", padx=(0, 8), pady=pady)
 
     def _build_seconds_stepper(
         self,
-        parent: ttk.Frame,
+        parent: ctk.CTkFrame,
         row: int,
         column: int,
         value_var: tk.StringVar,
@@ -319,20 +1122,24 @@ class AutoPotionSettingsGui:
         maximum: float,
         pady: int | tuple[int, int] = 6,
     ) -> None:
-        ttk.Entry(parent, width=6, textvariable=value_var).grid(row=row, column=column, sticky="w", padx=(0, 2), pady=pady)
-        ttk.Label(parent, text="秒").grid(row=row, column=column + 1, sticky="w", padx=(0, 4), pady=pady)
-        ttk.Button(
-            parent,
-            text="-",
-            width=2,
-            command=lambda: self._step_seconds(value_var, -0.01, minimum, maximum),
-        ).grid(row=row, column=column + 2, sticky="w", padx=(0, 2), pady=pady)
-        ttk.Button(
-            parent,
-            text="+",
-            width=2,
-            command=lambda: self._step_seconds(value_var, 0.01, minimum, maximum),
-        ).grid(row=row, column=column + 3, sticky="w", padx=(0, 4), pady=pady)
+        field_group = ctk.CTkFrame(parent, fg_color="transparent")
+        field_group.grid(row=row, column=column, columnspan=6, sticky="w", padx=0, pady=pady)
+        self._entry(field_group, value_var, width=SECONDS_ENTRY_WIDTH).grid(row=0, column=0, sticky="w", padx=(0, 2), pady=0)
+        self._label(field_group, "秒").grid(row=0, column=1, sticky="w", padx=(0, 8), pady=0)
+        button_group = ctk.CTkFrame(field_group, fg_color="transparent")
+        button_group.grid(row=0, column=2, sticky="w", padx=(0, 4), pady=0)
+        self._button(
+            button_group,
+            "-",
+            lambda: self._step_seconds(value_var, -0.01, minimum, maximum),
+            width=28,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=0)
+        self._button(
+            button_group,
+            "+",
+            lambda: self._step_seconds(value_var, 0.01, minimum, maximum),
+            width=28,
+        ).grid(row=0, column=1, sticky="w", padx=0, pady=0)
 
     def _step_seconds(self, value_var: tk.StringVar, delta: float, minimum: float, maximum: float) -> None:
         try:
@@ -354,6 +1161,13 @@ class AutoPotionSettingsGui:
     def close(self) -> None:
         self.cancel_key_detection()
         self._destroy_toggle_notice()
+        self._hide_tooltip()
+        if self.console_resize_after_id is not None:
+            try:
+                self.root.after_cancel(self.console_resize_after_id)
+            except tk.TclError:
+                pass
+            self.console_resize_after_id = None
         self.closed = True
         self.root.destroy()
 
@@ -413,7 +1227,7 @@ class AutoPotionSettingsGui:
             image_payloads[bar_type] = image_data
 
         next_images = {
-            bar_type: tk.PhotoImage(data=image_payloads[bar_type], format="PPM")
+            bar_type: self._ctk_preview_image_from_ppm(image_payloads[bar_type])
             for bar_type in ("hp", "mp")
         }
         self.bar_preview_images = []
@@ -422,6 +1236,17 @@ class AutoPotionSettingsGui:
             self.bar_preview_images.append(image)
             self.bar_preview_labels[bar_type].configure(image=image, text="")
         self.bar_preview_has_snapshot = True
+
+    def _ctk_preview_image_from_ppm(self, image_data: bytes) -> ctk.CTkImage:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(image_data)) as pil_image:
+            preview_image = pil_image.copy()
+        return ctk.CTkImage(
+            light_image=preview_image,
+            dark_image=preview_image,
+            size=preview_image.size,
+        )
 
     def _refresh_profile_select(self) -> None:
         self.profile_select.configure(values=self.settings.profile_names())
@@ -454,6 +1279,9 @@ class AutoPotionSettingsGui:
         self.toggle_hotkey.set(self.settings.toggle_hotkey)
         self.emergency_stop_hotkey.set(self.settings.emergency_stop_hotkey)
         self.experience_toggle_hotkey.set(self.settings.experience_toggle_hotkey)
+        self.set_window_topmost(self.settings.window_topmost)
+        self.set_console_collapsed(self.settings.console_collapsed)
+        self.set_compact_experience_mode(self.settings.compact_experience_mode)
         self._refresh_profile_select()
 
     def _switch_profile(self, _event: tk.Event | None = None) -> str:
@@ -543,17 +1371,18 @@ class AutoPotionSettingsGui:
         self.detecting_key_label = label
         self.detecting_vk_down = pressed_detectable_vks()
         self.set_status(f"請按下要設定為 {label} 的按鍵")
-        self.key_detection_window = tk.Toplevel(self.root)
+        self.key_detection_window = ctk.CTkToplevel(self.root, fg_color=PANEL_BG)
         self.key_detection_window.title("快捷鍵偵測")
         self.key_detection_window.resizable(False, False)
         self.key_detection_window.transient(self.root)
         self.key_detection_window.attributes("-topmost", True)
         self.key_detection_window.protocol("WM_DELETE_WINDOW", self.cancel_key_detection)
-        ttk.Label(
+        self._label(
             self.key_detection_window,
             text=f"請按下要設定為 {label} 的按鍵",
-            padding=16,
-        ).grid(row=0, column=0, sticky="nsew")
+            color=HEADER_TEXT,
+            font=TITLE_FONT,
+        ).grid(row=0, column=0, sticky="nsew", padx=18, pady=16)
         self.key_detection_window.update_idletasks()
         x = self.root.winfo_rootx() + 80
         y = self.root.winfo_rooty() + 80
@@ -627,7 +1456,7 @@ class AutoPotionSettingsGui:
         try:
             self.root.update_idletasks()
             self.root.update()
-        except tk.TclError as exc:
+        except (tk.TclError, RuntimeError) as exc:
             if self.closed:
                 return False
             now = time.monotonic()
@@ -636,6 +1465,13 @@ class AutoPotionSettingsGui:
                 self.last_gui_error_at = now
             return True
 
+        return self.sync_after_event_processing()
+
+    def sync_after_event_processing(self) -> bool:
+        if self.closed:
+            return False
+        if self.is_window_interaction_active():
+            return False
         self._poll_key_detection()
         self.apply_to_settings()
         return True
@@ -702,6 +1538,9 @@ class AutoPotionSettingsGui:
         self.settings.experience_toggle_hotkey = (
             self.experience_toggle_hotkey.get().strip() or self.settings.experience_toggle_hotkey
         )
+        self.settings.console_collapsed = self.console_collapsed
+        self.settings.compact_experience_mode = self.compact_experience_mode
+        self.settings.window_topmost = self.window_topmost
 
     def set_exp_efficiency_enabled(self, enabled: bool) -> None:
         self.exp_efficiency_enabled.set(enabled)
@@ -738,8 +1577,8 @@ class AutoPotionSettingsGui:
     def set_experience_snapshot(self, snapshot: ExperienceSnapshot) -> None:
         percent = "" if snapshot.current_percent is None else f" ({snapshot.current_percent:.2f}%)"
         self.exp_current_status.set(f"EXP：{format_exp(snapshot.current_exp)}{percent}")
-        self.exp_rate_1m_status.set(f"1m：{format_exp(snapshot.xp_per_minute)} xp")
         self.exp_rate_5m_status.set(f"5m：{format_exp(snapshot.xp_per_5m)} xp")
+        self.exp_rate_10m_status.set(f"10m：{format_exp(snapshot.xp_per_10m)} xp")
         self.exp_rate_1h_status.set(f"1h：{format_exp(snapshot.xp_per_hour)} xp")
         self.exp_eta_status.set(f"升級預估：{format_eta(snapshot.eta_seconds)}")
         self.exp_reader_status.set(f"狀態：{snapshot.status}")
@@ -773,7 +1612,7 @@ class AutoPotionSettingsGui:
         self._destroy_toggle_notice()
         target_rect = self._foreground_client_rect()
         try:
-            notice = tk.Toplevel(self.root)
+            notice = ctk.CTkToplevel(self.root, fg_color="#111111")
             self.toggle_notice_window = notice
             notice.withdraw()
             notice.overrideredirect(True)
@@ -782,17 +1621,15 @@ class AutoPotionSettingsGui:
                 notice.attributes("-alpha", 0.92)
             except tk.TclError:
                 pass
-            notice.configure(bg="#111111")
+            notice.configure(fg_color="#111111")
 
-            tk.Label(
+            ctk.CTkLabel(
                 notice,
                 text=message,
-                bg="#111111",
-                fg="#ffffff",
-                padx=24,
-                pady=10,
-                font=("Microsoft JhengHei UI", 18, "bold"),
-            ).grid(row=0, column=0, sticky="nsew")
+                fg_color="#111111",
+                text_color="#ffffff",
+                font=(FONT_FAMILY, 18, "bold"),
+            ).grid(row=0, column=0, sticky="nsew", padx=24, pady=10)
 
             notice.update_idletasks()
             x, y = self._toggle_notice_position(notice.winfo_width(), notice.winfo_height(), target_rect)

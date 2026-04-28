@@ -222,8 +222,8 @@ class ExperienceTests(unittest.TestCase):
 
         snapshot = tracker.snapshot(60.0)
 
-        self.assertEqual(snapshot.xp_per_minute, 6000.0)
         self.assertEqual(snapshot.xp_per_5m, 30000.0)
+        self.assertEqual(snapshot.xp_per_10m, 60000.0)
         self.assertEqual(snapshot.xp_per_hour, 360000.0)
         self.assertIsNotNone(snapshot.eta_seconds)
 
@@ -237,10 +237,11 @@ class ExperienceTests(unittest.TestCase):
         after = tracker.snapshot(68.0)
 
         self.assertEqual(after.current_exp, 110000)
-        self.assertEqual(after.xp_per_minute, before.xp_per_minute)
+        self.assertEqual(after.xp_per_5m, before.xp_per_5m)
+        self.assertEqual(after.xp_per_10m, before.xp_per_10m)
         self.assertEqual(after.xp_per_hour, before.xp_per_hour)
         self.assertEqual(after.sample_count, 2)
-        self.assertTrue(after.status.startswith("OCR 樣本拒絕"))
+        self.assertTrue(after.status.startswith("樣本拒絕"))
 
     def test_tracker_rebases_bad_initial_sample_before_statistics_start(self):
         tracker = ExperienceEfficiencyTracker()
@@ -251,14 +252,14 @@ class ExperienceTests(unittest.TestCase):
 
         self.assertIsNone(baseline.current_exp)
         self.assertEqual(baseline.sample_count, 1)
-        self.assertIsNone(baseline.xp_per_minute)
+        self.assertIsNone(baseline.xp_per_5m)
         self.assertTrue(baseline.status.startswith("基準修正"))
 
         self.assertTrue(tracker.add_reading(68.0, 136553, 18.91))
         snapshot = tracker.snapshot(68.0)
 
         self.assertEqual(snapshot.current_exp, 136553)
-        self.assertAlmostEqual(snapshot.xp_per_minute, 4000.0)
+        self.assertAlmostEqual(snapshot.xp_per_5m, 20000.0)
         self.assertEqual(snapshot.sample_count, 2)
 
     def test_tracker_does_not_display_unconfirmed_first_sample(self):
@@ -282,18 +283,18 @@ class ExperienceTests(unittest.TestCase):
 
         self.assertEqual(snapshot.current_exp, 110000)
         self.assertEqual(snapshot.sample_count, 2)
-        self.assertTrue(snapshot.status.startswith("OCR 樣本拒絕"))
+        self.assertTrue(snapshot.status.startswith("樣本拒絕"))
 
     def test_tracker_keeps_last_rate_when_short_window_is_temporarily_insufficient(self):
         tracker = ExperienceEfficiencyTracker()
         tracker.add_reading(0.0, 1000, 10.0)
-        tracker.add_reading(60.0, 7000, 70.0)
-        before = tracker.snapshot(60.0)
+        tracker.add_reading(300.0, 7000, 70.0)
+        before = tracker.snapshot(300.0)
 
-        tracker.add_reading(61.0, 7000, 70.0)
-        after = tracker.snapshot(61.0)
+        tracker.add_reading(301.0, 7000, 70.0)
+        after = tracker.snapshot(301.0)
 
-        self.assertEqual(after.xp_per_minute, before.xp_per_minute)
+        self.assertEqual(after.xp_per_5m, before.xp_per_5m)
         self.assertEqual(after.current_exp, 7000)
 
     def test_tracker_handles_level_wrap_when_percent_restarts(self):
@@ -303,7 +304,7 @@ class ExperienceTests(unittest.TestCase):
 
         snapshot = tracker.snapshot(60.0)
 
-        self.assertEqual(snapshot.xp_per_minute, 1500.0)
+        self.assertEqual(snapshot.xp_per_5m, 7500.0)
 
     def test_format_eta(self):
         self.assertEqual(format_eta(65), "1:05")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import queue
 import sys
 import time
 from ctypes import wintypes
@@ -8,14 +9,18 @@ from typing import Protocol
 
 from auto_potion import AutoPotionController, AutoPotionSettings, parse_vk_key
 
-try:
-    import pygame
-    import pygame._sdl2.controller as controller
-except ImportError:
-    print("缺少 pygame-ce，請先執行：python -m pip install -r requirements.txt")
-    raise SystemExit(1)
-
-
+from maple_star.controller_worker import (
+    CONTROLLER_BUTTONS_BY_NAME,
+    EVENT_BUTTON_DOWN,
+    EVENT_BUTTON_UP,
+    EVENT_DEVICE_ADDED,
+    EVENT_DEVICE_REMOVED,
+    EVENT_ERROR,
+    EVENT_STATUS,
+    button_name,
+    start_controller_event_worker,
+    stop_controller_event_worker,
+)
 from maple_star.window_target import (
     TARGET_DISPLAY_NAME,
     find_target_window,
@@ -26,6 +31,7 @@ from maple_star.window_target import (
 JUMP_KEY_HOLD_SECONDS = 0.05
 POLL_INTERVAL_SECONDS = 0.01
 MACRO_TIMING_GUARD_SECONDS = 0.12
+WINDOW_INTERACTION_LOOP_DELAY_MS = 120
 
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
@@ -40,24 +46,6 @@ for code in range(0x41, 0x5B):
 for index in range(1, 25):
     VK_DISPLAY_NAMES[0x70 + index - 1] = f"F{index}"
 TRACKED_HELD_KEYS: set[int] = set()
-CONTROLLER_BUTTONS_BY_NAME = {
-    "A": pygame.CONTROLLER_BUTTON_A,
-    "B": pygame.CONTROLLER_BUTTON_B,
-    "X": pygame.CONTROLLER_BUTTON_X,
-    "Y": pygame.CONTROLLER_BUTTON_Y,
-    "LB": pygame.CONTROLLER_BUTTON_LEFTSHOULDER,
-    "RB": pygame.CONTROLLER_BUTTON_RIGHTSHOULDER,
-    "BACK": pygame.CONTROLLER_BUTTON_BACK,
-    "START": pygame.CONTROLLER_BUTTON_START,
-    "HOME": pygame.CONTROLLER_BUTTON_GUIDE,
-    "L3": pygame.CONTROLLER_BUTTON_LEFTSTICK,
-    "R3": pygame.CONTROLLER_BUTTON_RIGHTSTICK,
-    "DPAD_UP": pygame.CONTROLLER_BUTTON_DPAD_UP,
-    "DPAD_DOWN": pygame.CONTROLLER_BUTTON_DPAD_DOWN,
-    "DPAD_LEFT": pygame.CONTROLLER_BUTTON_DPAD_LEFT,
-    "DPAD_RIGHT": pygame.CONTROLLER_BUTTON_DPAD_RIGHT,
-}
-BUTTON_NAMES = {button: name for name, button in CONTROLLER_BUTTONS_BY_NAME.items()}
 
 
 class ControllerButtonBinding(Protocol):
@@ -123,10 +111,6 @@ class Input(ctypes.Structure):
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(Input), ctypes.c_int]
 user32.SendInput.restype = wintypes.UINT
-
-
-def button_name(button: int) -> str:
-    return BUTTON_NAMES.get(button, f"BUTTON_{button}")
 
 
 def keyboard_input(vk_code: int, flags: int = 0) -> Input:
@@ -470,28 +454,10 @@ class LBJumpSkillMacro:
             return None
 
 
-def open_connected_controllers() -> dict[int, controller.Controller]:
-    controllers: dict[int, controller.Controller] = {}
-    count = controller.get_count()
-    print(f"偵測到 {count} 個 SDL Controller。")
-
-    for index in range(count):
-        if controller.is_controller(index):
-            pad = controller.Controller(index)
-            controllers[pad.id] = pad
-            print(f"[C{pad.id}] {pad.name}")
-
-    return controllers
-
-
 def main() -> None:
-    pygame.init()
-    pygame.joystick.init()
-    controller.init()
-
     auto_potion = AutoPotionController(is_target_window_active, target_window_provider=find_target_window)
     auto_potion.install_console_redirect()
-    controllers_by_id = open_connected_controllers()
+    controller_worker = start_controller_event_worker(POLL_INTERVAL_SECONDS)
     rb_macro = RBJumpSlashMacro(auto_potion.settings)
     lb_macro = LBJumpSkillMacro(auto_potion.settings)
     all_button_bindings: tuple[ControllerButtonBinding, ...] = (rb_macro, lb_macro)
@@ -499,15 +465,7 @@ def main() -> None:
     current_controller_button_settings: tuple[str, str, bool, bool] | None = None
     key_capture_actions_were_blocked = False
 
-    print("只在 MapleStory Worlds 為前景視窗時生效。")
-    print(
-        f"RB function 由 {auto_potion.settings.rb_controller_button} 觸發，每 "
-        f"{auto_potion.settings.rb_jump_interval_seconds:g} 秒短按 "
-        f"{auto_potion.settings.rb_jump_key} 跳躍，並在每次跳躍 "
-        f"{auto_potion.settings.rb_skill_delay_seconds:g} 秒後按 {auto_potion.settings.rb_skill_key}。"
-    )
-    print(f"LB function 由 {auto_potion.settings.lb_controller_button} 觸發，按下時腳本跳躍一次，並在設定延遲後按技能鍵。")
-    print("自動喝水設定視窗已開啟，可即時調整 HP/MP 閾值、快捷鍵與冷卻時間。")
+    print("只在 MapleStory Worlds 為前景視窗且偵測到遊戲 HUD 時生效。")
     print(
         f"按 {auto_potion.settings.toggle_hotkey} 可暫停/恢復所有腳本功能；"
         f"按 {auto_potion.settings.emergency_stop_hotkey} 可硬停止並釋放按鍵。按 Ctrl+C 結束。"
@@ -552,7 +510,7 @@ def main() -> None:
             return
         now = time.monotonic()
         for binding in all_button_bindings:
-            if not auto_potion.scripts_enabled:
+            if not auto_potion.can_run_actions():
                 continue
             if binding is rb_macro and not auto_potion.settings.rb_enabled:
                 continue
@@ -591,7 +549,7 @@ def main() -> None:
             return None
         deadlines: list[float] = []
         for binding in all_button_bindings:
-            if not auto_potion.scripts_enabled:
+            if not auto_potion.can_run_actions():
                 continue
             if binding is rb_macro and not auto_potion.settings.rb_enabled:
                 continue
@@ -604,9 +562,85 @@ def main() -> None:
             return None
         return min(deadlines)
 
-    try:
-        while True:
-            sync_controller_button_bindings()
+    def process_controller_events() -> None:
+        for _ in range(128):
+            try:
+                event_type, event_value, event_text = controller_worker.event_queue.get_nowait()
+            except queue.Empty:
+                return
+
+            if event_type == EVENT_STATUS:
+                if event_text:
+                    print(event_text)
+
+            elif event_type == EVENT_ERROR:
+                if event_text:
+                    print(event_text)
+
+            elif event_type == EVENT_DEVICE_ADDED:
+                print(f"[C{event_value}] 已連線：{event_text}")
+
+            elif event_type == EVENT_DEVICE_REMOVED:
+                print(f"[C{event_value}] 已斷線：{event_text or 'unknown'}")
+                for binding in all_button_bindings:
+                    binding.stop()
+
+            elif event_type == EVENT_BUTTON_DOWN and isinstance(event_value, int):
+                binding = controller_button_bindings.get(event_value)
+                if binding is not None:
+                    if auto_potion.is_key_capture_blocking_actions():
+                        binding.stop()
+                        continue
+                    if not auto_potion.scripts_enabled:
+                        print(f"忽略 {button_name(event_value)}：腳本已暫停")
+                        continue
+                    if not auto_potion.gameplay_hud_active:
+                        print(f"忽略 {button_name(event_value)}：未偵測到遊戲 HUD")
+                        continue
+                    if binding is rb_macro and not auto_potion.settings.rb_enabled:
+                        print("忽略 RB：RB function 未啟用")
+                        continue
+                    if binding is lb_macro and not auto_potion.settings.lb_enabled:
+                        print("忽略 LB：LB function 未啟用")
+                        continue
+                    binding.on_button_down()
+
+            elif event_type == EVENT_BUTTON_UP and isinstance(event_value, int):
+                binding = controller_button_bindings.get(event_value)
+                if binding is not None:
+                    if auto_potion.is_key_capture_blocking_actions():
+                        binding.stop()
+                        continue
+                    if not auto_potion.can_run_actions():
+                        binding.stop()
+                        continue
+                    if binding is rb_macro and not auto_potion.settings.rb_enabled:
+                        binding.stop()
+                        continue
+                    if binding is lb_macro and not auto_potion.settings.lb_enabled:
+                        binding.stop()
+                        continue
+                    binding.on_button_up()
+
+    def next_loop_delay_ms() -> int:
+        if auto_potion.gui.is_window_interaction_active():
+            return WINDOW_INTERACTION_LOOP_DELAY_MS
+        delay_ms = max(1, int(POLL_INTERVAL_SECONDS * 1000))
+        deadline = next_binding_deadline_at()
+        if deadline is None:
+            return delay_ms
+        remaining_ms = int(max(0.0, deadline - time.monotonic()) * 1000)
+        return max(1, min(delay_ms, remaining_ms))
+
+    def loop_step() -> None:
+        nonlocal key_capture_actions_were_blocked
+        try:
+            if auto_potion.is_closed():
+                return
+
+            window_interaction_active = auto_potion.gui.is_window_interaction_active()
+            if not window_interaction_active:
+                sync_controller_button_bindings()
             auto_potion.poll_control_hotkeys()
             key_capture_actions_blocked = auto_potion.is_key_capture_blocking_actions()
             if key_capture_actions_blocked and not key_capture_actions_were_blocked:
@@ -614,80 +648,45 @@ def main() -> None:
             key_capture_actions_were_blocked = key_capture_actions_blocked
             if auto_potion.consume_emergency_stop_requested():
                 stop_all_bindings(f"{auto_potion.settings.emergency_stop_hotkey}：停止所有手把巨集並釋放按鍵")
+            if window_interaction_active:
+                return
             update_active_bindings()
 
             now = time.monotonic()
             next_deadline = next_binding_deadline_at()
             if next_deadline is None or next_deadline - now > MACRO_TIMING_GUARD_SECONDS:
-                auto_potion.update(now)
+                auto_potion.update(now, pump_gui=False)
                 if auto_potion.consume_emergency_stop_requested():
                     stop_all_bindings(f"{auto_potion.settings.emergency_stop_hotkey}：停止所有手把巨集並釋放按鍵")
             if auto_potion.is_closed():
-                break
+                return
 
-            if not auto_potion.scripts_enabled or not auto_potion.settings.rb_enabled:
+            if not auto_potion.can_run_actions() or not auto_potion.settings.rb_enabled:
                 rb_macro.stop()
-            if not auto_potion.scripts_enabled or not auto_potion.settings.lb_enabled:
+            if not auto_potion.can_run_actions() or not auto_potion.settings.lb_enabled:
                 lb_macro.stop()
 
-            update_active_bindings()
-            refresh_runtime_info()
+            if not window_interaction_active:
+                update_active_bindings()
+                refresh_runtime_info()
+                process_controller_events()
+        except Exception as exc:
+            print(f"主迴圈錯誤：{exc}")
+            if not auto_potion.is_closed():
+                auto_potion.gui.set_status(f"主迴圈錯誤：{exc}")
+        finally:
+            if not auto_potion.is_closed():
+                auto_potion.gui.root.after(next_loop_delay_ms(), loop_step)
 
-            for event in pygame.event.get():
-                if event.type == pygame.CONTROLLERDEVICEADDED:
-                    if controller.is_controller(event.device_index):
-                        pad = controller.Controller(event.device_index)
-                        controllers_by_id[pad.id] = pad
-                        print(f"[C{pad.id}] 已連線：{pad.name}")
-
-                elif event.type == pygame.CONTROLLERDEVICEREMOVED:
-                    controller_id = getattr(event, "instance_id", getattr(event, "which", -1))
-                    pad = controllers_by_id.pop(controller_id, None)
-                    name = pad.name if pad else "unknown"
-                    print(f"[C{controller_id}] 已斷線：{name}")
-                    for binding in all_button_bindings:
-                        binding.stop()
-
-                elif event.type == pygame.CONTROLLERBUTTONDOWN:
-                    binding = controller_button_bindings.get(event.button)
-                    if binding is not None:
-                        if auto_potion.is_key_capture_blocking_actions():
-                            binding.stop()
-                            continue
-                        if not auto_potion.scripts_enabled:
-                            print(f"忽略 {button_name(event.button)}：腳本已暫停")
-                            continue
-                        if binding is rb_macro and not auto_potion.settings.rb_enabled:
-                            print("忽略 RB：RB function 未啟用")
-                            continue
-                        if binding is lb_macro and not auto_potion.settings.lb_enabled:
-                            print("忽略 LB：LB function 未啟用")
-                            continue
-                        binding.on_button_down()
-
-                elif event.type == pygame.CONTROLLERBUTTONUP:
-                    binding = controller_button_bindings.get(event.button)
-                    if binding is not None:
-                        if auto_potion.is_key_capture_blocking_actions():
-                            binding.stop()
-                            continue
-                        if not auto_potion.scripts_enabled:
-                            binding.stop()
-                            continue
-                        if binding is rb_macro and not auto_potion.settings.rb_enabled:
-                            binding.stop()
-                            continue
-                        if binding is lb_macro and not auto_potion.settings.lb_enabled:
-                            binding.stop()
-                            continue
-                        binding.on_button_up()
-
-            time.sleep(POLL_INTERVAL_SECONDS)
+    try:
+        auto_potion.gui.root.after(0, loop_step)
+        auto_potion.gui.root.mainloop()
     finally:
         auto_potion.cleanup()
         for binding in all_button_bindings:
             binding.cleanup()
         release_tracked_keys()
+        stop_controller_event_worker(controller_worker)
 
 
 if __name__ == "__main__":
@@ -695,6 +694,4 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\n已停止。")
-        controller.quit()
-        pygame.quit()
         sys.exit(0)

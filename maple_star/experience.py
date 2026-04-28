@@ -15,6 +15,9 @@ import numpy as np
 
 EXP_SAMPLE_HISTORY_SECONDS = 3600.0
 EXP_RATE_MIN_SECONDS = 5.0
+EXP_RATE_5M_SECONDS = 300.0
+EXP_RATE_10M_SECONDS = 600.0
+EXP_RATE_1H_SECONDS = 3600.0
 EXP_LEVEL_WRAP_HIGH_PERCENT = 65.0
 EXP_LEVEL_WRAP_LOW_PERCENT = 35.0
 EXP_OCR_MIN_SCORE = 0.45
@@ -82,8 +85,8 @@ class ExperienceSample:
 class ExperienceSnapshot:
     current_exp: int | None = None
     current_percent: float | None = None
-    xp_per_minute: float | None = None
     xp_per_5m: float | None = None
+    xp_per_10m: float | None = None
     xp_per_hour: float | None = None
     eta_seconds: float | None = None
     sample_count: int = 0
@@ -139,7 +142,7 @@ class ExperienceEfficiencyTracker:
             wrapped_delta = self._level_wrap_delta(current_exp, percent)
             if wrapped_delta is None:
                 if self._has_only_baseline_sample():
-                    self._restart_session(now, current_exp, percent, "基準修正：首筆 OCR 可能誤判")
+                    self._restart_session(now, current_exp, percent, "基準修正：首筆樣本可能誤判")
                     return True
                 self._reject_sample("EXP 數字回落但不符合升級條件")
                 return False
@@ -148,7 +151,7 @@ class ExperienceEfficiencyTracker:
             rejection_reason = self._normal_gain_rejection_reason(now, current_exp, percent, delta)
             if rejection_reason is not None:
                 if self._has_only_baseline_sample():
-                    self._restart_session(now, current_exp, percent, "基準修正：首筆 OCR 可能誤判")
+                    self._restart_session(now, current_exp, percent, "基準修正：首筆樣本可能誤判")
                     return True
                 self._reject_sample(rejection_reason)
                 return False
@@ -171,16 +174,16 @@ class ExperienceEfficiencyTracker:
             return snapshot
 
         latest = self.samples[-1]
-        one_minute_rate = self._rate_per_second(60.0)
-        five_minute_rate = self._rate_per_second(300.0)
+        five_minute_rate = self._rate_per_second(EXP_RATE_5M_SECONDS)
+        ten_minute_rate = self._rate_per_second(EXP_RATE_10M_SECONDS)
         session_rate = self._session_rate_per_second()
-        preferred_rate = self._preferred_eta_rate_per_second(one_minute_rate, five_minute_rate, session_rate)
+        preferred_rate = self._preferred_eta_rate_per_second(five_minute_rate, ten_minute_rate, session_rate)
         snapshot = ExperienceSnapshot(
             current_exp=latest.current_exp,
             current_percent=latest.percent,
-            xp_per_minute=self._rate_or_previous(one_minute_rate, 60.0, "xp_per_minute"),
-            xp_per_5m=self._rate_or_previous(five_minute_rate, 300.0, "xp_per_5m"),
-            xp_per_hour=self._rate_or_previous(session_rate, 3600.0, "xp_per_hour"),
+            xp_per_5m=self._rate_or_previous(five_minute_rate, EXP_RATE_5M_SECONDS, "xp_per_5m"),
+            xp_per_10m=self._rate_or_previous(ten_minute_rate, EXP_RATE_10M_SECONDS, "xp_per_10m"),
+            xp_per_hour=self._rate_or_previous(session_rate, EXP_RATE_1H_SECONDS, "xp_per_hour"),
             eta_seconds=self._eta_seconds(latest, preferred_rate),
             sample_count=len(self.samples),
             status=self.last_status,
@@ -202,7 +205,7 @@ class ExperienceEfficiencyTracker:
         return len(self.samples) == 1 and self.total_gained_exp == 0
 
     def _reject_sample(self, reason: str) -> None:
-        self.last_status = f"OCR 樣本拒絕：{reason}"
+        self.last_status = f"樣本拒絕：{reason}"
 
     def _snapshot_from_last(self, status: str) -> ExperienceSnapshot:
         if self.last_snapshot is None:
@@ -210,8 +213,8 @@ class ExperienceEfficiencyTracker:
         return ExperienceSnapshot(
             current_exp=self.last_snapshot.current_exp,
             current_percent=self.last_snapshot.current_percent,
-            xp_per_minute=self.last_snapshot.xp_per_minute,
             xp_per_5m=self.last_snapshot.xp_per_5m,
+            xp_per_10m=self.last_snapshot.xp_per_10m,
             xp_per_hour=self.last_snapshot.xp_per_hour,
             eta_seconds=self.last_snapshot.eta_seconds,
             sample_count=self.last_snapshot.sample_count,
@@ -336,11 +339,11 @@ class ExperienceEfficiencyTracker:
 
     def _preferred_eta_rate_per_second(
         self,
-        one_minute_rate: float | None,
         five_minute_rate: float | None,
+        ten_minute_rate: float | None,
         session_rate: float | None,
     ) -> float | None:
-        short_rate = five_minute_rate or one_minute_rate or session_rate
+        short_rate = ten_minute_rate or five_minute_rate or session_rate
         if session_rate is None:
             return short_rate
         if short_rate is None or len(self.samples) < 2:

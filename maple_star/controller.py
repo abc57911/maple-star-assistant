@@ -60,7 +60,6 @@ from .constants import (
 )
 from .experience import (
     ExperienceEfficiencyTracker,
-    ExperienceSnapshot,
     ExperienceTextReading,
     PaddleExperienceTextReader,
 )
@@ -218,6 +217,7 @@ class AutoPotionController:
         self.last_experience_ocr_error_at = -999.0
         self.last_experience_ocr_error_reason = ""
         self.last_target_hwnd: int = 0
+        self.gameplay_hud_active = False
         self.fade_guard_hits = 0
         self.fade_guard_until = 0.0
         self.pending_settings_snapshot = self.settings.snapshot()
@@ -236,6 +236,9 @@ class AutoPotionController:
 
     def is_closed(self) -> bool:
         return not self.gui.exists()
+
+    def can_run_actions(self) -> bool:
+        return self.scripts_enabled and self.gameplay_hud_active
 
     def _control_hotkey_vk(self, hotkey: str, fallback: str) -> int:
         try:
@@ -480,15 +483,21 @@ class AutoPotionController:
             except RuntimeError:
                 pass
 
-    def update(self, now: float) -> None:
+    def update(self, now: float, *, pump_gui: bool = True) -> None:
         self.poll_control_hotkeys()
-        if not self.gui.pump():
+        gui_ready = self.gui.pump() if pump_gui else self.gui.sync_after_event_processing()
+        if not gui_ready:
+            if not self.gui.closed:
+                self._set_gameplay_hud_active(False, now)
+                if not self.gui.is_window_interaction_active():
+                    self.gui.set_current_percentages(None, None)
             return
         self._sync_registered_control_hotkeys()
         self.poll_control_hotkeys()
         self._save_settings_when_idle(now)
 
         if self.is_key_capture_blocking_actions():
+            self._set_gameplay_hud_active(False, now)
             self.gui.set_current_percentages(None, None)
             return
 
@@ -497,11 +506,13 @@ class AutoPotionController:
         self.next_capture_at = now + DEFAULT_CAPTURE_INTERVAL_SECONDS
 
         if not self.scripts_enabled:
+            self._set_gameplay_hud_active(False, now)
             self.gui.set_status(f"腳本已暫停，按 {self.settings.toggle_hotkey} 恢復")
             self.gui.set_current_percentages(None, None)
             return
 
         if not self.is_target_window_active():
+            self._set_gameplay_hud_active(False, now)
             self.gui.set_status("等待楓星成為前景視窗")
             self.gui.set_current_percentages(None, None)
             return
@@ -509,8 +520,20 @@ class AutoPotionController:
         try:
             transition_pause_reason = self._transition_pause_reason(now)
             if transition_pause_reason:
+                self._set_gameplay_hud_active(False, now)
+                self._pause_experience_for_missing_hud(now)
                 self.gui.set_status(transition_pause_reason)
                 self.gui.set_current_percentages(None, None)
+                return
+
+            if not self._refresh_gameplay_hud_state(now):
+                self._pause_experience_for_missing_hud(now)
+                self.gui.set_status("未偵測到遊戲 HUD，暫停輔助功能")
+                self.gui.set_current_percentages(None, None)
+                self.gui.set_bar_detection_debug(
+                    self._bar_detection_debug_text("hp"),
+                    self._bar_detection_debug_text("mp"),
+                )
                 return
 
             hp_percent = self._capture_bar_percent("hp")
@@ -555,6 +578,43 @@ class AutoPotionController:
         self.experience_tracker.reset()
         self.next_experience_capture_at = 0.0
 
+    def _set_gameplay_hud_active(self, active: bool, now: float) -> None:
+        self.gameplay_hud_active = active
+        if active:
+            return
+        self.last_hp_drink_at = now
+        self.last_mp_drink_at = now
+
+    def _refresh_gameplay_hud_state(self, now: float) -> bool:
+        regions = self._find_bottom_bar_pair_regions(
+            use_cache=False,
+            allow_stale_on_failure=False,
+        )
+        active = "hp" in regions and "mp" in regions
+        self._set_gameplay_hud_active(active, now)
+        if active:
+            return True
+        for bar_type in ("hp", "mp"):
+            self._set_bar_detection_debug(
+                bar_type,
+                source="HUD gate",
+                region=None,
+                percent=None,
+                success=False,
+                reason="找不到包含 HP/MP 條的遊戲 HUD",
+                require_clear_tail=False,
+                tail_clear=None,
+            )
+        return False
+
+    def _pause_experience_for_missing_hud(self, now: float) -> None:
+        if not self.settings.exp_efficiency_enabled:
+            return
+        self._stop_experience_ocr_job()
+        snapshot = self.experience_tracker.snapshot(now)
+        snapshot.status = "HUD 未出現，保留統計"
+        self.gui.set_experience_snapshot(snapshot)
+
     def _update_experience_efficiency(self, now: float) -> None:
         if self._process_experience_ocr_job(now):
             return
@@ -565,7 +625,10 @@ class AutoPotionController:
 
         region = self._experience_text_region()
         if region is None:
-            self.gui.set_experience_snapshot(ExperienceSnapshot(status="找不到 EXP 區域"))
+            self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
+            snapshot = self.experience_tracker.snapshot(now)
+            snapshot.status = "找不到 EXP 區域，保留統計" if snapshot.sample_count else "找不到 EXP 區域"
+            self.gui.set_experience_snapshot(snapshot)
             return
 
         left, top, width, height = region
@@ -576,7 +639,7 @@ class AutoPotionController:
         )
         self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
         snapshot = self.experience_tracker.snapshot(now)
-        snapshot.status = "OCR 辨識中"
+        snapshot.status = "讀取經驗樣本中"
         self.gui.set_experience_snapshot(snapshot)
 
     def _process_experience_ocr_job(self, now: float) -> bool:
@@ -585,7 +648,7 @@ class AutoPotionController:
         job = self.experience_ocr_job
         if not job.future.done():
             snapshot = self.experience_tracker.snapshot(now)
-            snapshot.status = "OCR 辨識中"
+            snapshot.status = "讀取經驗樣本中"
             self.gui.set_experience_snapshot(snapshot)
             return True
 
@@ -596,11 +659,12 @@ class AutoPotionController:
         except Exception as exc:
             reading = ExperienceTextReading(reason=f"OCR 背景工作失敗：{exc}")
 
+        self._log_experience_ocr_reading(reading)
         if reading.success and reading.current_exp is not None:
             if not self.experience_tracker.add_reading(now, reading.current_exp, reading.percent):
                 self._log_experience_sample_rejection(now, self.experience_tracker.last_status)
                 snapshot = self.experience_tracker.snapshot(now)
-                snapshot.status = "OCR 樣本已拒絕，詳見 Console"
+                snapshot.status = "樣本已拒絕，詳見 Console"
                 self.gui.set_experience_snapshot(snapshot)
                 return True
             self.gui.set_experience_snapshot(self.experience_tracker.snapshot(now))
@@ -608,7 +672,8 @@ class AutoPotionController:
 
         self._log_experience_ocr_error(now, reading.reason, reading.text)
         snapshot = self.experience_tracker.snapshot(now)
-        snapshot.status = self._experience_ocr_error_status(reading.reason)
+        if snapshot.sample_count == 0:
+            snapshot.status = "等待有效 EXP 樣本"
         self.gui.set_experience_snapshot(snapshot)
         return True
 
@@ -629,6 +694,19 @@ class AutoPotionController:
         self.last_experience_ocr_error_reason = log_reason
         self.last_experience_ocr_error_at = now
 
+    def _log_experience_ocr_reading(self, reading: ExperienceTextReading) -> None:
+        if reading.success:
+            return
+        result = "成功" if reading.success else "失敗"
+        text = reading.text if reading.text else "--"
+        percent = "--" if reading.percent is None else f"{reading.percent:.2f}%"
+        current_exp = "--" if reading.current_exp is None else f"{reading.current_exp:,}"
+        print(
+            "經驗效率 OCR 輸出："
+            f"result={result} | text={text!r} | confidence={reading.confidence:.2f} | "
+            f"exp={current_exp} | percent={percent} | reason={reading.reason}"
+        )
+
     def _log_experience_sample_rejection(self, now: float, reason: str) -> None:
         if (
             reason == self.last_experience_ocr_error_reason
@@ -638,15 +716,6 @@ class AutoPotionController:
         print(f"經驗效率 {reason}")
         self.last_experience_ocr_error_reason = reason
         self.last_experience_ocr_error_at = now
-
-    def _experience_ocr_error_status(self, reason: str) -> str:
-        if reason.startswith("未安裝") or "初始化" in reason:
-            return "OCR 無法使用，詳見 Console"
-        if "信心" in reason:
-            return "OCR 信心過低，詳見 Console"
-        if "解析" in reason:
-            return "OCR 解析失敗，詳見 Console"
-        return "OCR 失敗，詳見 Console"
 
     def _experience_text_region(self) -> tuple[int, int, int, int] | None:
         hp_region = self.bottom_bar_regions.get("hp")
@@ -685,7 +754,7 @@ class AutoPotionController:
             return
         if now - self.last_hp_drink_at < self.settings.hp_cooldown_seconds:
             return
-        if not self._is_target_window_active_before_send("HP"):
+        if not self._is_target_window_active_before_send("HP", now):
             return
 
         hp_percent = self._capture_bar_percent("hp", require_clear_tail=True)
@@ -694,7 +763,7 @@ class AutoPotionController:
             return
         if hp_percent > self.settings.hp_threshold_percent:
             return
-        if not self._is_target_window_active_before_send("HP"):
+        if not self._is_target_window_active_before_send("HP", now):
             return
 
         tap_hotkey(self.settings.hp_key)
@@ -712,7 +781,7 @@ class AutoPotionController:
             return
         if now - self.last_mp_drink_at < self.settings.mp_cooldown_seconds:
             return
-        if not self._is_target_window_active_before_send("MP"):
+        if not self._is_target_window_active_before_send("MP", now):
             return
 
         mp_percent = self._capture_bar_percent("mp", require_clear_tail=True)
@@ -721,7 +790,7 @@ class AutoPotionController:
             return
         if mp_percent > self.settings.mp_threshold_percent:
             return
-        if not self._is_target_window_active_before_send("MP"):
+        if not self._is_target_window_active_before_send("MP", now):
             return
 
         tap_hotkey(self.settings.mp_key)
@@ -729,9 +798,15 @@ class AutoPotionController:
         self.last_action = f"MP 喝水：{self.settings.mp_key}"
         print(f"MP {mp_percent:.0f}% <= {self.settings.mp_threshold_percent:.0f}%，按 {self.settings.mp_key}")
 
-    def _is_target_window_active_before_send(self, label: str) -> bool:
+    def _is_target_window_active_before_send(self, label: str, now: float | None = None) -> bool:
         if self.is_target_window_active():
-            return True
+            check_at = time.monotonic() if now is None else now
+            if self._refresh_gameplay_hud_state(check_at):
+                return True
+            self.gui.set_status("未偵測到遊戲 HUD，暫停輔助功能")
+            self.gui.set_current_percentages(None, None)
+            print(f"{label} 自動喝水略過：未偵測到遊戲 HUD")
+            return False
         self.gui.set_status("等待楓星成為前景視窗")
         self.gui.set_current_percentages(None, None)
         print(f"{label} 自動喝水略過：楓星不在前景")
@@ -771,12 +846,18 @@ class AutoPotionController:
             track_region=track_region,
         )
 
-    def _find_bottom_bar_pair_regions(self) -> dict[str, tuple[int, int, int, int]]:
+    def _find_bottom_bar_pair_regions(
+        self,
+        *,
+        use_cache: bool = True,
+        allow_stale_on_failure: bool = True,
+    ) -> dict[str, tuple[int, int, int, int]]:
         now = time.monotonic()
         client_bounds = self._foreground_client_bounds()
         cached_client_bounds = getattr(self, "bottom_bar_client_bounds", None)
         if (
-            cached_client_bounds == client_bounds
+            use_cache
+            and cached_client_bounds == client_bounds
             and now - self.bottom_bar_regions_at <= BAR_PAIR_CACHE_SECONDS
         ):
             return self.bottom_bar_regions
@@ -820,7 +901,7 @@ class AutoPotionController:
         if regions:
             self.bottom_bar_regions = regions
             self.bottom_bar_track_regions = getattr(self, "pending_bottom_bar_track_regions", {})
-        elif cached_client_bounds == client_bounds and old_regions:
+        elif allow_stale_on_failure and cached_client_bounds == client_bounds and old_regions:
             self.bottom_bar_regions = old_regions
             self.bottom_bar_track_regions = old_track_regions
         else:
@@ -1396,9 +1477,9 @@ class AutoPotionController:
     def _transition_pause_reason(self, now: float) -> str | None:
         pause_reason = None
         if self._is_channel_loading_screen_active():
-            pause_reason = "偵測到頻道切換載入頁，暫停自動喝水"
+            pause_reason = "偵測到頻道切換載入頁，暫停輔助功能"
         elif self._is_transition_fade_active():
-            pause_reason = "偵測到地圖過場暗幕，暫停自動喝水"
+            pause_reason = "偵測到地圖過場暗幕，暫停輔助功能"
 
         if pause_reason is not None:
             self.fade_guard_hits += 1
