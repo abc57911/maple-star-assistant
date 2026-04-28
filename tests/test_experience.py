@@ -262,6 +262,24 @@ class ExperienceTests(unittest.TestCase):
         self.assertAlmostEqual(snapshot.xp_per_5m, 20000.0)
         self.assertEqual(snapshot.sample_count, 2)
 
+    def test_tracker_rebases_cold_session_when_initial_exp_missed_a_digit(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 11614, 7.50))
+        self.assertTrue(tracker.add_reading(30.0, 11614, 7.50))
+
+        self.assertTrue(tracker.add_reading(60.0, 118071, 7.54))
+        baseline = tracker.snapshot(60.0)
+
+        self.assertEqual(baseline.sample_count, 1)
+        self.assertTrue(baseline.status.startswith("基準修正"))
+
+        self.assertTrue(tracker.add_reading(120.0, 118500, 7.57))
+        snapshot = tracker.snapshot(120.0)
+
+        self.assertEqual(snapshot.current_exp, 118500)
+        self.assertEqual(snapshot.current_percent, 7.57)
+        self.assertEqual(snapshot.status, "統計中")
+
     def test_tracker_does_not_display_unconfirmed_first_sample(self):
         tracker = ExperienceEfficiencyTracker()
         self.assertTrue(tracker.add_reading(0.0, 2425901, 23.13))

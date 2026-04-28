@@ -41,6 +41,7 @@ EXP_TOTAL_ESTIMATE_MAX_DEVIATION_RATIO = 0.35
 EXP_SINGLE_GAIN_MAX_LEVEL_RATIO = 0.35
 EXP_GAIN_EXPECTED_TOLERANCE_RATIO = 8.0
 EXP_GAIN_MIN_ABSOLUTE_TOLERANCE = 5000
+EXP_INITIAL_REBASE_MAX_SAMPLES = 6
 EXP_GAIN_RATE_SPIKE_MULTIPLIER = 20.0
 EXP_LONG_RATE_BLEND_START_SECONDS = 300.0
 EXP_LONG_RATE_BLEND_FULL_SECONDS = 3600.0
@@ -141,8 +142,8 @@ class ExperienceEfficiencyTracker:
         if delta < 0:
             wrapped_delta = self._level_wrap_delta(current_exp, percent)
             if wrapped_delta is None:
-                if self._has_only_baseline_sample():
-                    self._restart_session(now, current_exp, percent, "基準修正：首筆樣本可能誤判")
+                if self._can_rebase_initial_session():
+                    self._restart_session(now, current_exp, percent, "基準修正：先前樣本可能誤判")
                     return True
                 self._reject_sample("EXP 數字回落但不符合升級條件")
                 return False
@@ -150,8 +151,8 @@ class ExperienceEfficiencyTracker:
         else:
             rejection_reason = self._normal_gain_rejection_reason(now, current_exp, percent, delta)
             if rejection_reason is not None:
-                if self._has_only_baseline_sample():
-                    self._restart_session(now, current_exp, percent, "基準修正：首筆樣本可能誤判")
+                if self._can_rebase_initial_session():
+                    self._restart_session(now, current_exp, percent, "基準修正：先前樣本可能誤判")
                     return True
                 self._reject_sample(rejection_reason)
                 return False
@@ -203,6 +204,12 @@ class ExperienceEfficiencyTracker:
 
     def _has_only_baseline_sample(self) -> bool:
         return len(self.samples) == 1 and self.total_gained_exp == 0
+
+    def _can_rebase_initial_session(self) -> bool:
+        return (
+            0 < len(self.samples) <= EXP_INITIAL_REBASE_MAX_SAMPLES
+            and self.total_gained_exp <= EXP_GAIN_MIN_ABSOLUTE_TOLERANCE
+        )
 
     def _reject_sample(self, reason: str) -> None:
         self.last_status = f"樣本拒絕：{reason}"
