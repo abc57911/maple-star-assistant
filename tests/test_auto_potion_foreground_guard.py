@@ -80,6 +80,54 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(controller.last_mp_drink_at, 10.0)
         self.assertEqual(controller._set_bar_detection_debug.call_count, 2)
 
+    def test_gameplay_hud_gate_reuses_stale_regions_when_old_bar_is_still_visible(self):
+        controller = self.make_controller([])
+        del controller._refresh_gameplay_hud_state
+        old_regions = {
+            "hp": (100, 900, 200, 16),
+            "mp": (360, 900, 200, 16),
+        }
+        old_track_regions = {
+            "hp": (102, 902, 190, 12),
+            "mp": (362, 902, 190, 12),
+        }
+        controller.bottom_bar_regions = dict(old_regions)
+        controller.bottom_bar_track_regions = dict(old_track_regions)
+        controller.bottom_bar_client_bounds = (0, 0, 1000, 800)
+        controller.bottom_bar_regions_at = 0.0
+        controller._find_bottom_bar_pair_regions = Mock(return_value={})
+        controller._foreground_client_bounds = Mock(return_value=(0, 0, 1000, 800))
+        controller._bar_percent_from_region_snapshot = Mock(return_value=(72.0, "OK", None))
+        controller._set_bar_detection_debug = Mock()
+
+        self.assertTrue(controller._refresh_gameplay_hud_state(10.0))
+
+        self.assertTrue(controller.gameplay_hud_active)
+        self.assertEqual(controller.bottom_bar_regions, old_regions)
+        self.assertEqual(controller.bottom_bar_track_regions, old_track_regions)
+        self.assertEqual(controller.last_hp_drink_at, -999.0)
+        self.assertEqual(controller.last_mp_drink_at, -999.0)
+        controller._bar_percent_from_region_snapshot.assert_called_once_with(
+            old_regions["mp"],
+            "mp",
+            require_clear_tail=False,
+            track_region=old_track_regions["mp"],
+        )
+        controller._set_bar_detection_debug.assert_not_called()
+
+    def test_hp_threshold_100_does_not_tap_when_bar_is_full(self):
+        controller = self.make_controller([])
+        controller.settings.hp_threshold_percent = 100.0
+
+        with (
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("builtins.print"),
+        ):
+            controller._maybe_drink_hp(100.0, 100.0)
+
+        tap_hotkey.assert_not_called()
+        controller._refresh_gameplay_hud_state.assert_not_called()
+
     def test_hp_does_not_tap_if_target_loses_focus_before_send(self):
         controller = self.make_controller([True, False])
 
@@ -352,6 +400,33 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
         self.assertEqual(snapshot.status, "已停用，保留統計")
         self.assertEqual(controller.last_action, "F10 經驗統計停用")
+
+    def test_toggle_experience_efficiency_clears_stale_rejection_when_enabling(self):
+        controller = self.make_controller([])
+        controller.settings.exp_efficiency_enabled = False
+        controller.next_experience_capture_at = 999.0
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot(
+            current_exp=110000,
+            current_percent=11.0,
+            xp_per_5m=30000.0,
+            sample_count=2,
+            status="樣本拒絕：基準修正候選：EXP 回落但需二次確認",
+        )
+        controller._stop_experience_ocr_job = Mock()
+
+        with patch("builtins.print"):
+            controller.toggle_experience_efficiency()
+
+        controller.gui.set_exp_efficiency_enabled.assert_called_once_with(True)
+        controller._stop_experience_ocr_job.assert_called_once()
+        controller.experience_tracker.clear_transient_rejection.assert_called_once()
+        self.assertEqual(controller.next_experience_capture_at, 0.0)
+        snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
+        self.assertEqual(snapshot.current_exp, 110000)
+        self.assertEqual(snapshot.xp_per_5m, 30000.0)
+        self.assertEqual(snapshot.status, "等待下一次 EXP 樣本")
+        self.assertEqual(controller.last_action, "F10 經驗統計啟用")
 
     def test_experience_ocr_uses_ui_percent_from_reading(self):
         class DoneFuture:

@@ -437,6 +437,22 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(snapshot.current_exp, 133553)
         self.assertEqual(snapshot.sample_count, 2)
 
+    def test_tracker_clears_transient_rejection_when_resuming(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 18886119, 21.03))
+        self.assertFalse(tracker.add_reading(8.0, 132553, 18.36))
+        rejected = tracker.snapshot(8.0)
+        self.assertTrue(rejected.status.startswith("樣本拒絕：基準修正候選"))
+        self.assertIsNotNone(tracker.pending_rebase)
+
+        tracker.clear_transient_rejection()
+        snapshot = tracker.snapshot(9.0)
+
+        self.assertIsNone(tracker.pending_rebase)
+        self.assertEqual(snapshot.status, "等待下一次 EXP 樣本")
+        self.assertFalse(snapshot.status.startswith("樣本拒絕"))
+        self.assertEqual(snapshot.sample_count, 1)
+
     def test_tracker_rejects_cold_session_when_initial_exp_missed_a_digit(self):
         tracker = ExperienceEfficiencyTracker()
         self.assertTrue(tracker.add_reading(0.0, 11614, 7.50))
@@ -609,7 +625,8 @@ class ExperienceTests(unittest.TestCase):
         self.assertGreater(snapshot.xp_per_hour, 900000.0)
 
     def test_format_eta(self):
-        self.assertEqual(format_eta(65), "1:05")
+        self.assertEqual(format_eta(65), "00:01:05")
+        self.assertEqual(format_eta(3599), "00:59:59")
         self.assertEqual(format_eta(3661), "1:01:01")
 
     def test_format_exp_rate(self):
