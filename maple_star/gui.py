@@ -14,7 +14,7 @@ from typing import Callable
 import customtkinter as ctk
 
 from .constants import MAX_CONSOLE_LINES
-from .experience import ExperienceSnapshot, format_eta, format_exp
+from .experience import ExperienceSnapshot, format_eta, format_exp, format_exp_rate
 from .key_capture import DETECTABLE_KEY_VKS, event_to_hotkey, pressed_detectable_vks, vk_to_key_name
 from .settings import (
     SETTINGS_PATH,
@@ -311,9 +311,13 @@ class AutoPotionSettingsGui:
             exp_frame.columnconfigure(column, weight=1 if column else 0)
         self._label(exp_frame, textvariable=self.exp_current_status, font=EXP_MONO_FONT, color=ACCENT_GREEN).grid(row=0, column=0, sticky="w", padx=(0, 12), pady=6)
         self._label(exp_frame, textvariable=self.exp_eta_status, color=WARNING_YELLOW, font=EXP_FONT).grid(row=0, column=1, sticky="w", padx=(0, 12), pady=6)
-        self._label(exp_frame, textvariable=self.exp_rate_5m_status, font=EXP_MONO_FONT).grid(row=1, column=0, sticky="w", padx=(0, 12), pady=(0, 6))
-        self._label(exp_frame, textvariable=self.exp_rate_10m_status, font=EXP_MONO_FONT).grid(row=1, column=1, sticky="w", padx=(0, 12), pady=(0, 6))
-        self._label(exp_frame, textvariable=self.exp_rate_1h_status, font=EXP_MONO_FONT).grid(row=1, column=2, sticky="w", padx=(0, 12), pady=(0, 6))
+        exp_rate_frame = ctk.CTkFrame(exp_frame, fg_color="transparent")
+        exp_rate_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=(0, 12), pady=(0, 6))
+        for column in range(3):
+            exp_rate_frame.columnconfigure(column, weight=1, uniform="exp_rate")
+        self._label(exp_rate_frame, textvariable=self.exp_rate_5m_status, font=EXP_MONO_FONT).grid(row=0, column=0, sticky="w")
+        self._label(exp_rate_frame, textvariable=self.exp_rate_10m_status, font=EXP_MONO_FONT).grid(row=0, column=1, sticky="w")
+        self._label(exp_rate_frame, textvariable=self.exp_rate_1h_status, font=EXP_MONO_FONT).grid(row=0, column=2, sticky="w")
         self._label(exp_frame, textvariable=self.exp_reader_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=2, column=0, columnspan=4, sticky="w", padx=(0, 12), pady=(0, 6))
 
         detection_section, detection_title, detection_frame = self._build_section(monitor_frame, "", row=0, column=1, sticky="nsew", pady=0)
@@ -1579,9 +1583,9 @@ class AutoPotionSettingsGui:
     def set_experience_snapshot(self, snapshot: ExperienceSnapshot) -> None:
         percent = "" if snapshot.current_percent is None else f" ({snapshot.current_percent:.2f}%)"
         self.exp_current_status.set(f"EXP：{format_exp(snapshot.current_exp)}{percent}")
-        self.exp_rate_5m_status.set(f"5m：{format_exp(snapshot.xp_per_5m)} xp")
-        self.exp_rate_10m_status.set(f"10m：{format_exp(snapshot.xp_per_10m)} xp")
-        self.exp_rate_1h_status.set(f"1h：{format_exp(snapshot.xp_per_hour)} xp")
+        self.exp_rate_5m_status.set(f"5m：{format_exp_rate(snapshot.xp_per_5m)}")
+        self.exp_rate_10m_status.set(f"10m：{format_exp_rate(snapshot.xp_per_10m)}")
+        self.exp_rate_1h_status.set(f"1h：{format_exp_rate(snapshot.xp_per_hour)}")
         self.exp_eta_status.set(f"升級預估：{format_eta(snapshot.eta_seconds)}")
         self.exp_reader_status.set(f"狀態：{snapshot.status}")
 
