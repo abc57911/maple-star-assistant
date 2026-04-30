@@ -1,5 +1,7 @@
 import contextlib
 import io
+import os
+import subprocess
 import sys
 import types
 import unittest
@@ -13,13 +15,18 @@ from maple_star.experience import (
     PADDLEOCR_LANGUAGE,
     PADDLEOCR_RECOGNITION_MODEL_NAME,
     PaddleExperienceTextReader,
+    _binarize_experience_text,
+    _clean_experience_text_mask,
+    _experience_text_structure_score,
     extract_paddle_text_items,
     format_eta,
+    format_exp_rate,
     parse_exp_percent_text,
     parse_current_exp_text,
     prepare_experience_ocr_image,
     prepare_experience_ocr_images,
     reading_from_paddle_result,
+    suppress_subprocess_windows,
 )
 
 
@@ -27,6 +34,15 @@ class ExperienceTests(unittest.TestCase):
     def test_parse_current_exp_before_percent_text(self):
         self.assertEqual(parse_current_exp_text("132553[18.36%]"), 132553)
         self.assertEqual(parse_current_exp_text("132,553 [18.36%]"), 132553)
+        self.assertEqual(parse_current_exp_text("2,374,841[88.72%]"), 2374841)
+        self.assertEqual(parse_current_exp_text("2.374.841[88.72%]"), 2374841)
+        self.assertEqual(parse_current_exp_text("EXP: 132,553 [18.36%]"), 132553)
+
+    def test_parse_current_exp_rejects_untrusted_exp_number_shape(self):
+        self.assertIsNone(parse_current_exp_text("4E145[1.84%]"))
+        self.assertIsNone(parse_current_exp_text("4Ｅ145[1.84%]"))
+        self.assertIsNone(parse_current_exp_text("41,45[1.84%]"))
+        self.assertIsNone(parse_current_exp_text("4,14,5[1.84%]"))
 
     def test_parse_exp_percent_from_ui_text(self):
         self.assertEqual(parse_exp_percent_text("132553[18.36%]"), 18.36)
@@ -35,6 +51,7 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(parse_exp_percent_text("18%"), 18.0)
         self.assertEqual(parse_exp_percent_text("283744[2 7 :0671"), 27.06)
         self.assertEqual(parse_exp_percent_text("283744[27.06X]"), 27.06)
+        self.assertEqual(parse_exp_percent_text("1448234[6108%]"), 61.08)
 
     def test_parse_current_exp_uses_percent_hint_when_ocr_merges_digits(self):
         self.assertEqual(parse_current_exp_text("1325531836", percent_hint=18.36), 132553)
@@ -126,6 +143,31 @@ class ExperienceTests(unittest.TestCase):
 
         self.assertLess(float(black_density_by_row.max()), 0.72)
 
+    def test_binary_fallback_keeps_text_touching_top_border(self):
+        mask = np.zeros((12, 24), dtype=bool)
+        mask[2:4, :] = True
+        mask[4, 10:16] = True
+
+        cleaned = _clean_experience_text_mask(mask)
+
+        self.assertFalse(cleaned[2:4, :].any())
+        self.assertTrue(cleaned[4, 10:16].all())
+
+    def test_binary_fallback_ignores_dim_vertical_background_noise(self):
+        image = np.zeros((30, 80, 4), dtype=np.uint8)
+        image[:, :, :3] = 45
+        image[:, :, 3] = 255
+        image[8:22, 18:24, :3] = 245
+        image[8:11, 24:32, :3] = 245
+        image[12:24, 42:44, :3] = 170
+
+        binary = _binarize_experience_text(image)
+
+        self.assertIsNotNone(binary)
+        assert binary is not None
+        self.assertEqual(int(binary[12, 20, 0]), 0)
+        self.assertEqual(int(binary[18, 43, 0]), 255)
+
     def test_paddle_reader_prefers_high_confidence_raw_roi(self):
         class FakeOcr:
             def predict(self, input):
@@ -142,6 +184,71 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(reading.current_exp, 283744)
         self.assertEqual(reading.percent, 27.06)
 
+    def test_paddle_reader_prefers_structured_binary_text_over_merged_percent(self):
+        class FakeOcr:
+            def __init__(self):
+                self.calls = 0
+
+            def predict(self, input):
+                self.calls += 1
+                if self.calls == 1:
+                    return [{"res": {"rec_texts": ["1960868197.028"], "rec_scores": [0.96]}}]
+                if self.calls == 2:
+                    return [{"res": {"rec_texts": ["1960262197.088 1"], "rec_scores": [0.62]}}]
+                return [{"res": {"rec_texts": ["1960363[97.03XT"], "rec_scores": [0.89]}}]
+
+        reader = PaddleExperienceTextReader()
+        reader.ocr = FakeOcr()
+        image = np.zeros((30, 325, 4), dtype=np.uint8)
+        image[:, :, 0] = 45
+        image[:, :, 1] = 120
+        image[:, :, 2] = 45
+        image[:, :, 3] = 255
+        for left in range(70, 220, 16):
+            image[10:19, left : left + 6, :3] = 245
+
+        reading = reader.read(image)
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 1960363)
+        self.assertEqual(reading.percent, 97.03)
+        self.assertEqual(reader.ocr.calls, 3)
+
+    def test_paddle_reader_rejects_weak_merged_percent_structure(self):
+        class FakeOcr:
+            def predict(self, input):
+                return [{"res": {"rec_texts": ["237484188.72%"], "rec_scores": [0.98]}}]
+
+        reader = PaddleExperienceTextReader()
+        reader.ocr = FakeOcr()
+
+        reading = reader.read(np.zeros((30, 325, 4), dtype=np.uint8))
+
+        self.assertFalse(reading.success)
+        self.assertIsNone(reading.current_exp)
+        self.assertIsNone(reading.percent)
+        self.assertEqual(reading.reason, "EXP OCR 結構不可信")
+
+    def test_paddle_reader_repairs_missing_decimal_in_bracketed_percent(self):
+        class FakeOcr:
+            def predict(self, input):
+                return [{"res": {"rec_texts": ["1448234[6108%]"], "rec_scores": [0.98]}}]
+
+        reader = PaddleExperienceTextReader()
+        reader.ocr = FakeOcr()
+
+        reading = reader.read(np.zeros((30, 325, 4), dtype=np.uint8))
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 1448234)
+        self.assertEqual(reading.percent, 61.08)
+
+    def test_experience_text_structure_prefers_bracketed_percent(self):
+        self.assertGreater(
+            _experience_text_structure_score("1960363[97.03XT"),
+            _experience_text_structure_score("1960868197.028"),
+        )
+
     def test_reading_from_paddle_result_accepts_percent_symbol_noise(self):
         reading = reading_from_paddle_result([{"res": {"rec_texts": ["283744[27.06X]"], "rec_scores": [0.94]}}])
 
@@ -155,6 +262,49 @@ class ExperienceTests(unittest.TestCase):
         self.assertTrue(reading.success)
         self.assertEqual(reading.current_exp, 283744)
         self.assertEqual(reading.percent, 27.06)
+
+    def test_reading_from_paddle_result_repairs_missing_decimal_in_bracketed_percent(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["1448234[6108%]"], "rec_scores": [0.98]}}])
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 1448234)
+        self.assertEqual(reading.percent, 61.08)
+
+    def test_reading_from_paddle_result_repairs_another_missing_decimal_in_bracketed_percent(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["942948[4195%]"], "rec_scores": [0.98]}}])
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 942948)
+        self.assertEqual(reading.percent, 41.95)
+
+    def test_reading_from_paddle_result_rejects_letters_inside_exp_digits(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["4E145[1.84%]"], "rec_scores": [0.89]}}])
+
+        self.assertFalse(reading.success)
+        self.assertIsNone(reading.current_exp)
+        self.assertEqual(reading.percent, None)
+        self.assertEqual(reading.reason, "EXP 數字解析失敗")
+
+    def test_reading_from_paddle_result_rejects_fullwidth_letters_inside_exp_digits(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["4Ｅ145[1.84%]"], "rec_scores": [0.89]}}])
+
+        self.assertFalse(reading.success)
+        self.assertIsNone(reading.current_exp)
+        self.assertEqual(reading.reason, "EXP 數字解析失敗")
+
+    def test_reading_from_paddle_result_rejects_bad_exp_grouping(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["41,45[1.84%]"], "rec_scores": [0.92]}}])
+
+        self.assertFalse(reading.success)
+        self.assertIsNone(reading.current_exp)
+        self.assertEqual(reading.reason, "EXP 數字解析失敗")
+
+    def test_reading_from_paddle_result_accepts_exp_label_and_grouping(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["EXP: 2,374,841 [88.72%]"], "rec_scores": [0.96]}}])
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 2374841)
+        self.assertEqual(reading.percent, 88.72)
 
     def test_paddle_reader_uses_traditional_chinese_ppocrv5_models(self):
         captured_kwargs = {}
@@ -215,6 +365,32 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue(), "")
         self.assertEqual(stderr.getvalue(), "")
 
+    def test_suppress_subprocess_windows_hides_windows_subprocesses(self):
+        calls = []
+        original_popen = subprocess.Popen
+
+        class FakePopen:
+            def __init__(self, *args, **kwargs):
+                calls.append(kwargs)
+
+        subprocess.Popen = FakePopen
+        try:
+            with suppress_subprocess_windows():
+                subprocess.Popen(["dummy"])
+        finally:
+            subprocess.Popen = original_popen
+
+        self.assertEqual(len(calls), 1)
+        if os.name != "nt" or not hasattr(subprocess, "STARTUPINFO"):
+            self.assertNotIn("creationflags", calls[0])
+            self.assertNotIn("startupinfo", calls[0])
+            return
+
+        self.assertTrue(calls[0]["creationflags"] & subprocess.CREATE_NO_WINDOW)
+        startupinfo = calls[0]["startupinfo"]
+        self.assertTrue(startupinfo.dwFlags & subprocess.STARTF_USESHOWWINDOW)
+        self.assertEqual(startupinfo.wShowWindow, 0)
+
     def test_tracker_reports_exp_rates_and_eta(self):
         tracker = ExperienceEfficiencyTracker()
         tracker.add_reading(0.0, 1000, 10.0)
@@ -247,38 +423,51 @@ class ExperienceTests(unittest.TestCase):
         tracker = ExperienceEfficiencyTracker()
         self.assertTrue(tracker.add_reading(0.0, 18886119, 21.03))
 
-        self.assertTrue(tracker.add_reading(8.0, 132553, 18.36))
+        self.assertFalse(tracker.add_reading(8.0, 132553, 18.36))
         baseline = tracker.snapshot(8.0)
 
         self.assertIsNone(baseline.current_exp)
         self.assertEqual(baseline.sample_count, 1)
         self.assertIsNone(baseline.xp_per_5m)
-        self.assertTrue(baseline.status.startswith("基準修正"))
+        self.assertTrue(baseline.status.startswith("樣本拒絕：基準修正候選"))
 
-        self.assertTrue(tracker.add_reading(68.0, 136553, 18.91))
-        snapshot = tracker.snapshot(68.0)
+        self.assertTrue(tracker.add_reading(13.0, 133553, 18.42))
+        snapshot = tracker.snapshot(13.0)
 
-        self.assertEqual(snapshot.current_exp, 136553)
-        self.assertAlmostEqual(snapshot.xp_per_5m, 20000.0)
+        self.assertEqual(snapshot.current_exp, 133553)
         self.assertEqual(snapshot.sample_count, 2)
 
-    def test_tracker_rebases_cold_session_when_initial_exp_missed_a_digit(self):
+    def test_tracker_rejects_cold_session_when_initial_exp_missed_a_digit(self):
         tracker = ExperienceEfficiencyTracker()
         self.assertTrue(tracker.add_reading(0.0, 11614, 7.50))
         self.assertTrue(tracker.add_reading(30.0, 11614, 7.50))
 
-        self.assertTrue(tracker.add_reading(60.0, 118071, 7.54))
+        self.assertFalse(tracker.add_reading(60.0, 118071, 7.54))
         baseline = tracker.snapshot(60.0)
 
-        self.assertEqual(baseline.sample_count, 1)
-        self.assertTrue(baseline.status.startswith("基準修正"))
+        self.assertEqual(baseline.current_exp, 11614)
+        self.assertTrue(baseline.status.startswith("樣本拒絕：EXP 跳動與百分比不一致"))
 
-        self.assertTrue(tracker.add_reading(120.0, 118500, 7.57))
-        snapshot = tracker.snapshot(120.0)
+    def test_tracker_does_not_rebase_to_single_huge_initial_outlier(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 2374841, 88.72))
+        before = tracker.snapshot(0.0)
 
-        self.assertEqual(snapshot.current_exp, 118500)
-        self.assertEqual(snapshot.current_percent, 7.57)
-        self.assertEqual(snapshot.status, "統計中")
+        self.assertFalse(tracker.add_reading(5.0, 200728289, 88.73))
+        rejected = tracker.snapshot(5.0)
+
+        self.assertEqual(tracker.last_current_exp, 2374841)
+        self.assertAlmostEqual(tracker.estimated_level_total_exp, 2374841 / 0.8872)
+        self.assertEqual(rejected.current_exp, before.current_exp)
+        self.assertIsNone(tracker.pending_rebase)
+        self.assertTrue(rejected.status.startswith("樣本拒絕：EXP 跳動與百分比不一致"))
+
+        self.assertTrue(tracker.add_reading(10.0, 2375000, 88.73))
+        snapshot = tracker.snapshot(10.0)
+
+        self.assertEqual(snapshot.current_exp, 2375000)
+        self.assertEqual(snapshot.current_percent, 88.73)
+        self.assertEqual(snapshot.sample_count, 2)
 
     def test_tracker_does_not_display_unconfirmed_first_sample(self):
         tracker = ExperienceEfficiencyTracker()
@@ -303,6 +492,55 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(snapshot.sample_count, 2)
         self.assertTrue(snapshot.status.startswith("樣本拒絕"))
 
+    def test_tracker_rejects_regressed_exp_even_when_percent_increases(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 100000, 10.0))
+        self.assertTrue(tracker.add_reading(60.0, 110000, 11.0))
+
+        self.assertFalse(tracker.add_reading(120.0, 11500, 11.5))
+        snapshot = tracker.snapshot(120.0)
+
+        self.assertEqual(snapshot.current_exp, 110000)
+        self.assertEqual(snapshot.current_percent, 11.0)
+        self.assertEqual(snapshot.sample_count, 2)
+        self.assertTrue(snapshot.status.startswith("樣本拒絕"))
+
+    def test_tracker_rejects_exp_jump_inconsistent_with_percent_delta(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 1900000, 95.0))
+        self.assertTrue(tracker.add_reading(60.0, 1940000, 97.0))
+
+        self.assertFalse(tracker.add_reading(65.0, 2080000, 98.0))
+        snapshot = tracker.snapshot(65.0)
+
+        self.assertEqual(snapshot.current_exp, 1940000)
+        self.assertEqual(snapshot.current_percent, 97.0)
+        self.assertTrue(snapshot.status.startswith("樣本拒絕"))
+
+    def test_tracker_rejects_exp_gain_when_percent_drops(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 2374841, 88.72))
+        self.assertTrue(tracker.add_reading(5.0, 2375000, 88.73))
+
+        self.assertFalse(tracker.add_reading(10.0, 2380000, 61.08))
+        snapshot = tracker.snapshot(10.0)
+
+        self.assertEqual(snapshot.current_exp, 2375000)
+        self.assertEqual(snapshot.current_percent, 88.73)
+        self.assertTrue(snapshot.status.startswith("樣本拒絕：EXP 百分比回落"))
+
+    def test_tracker_rejects_small_digit_error_when_percent_does_not_move(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 283744, 27.06))
+        self.assertTrue(tracker.add_reading(5.0, 283900, 27.08))
+
+        self.assertFalse(tracker.add_reading(10.0, 288900, 27.08))
+        snapshot = tracker.snapshot(10.0)
+
+        self.assertEqual(snapshot.current_exp, 283900)
+        self.assertEqual(snapshot.current_percent, 27.08)
+        self.assertTrue(snapshot.status.startswith("樣本拒絕：EXP 跳動與百分比不一致"))
+
     def test_tracker_keeps_last_rate_when_short_window_is_temporarily_insufficient(self):
         tracker = ExperienceEfficiencyTracker()
         tracker.add_reading(0.0, 1000, 10.0)
@@ -324,9 +562,63 @@ class ExperienceTests(unittest.TestCase):
 
         self.assertEqual(snapshot.xp_per_5m, 7500.0)
 
+    def test_tracker_long_rate_weights_recent_trend(self):
+        tracker = ExperienceEfficiencyTracker()
+        tracker.add_reading(0.0, 1000, 0.10)
+        tracker.add_reading(1800.0, 2000, 0.20)
+        tracker.add_reading(3600.0, 92000, 9.20)
+
+        snapshot = tracker.snapshot(3600.0)
+
+        self.assertGreater(snapshot.xp_per_hour, 91000.0)
+        self.assertLess(snapshot.xp_per_hour, 180000.0)
+
+    def test_tracker_does_not_resmooth_without_new_sample(self):
+        tracker = ExperienceEfficiencyTracker()
+        tracker.add_reading(0.0, 1000, 0.10)
+        tracker.add_reading(60.0, 7000, 0.70)
+        tracker.snapshot(60.0)
+        tracker.add_reading(120.0, 25000, 2.50)
+        first = tracker.snapshot(120.0)
+
+        second = tracker.snapshot(121.0)
+
+        self.assertEqual(second.xp_per_5m, first.xp_per_5m)
+        self.assertEqual(second.xp_per_10m, first.xp_per_10m)
+        self.assertEqual(second.xp_per_hour, first.xp_per_hour)
+
+    def test_tracker_rates_converge_quickly_after_rate_change(self):
+        tracker = ExperienceEfficiencyTracker()
+        for index in range(5):
+            captured_at = index * 60.0
+            current_exp = 1000 + round(100 * captured_at)
+            tracker.add_reading(captured_at, current_exp, current_exp / 10000)
+            tracker.snapshot(captured_at)
+
+        snapshot = None
+        for index in range(1, 5):
+            captured_at = 240.0 + index * 60.0
+            current_exp = 1000 + round(100 * 240 + 300 * (captured_at - 240))
+            tracker.add_reading(captured_at, current_exp, current_exp / 10000)
+            snapshot = tracker.snapshot(captured_at)
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertGreater(snapshot.xp_per_5m, 85000.0)
+        self.assertGreater(snapshot.xp_per_10m, 160000.0)
+        self.assertGreater(snapshot.xp_per_hour, 900000.0)
+
     def test_format_eta(self):
         self.assertEqual(format_eta(65), "1:05")
         self.assertEqual(format_eta(3661), "1:01:01")
+
+    def test_format_exp_rate(self):
+        self.assertEqual(format_exp_rate(None), "--")
+        self.assertEqual(format_exp_rate(9999), "9,999")
+        self.assertEqual(format_exp_rate(10000), "1萬")
+        self.assertEqual(format_exp_rate(84965), "8萬4")
+        self.assertEqual(format_exp_rate(2001195), "200萬1")
+        self.assertEqual(format_exp_rate(10759664), "1,075萬9")
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 from maple_star.controller import AutoPotionController, ExperienceOcrJob
-from maple_star.constants import ASYNC_KEY_DOWN_MASK
+from maple_star.constants import ASYNC_KEY_DOWN_MASK, BAR_CONFIRM_CAPTURE_ATTEMPTS, BAR_TRANSIENT_CAPTURE_ATTEMPTS
 from maple_star.experience import ExperienceSnapshot, ExperienceTextReading
 from maple_star.settings import AutoPotionSettings
 
@@ -93,6 +93,38 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(controller.last_hp_drink_at, -999.0)
         controller.gui.set_status.assert_called_with("等待楓星成為前景視窗")
 
+    def test_hp_retries_initial_transient_failure_before_logging(self):
+        controller = self.make_controller([])
+        controller._capture_bar_percent = Mock(return_value=80.0)
+
+        with (
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("maple_star.controller.time.sleep") as sleep,
+            patch("builtins.print"),
+        ):
+            controller._maybe_drink_hp(100.0, None)
+
+        tap_hotkey.assert_not_called()
+        controller._log_unstable_bar.assert_not_called()
+        controller._capture_bar_percent.assert_called_once_with("hp")
+        sleep.assert_not_called()
+
+    def test_hp_logs_unstable_only_after_initial_transient_retries_fail(self):
+        controller = self.make_controller([])
+        controller._capture_bar_percent = Mock(return_value=None)
+
+        with (
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("maple_star.controller.time.sleep") as sleep,
+            patch("builtins.print"),
+        ):
+            controller._maybe_drink_hp(100.0, None)
+
+        tap_hotkey.assert_not_called()
+        controller._log_unstable_bar.assert_called_once_with(100.0, "HP")
+        self.assertEqual(controller._capture_bar_percent.call_count, BAR_TRANSIENT_CAPTURE_ATTEMPTS)
+        self.assertEqual(sleep.call_count, BAR_TRANSIENT_CAPTURE_ATTEMPTS - 1)
+
     def test_hp_does_not_tap_if_gameplay_hud_disappears_before_send(self):
         controller = self.make_controller([True])
         controller._refresh_gameplay_hud_state.return_value = False
@@ -106,6 +138,81 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         tap_hotkey.assert_not_called()
         self.assertEqual(controller.last_hp_drink_at, -999.0)
         controller.gui.set_status.assert_called_with("未偵測到遊戲 HUD，暫停輔助功能")
+
+    def test_hp_confirm_capture_retries_transient_failure_before_tapping(self):
+        controller = self.make_controller([True, True])
+        controller._capture_bar_percent = Mock(side_effect=[None, 25.0])
+
+        with (
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("maple_star.controller.time.sleep") as sleep,
+            patch("builtins.print"),
+        ):
+            controller._maybe_drink_hp(100.0, 25.0)
+
+        tap_hotkey.assert_called_once_with("Delete")
+        self.assertEqual(controller._capture_bar_percent.call_count, 2)
+        sleep.assert_called_once()
+        controller._log_unstable_bar.assert_not_called()
+
+    def test_hp_confirm_capture_logs_unstable_after_retries_fail(self):
+        controller = self.make_controller([True])
+        controller._capture_bar_percent = Mock(return_value=None)
+
+        with (
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("maple_star.controller.time.sleep") as sleep,
+            patch("builtins.print"),
+        ):
+            controller._maybe_drink_hp(100.0, 25.0)
+
+        tap_hotkey.assert_not_called()
+        self.assertEqual(controller._capture_bar_percent.call_count, BAR_CONFIRM_CAPTURE_ATTEMPTS + 1)
+        self.assertEqual(sleep.call_count, BAR_CONFIRM_CAPTURE_ATTEMPTS - 1)
+        controller._log_unstable_bar.assert_called_once_with(100.0, "HP")
+
+    def test_hp_confirm_capture_uses_matching_unchecked_fallback(self):
+        controller = self.make_controller([True, True])
+        controller._capture_bar_percent = Mock(
+            side_effect=[None] * BAR_CONFIRM_CAPTURE_ATTEMPTS + [26.0]
+        )
+
+        with (
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("maple_star.controller.time.sleep"),
+            patch("builtins.print"),
+        ):
+            controller._maybe_drink_hp(100.0, 25.0)
+
+        tap_hotkey.assert_called_once_with("Delete")
+        controller._log_unstable_bar.assert_not_called()
+
+    def test_hp_confirm_capture_rejects_mismatched_unchecked_fallback(self):
+        controller = self.make_controller([True])
+        controller._capture_bar_percent = Mock(
+            side_effect=[None] * BAR_CONFIRM_CAPTURE_ATTEMPTS + [80.0]
+        )
+
+        with (
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("maple_star.controller.time.sleep"),
+            patch("builtins.print"),
+        ):
+            controller._maybe_drink_hp(100.0, 25.0)
+
+        tap_hotkey.assert_not_called()
+        controller._log_unstable_bar.assert_called_once_with(100.0, "HP")
+
+    def test_unstable_bar_log_is_throttled(self):
+        controller = AutoPotionController.__new__(AutoPotionController)
+        controller.last_unstable_bar_at = -999.0
+
+        with patch("builtins.print") as print_mock:
+            controller._log_unstable_bar(100.0, "HP")
+            controller._log_unstable_bar(107.0, "HP")
+            controller._log_unstable_bar(108.1, "HP")
+
+        self.assertEqual(print_mock.call_count, 2)
 
     def test_mp_does_not_tap_if_target_loses_focus_after_confirm_capture(self):
         controller = self.make_controller([True, False])
@@ -300,6 +407,38 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         printed = "\n".join(call.args[0] for call in print_mock.call_args_list)
         self.assertIn("1325531836", printed)
         self.assertIn("經驗效率 OCR 錯誤", printed)
+
+    def test_experience_rejected_ocr_sample_logs_raw_text_and_values(self):
+        class DoneFuture:
+            def done(self):
+                return True
+
+            def result(self):
+                return ExperienceTextReading(
+                    current_exp=288900,
+                    percent=27.08,
+                    text="288900[27.08%]",
+                    confidence=0.98,
+                    success=True,
+                    reason="OK",
+                )
+
+        controller = self.make_controller([])
+        controller.experience_ocr_job = ExperienceOcrJob(submitted_at=0.0, future=DoneFuture())
+        controller.next_experience_capture_at = 0.0
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.add_reading.return_value = False
+        controller.experience_tracker.last_status = "樣本拒絕：EXP 跳動與百分比不一致"
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot(sample_count=2, status="統計中")
+
+        with patch("builtins.print") as print_mock:
+            self.assertTrue(controller._process_experience_ocr_job(8.0))
+
+        printed = "\n".join(call.args[0] for call in print_mock.call_args_list)
+        self.assertIn("經驗效率 異常樣本拒絕", printed)
+        self.assertIn("288900[27.08%]", printed)
+        self.assertIn("exp=288,900", printed)
+        self.assertIn("percent=27.08%", printed)
 
     def test_missing_experience_region_preserves_last_statistics(self):
         controller = self.make_controller([])

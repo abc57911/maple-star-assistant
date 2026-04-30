@@ -15,6 +15,9 @@ import numpy as np
 from .constants import (
     ASYNC_KEY_DOWN_MASK,
     BAR_COLUMN_FILL_MIN_RATIO,
+    BAR_CONFIRM_CAPTURE_ATTEMPTS,
+    BAR_CONFIRM_FALLBACK_MAX_DELTA_PERCENT,
+    BAR_CONFIRM_RETRY_DELAY_SECONDS,
     BAR_DYNAMIC_SEARCH_HEIGHT_RATIO,
     BAR_DYNAMIC_SEARCH_LEFT_RATIO,
     BAR_DYNAMIC_SEARCH_TOP_RATIO,
@@ -34,6 +37,9 @@ from .constants import (
     BAR_SEARCH_MIN_RUN_PIXELS,
     BAR_STABLE_SAMPLE_HOLD_SECONDS,
     BAR_TAIL_CHECK_MIN_WIDTH_RATIO,
+    BAR_TRANSIENT_CAPTURE_ATTEMPTS,
+    BAR_TRANSIENT_RETRY_DELAY_SECONDS,
+    BAR_UNSTABLE_LOG_INTERVAL_SECONDS,
     BAR_VERTICAL_BODY_ROW_DENSITY,
     DEFAULT_CAPTURE_INTERVAL_SECONDS,
     EXPERIENCE_CAPTURE_INTERVAL_SECONDS,
@@ -662,7 +668,7 @@ class AutoPotionController:
         self._log_experience_ocr_reading(reading)
         if reading.success and reading.current_exp is not None:
             if not self.experience_tracker.add_reading(now, reading.current_exp, reading.percent):
-                self._log_experience_sample_rejection(now, self.experience_tracker.last_status)
+                self._log_experience_sample_rejection(now, self.experience_tracker.last_status, reading)
                 snapshot = self.experience_tracker.snapshot(now)
                 snapshot.status = "樣本已拒絕，詳見 Console"
                 self.gui.set_experience_snapshot(snapshot)
@@ -698,24 +704,35 @@ class AutoPotionController:
         if reading.success:
             return
         result = "成功" if reading.success else "失敗"
-        text = reading.text if reading.text else "--"
-        percent = "--" if reading.percent is None else f"{reading.percent:.2f}%"
-        current_exp = "--" if reading.current_exp is None else f"{reading.current_exp:,}"
         print(
             "經驗效率 OCR 輸出："
-            f"result={result} | text={text!r} | confidence={reading.confidence:.2f} | "
-            f"exp={current_exp} | percent={percent} | reason={reading.reason}"
+            f"result={result} | {self._experience_reading_log_fields(reading)} | reason={reading.reason}"
         )
 
-    def _log_experience_sample_rejection(self, now: float, reason: str) -> None:
+    def _log_experience_sample_rejection(
+        self,
+        now: float,
+        reason: str,
+        reading: ExperienceTextReading | None = None,
+    ) -> None:
+        detail = f"{reason} | {self._experience_reading_log_fields(reading)}" if reading is not None else reason
         if (
-            reason == self.last_experience_ocr_error_reason
+            detail == self.last_experience_ocr_error_reason
             and now - self.last_experience_ocr_error_at < EXPERIENCE_OCR_ERROR_LOG_INTERVAL_SECONDS
         ):
             return
-        print(f"經驗效率 {reason}")
-        self.last_experience_ocr_error_reason = reason
+        print(f"經驗效率 異常樣本拒絕：{detail}")
+        self.last_experience_ocr_error_reason = detail
         self.last_experience_ocr_error_at = now
+
+    def _experience_reading_log_fields(self, reading: ExperienceTextReading) -> str:
+        text = reading.text if reading.text else "--"
+        percent = "--" if reading.percent is None else f"{reading.percent:.2f}%"
+        current_exp = "--" if reading.current_exp is None else f"{reading.current_exp:,}"
+        return (
+            f"text={text!r} | confidence={reading.confidence:.2f} | "
+            f"exp={current_exp} | percent={percent}"
+        )
 
     def _experience_text_region(self) -> tuple[int, int, int, int] | None:
         hp_region = self.bottom_bar_regions.get("hp")
@@ -748,8 +765,10 @@ class AutoPotionController:
         if not self.settings.hp_enabled:
             return
         if hp_percent is None:
-            self._log_unstable_bar(now, "HP")
-            return
+            hp_percent = self._capture_transient_bar_percent("hp")
+            if hp_percent is None:
+                self._log_unstable_bar(now, "HP")
+                return
         if hp_percent > self.settings.hp_threshold_percent:
             return
         if now - self.last_hp_drink_at < self.settings.hp_cooldown_seconds:
@@ -757,7 +776,7 @@ class AutoPotionController:
         if not self._is_target_window_active_before_send("HP", now):
             return
 
-        hp_percent = self._capture_bar_percent("hp", require_clear_tail=True)
+        hp_percent = self._capture_confirmed_bar_percent("hp", hp_percent)
         if hp_percent is None:
             self._log_unstable_bar(now, "HP")
             return
@@ -775,8 +794,10 @@ class AutoPotionController:
         if not self.settings.mp_enabled:
             return
         if mp_percent is None:
-            self._log_unstable_bar(now, "MP")
-            return
+            mp_percent = self._capture_transient_bar_percent("mp")
+            if mp_percent is None:
+                self._log_unstable_bar(now, "MP")
+                return
         if mp_percent > self.settings.mp_threshold_percent:
             return
         if now - self.last_mp_drink_at < self.settings.mp_cooldown_seconds:
@@ -784,7 +805,7 @@ class AutoPotionController:
         if not self._is_target_window_active_before_send("MP", now):
             return
 
-        mp_percent = self._capture_bar_percent("mp", require_clear_tail=True)
+        mp_percent = self._capture_confirmed_bar_percent("mp", mp_percent)
         if mp_percent is None:
             self._log_unstable_bar(now, "MP")
             return
@@ -813,10 +834,38 @@ class AutoPotionController:
         return False
 
     def _log_unstable_bar(self, now: float, label: str) -> None:
-        if now - self.last_unstable_bar_at < 2.0:
+        if now - self.last_unstable_bar_at < BAR_UNSTABLE_LOG_INTERVAL_SECONDS:
             return
         self.last_unstable_bar_at = now
         print(f"{label} 條偵測不穩定，略過自動喝水")
+
+    def _capture_transient_bar_percent(self, bar_type: str) -> float | None:
+        attempts = max(1, BAR_TRANSIENT_CAPTURE_ATTEMPTS)
+        for attempt in range(attempts):
+            percent = self._capture_bar_percent(bar_type)
+            if percent is not None:
+                return percent
+            if attempt + 1 < attempts:
+                time.sleep(BAR_TRANSIENT_RETRY_DELAY_SECONDS)
+        return None
+
+    def _capture_confirmed_bar_percent(self, bar_type: str, fallback_percent: float | None = None) -> float | None:
+        attempts = max(1, BAR_CONFIRM_CAPTURE_ATTEMPTS)
+        for attempt in range(attempts):
+            percent = self._capture_bar_percent(bar_type, require_clear_tail=True)
+            if percent is not None:
+                return percent
+            if attempt + 1 < attempts:
+                time.sleep(BAR_CONFIRM_RETRY_DELAY_SECONDS)
+
+        if fallback_percent is None:
+            return None
+        unchecked_percent = self._capture_bar_percent(bar_type, require_clear_tail=False)
+        if unchecked_percent is None:
+            return None
+        if abs(unchecked_percent - fallback_percent) > BAR_CONFIRM_FALLBACK_MAX_DELTA_PERCENT:
+            return None
+        return unchecked_percent
 
     def _capture_bar_percent(
         self,
