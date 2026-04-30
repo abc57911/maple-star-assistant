@@ -160,7 +160,7 @@ def format_eta(seconds: float | None) -> str:
     minutes, secs = divmod(remainder, 60)
     if hours:
         return f"{hours:d}:{minutes:02d}:{secs:02d}"
-    return f"{minutes:d}:{secs:02d}"
+    return f"00:{minutes:02d}:{secs:02d}"
 
 
 class ExperienceEfficiencyTracker:
@@ -176,6 +176,12 @@ class ExperienceEfficiencyTracker:
         self.last_rate_sample_at: float | None = None
         self.pending_rebase: PendingExperienceRebase | None = None
         self.last_status = "等待 EXP 數字"
+
+    def clear_transient_rejection(self) -> None:
+        self.pending_rebase = None
+        if not self.last_status.startswith("樣本拒絕"):
+            return
+        self.last_status = "等待下一次 EXP 樣本" if self.samples else "等待 EXP 數字"
 
     def add_reading(self, now: float, current_exp: int, percent: float | None) -> bool:
         if current_exp < 0:

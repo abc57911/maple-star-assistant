@@ -133,6 +133,12 @@ def normalize_bar_percent(percent: float) -> float:
     return percent
 
 
+def should_drink_for_threshold(percent: float, threshold_percent: float) -> bool:
+    if threshold_percent >= 100.0 and percent >= 100.0:
+        return False
+    return percent <= threshold_percent
+
+
 def loading_screen_metrics(image: np.ndarray) -> tuple[float, float, float]:
     sample = image[::8, ::8, :3].astype(np.float32)
     blue = sample[:, :, 0]
@@ -462,7 +468,13 @@ class AutoPotionController:
         enabled = not self.settings.exp_efficiency_enabled
         self.gui.set_exp_efficiency_enabled(enabled)
         if enabled:
+            now = time.monotonic()
+            self._stop_experience_ocr_job()
             self.next_experience_capture_at = 0.0
+            self.experience_tracker.clear_transient_rejection()
+            snapshot = self.experience_tracker.snapshot(now)
+            snapshot.status = "等待下一次 EXP 樣本" if snapshot.sample_count else "等待有效 EXP 樣本"
+            self.gui.set_experience_snapshot(snapshot)
             self._play_toggle_beep(RESUME_BEEP_FREQUENCY)
             self.gui.set_status("經驗統計已啟用")
             self.gui.show_toggle_notice("經驗統計已啟用")
@@ -605,14 +617,29 @@ class AutoPotionController:
         self.last_mp_drink_at = now
 
     def _refresh_gameplay_hud_state(self, now: float) -> bool:
+        previous_regions = dict(getattr(self, "bottom_bar_regions", {}))
+        previous_track_regions = dict(getattr(self, "bottom_bar_track_regions", {}))
+        previous_client_bounds = getattr(self, "bottom_bar_client_bounds", None)
         regions = self._find_bottom_bar_pair_regions(
             use_cache=False,
             allow_stale_on_failure=False,
         )
         active = "hp" in regions and "mp" in regions
-        self._set_gameplay_hud_active(active, now)
         if active:
+            self._set_gameplay_hud_active(True, now)
             return True
+        if self._can_reuse_stale_bottom_bar_regions(
+            previous_regions,
+            previous_track_regions,
+            previous_client_bounds,
+        ):
+            self.bottom_bar_regions = previous_regions
+            self.bottom_bar_track_regions = previous_track_regions
+            self.bottom_bar_client_bounds = previous_client_bounds
+            self.bottom_bar_regions_at = time.monotonic()
+            self._set_gameplay_hud_active(True, now)
+            return True
+        self._set_gameplay_hud_active(False, now)
         for bar_type in ("hp", "mp"):
             self._set_bar_detection_debug(
                 bar_type,
@@ -624,6 +651,31 @@ class AutoPotionController:
                 require_clear_tail=False,
                 tail_clear=None,
             )
+        return False
+
+    def _can_reuse_stale_bottom_bar_regions(
+        self,
+        regions: dict[str, tuple[int, int, int, int]],
+        track_regions: dict[str, tuple[int, int, int, int]],
+        client_bounds: tuple[int, int, int, int] | None,
+    ) -> bool:
+        if "hp" not in regions or "mp" not in regions:
+            return False
+        if client_bounds is None or client_bounds != self._foreground_client_bounds():
+            return False
+
+        for bar_type in ("mp", "hp"):
+            try:
+                percent, _reason, _tail_clear = self._bar_percent_from_region_snapshot(
+                    regions[bar_type],
+                    bar_type,
+                    require_clear_tail=False,
+                    track_region=track_regions.get(bar_type),
+                )
+            except Exception:
+                continue
+            if percent is not None:
+                return True
         return False
 
     def _pause_experience_for_missing_hud(self, now: float) -> None:
@@ -782,7 +834,7 @@ class AutoPotionController:
             if hp_percent is None:
                 self._log_unstable_bar(now, "HP")
                 return
-        if hp_percent > self.settings.hp_threshold_percent:
+        if not should_drink_for_threshold(hp_percent, self.settings.hp_threshold_percent):
             return
         if now - self.last_hp_drink_at < self.settings.hp_cooldown_seconds:
             return
@@ -793,7 +845,7 @@ class AutoPotionController:
         if hp_percent is None:
             self._log_unstable_bar(now, "HP")
             return
-        if hp_percent > self.settings.hp_threshold_percent:
+        if not should_drink_for_threshold(hp_percent, self.settings.hp_threshold_percent):
             return
         if not self._is_target_window_active_before_send("HP", now):
             return
@@ -811,7 +863,7 @@ class AutoPotionController:
             if mp_percent is None:
                 self._log_unstable_bar(now, "MP")
                 return
-        if mp_percent > self.settings.mp_threshold_percent:
+        if not should_drink_for_threshold(mp_percent, self.settings.mp_threshold_percent):
             return
         if now - self.last_mp_drink_at < self.settings.mp_cooldown_seconds:
             return
@@ -822,7 +874,7 @@ class AutoPotionController:
         if mp_percent is None:
             self._log_unstable_bar(now, "MP")
             return
-        if mp_percent > self.settings.mp_threshold_percent:
+        if not should_drink_for_threshold(mp_percent, self.settings.mp_threshold_percent):
             return
         if not self._is_target_window_active_before_send("MP", now):
             return
@@ -1222,14 +1274,11 @@ class AutoPotionController:
         *,
         track_region: tuple[int, int, int, int] | None = None,
     ) -> float | None:
-        left, top, width, height = region
-        image = np.asarray(self.sct.grab({"left": left, "top": top, "width": width, "height": height}))
-        mask = self._bar_color_mask(image, bar_type)
-        percent_mask, percent_image = self._bar_percent_inputs(region, mask, image, track_region)
-        percent, reason, tail_clear = self._percent_from_bar_mask_result(
-            percent_mask,
-            percent_image,
-            require_clear_tail,
+        percent, reason, tail_clear = self._bar_percent_from_region_snapshot(
+            region,
+            bar_type,
+            require_clear_tail=require_clear_tail,
+            track_region=track_region,
         )
         if percent is not None:
             self._remember_stable_bar_sample(bar_type, percent, region)
@@ -1249,6 +1298,24 @@ class AutoPotionController:
             tail_clear=tail_clear,
         )
         return percent
+
+    def _bar_percent_from_region_snapshot(
+        self,
+        region: tuple[int, int, int, int],
+        bar_type: str,
+        *,
+        require_clear_tail: bool = False,
+        track_region: tuple[int, int, int, int] | None = None,
+    ) -> tuple[float | None, str, bool | None]:
+        left, top, width, height = region
+        image = np.asarray(self.sct.grab({"left": left, "top": top, "width": width, "height": height}))
+        mask = self._bar_color_mask(image, bar_type)
+        percent_mask, percent_image = self._bar_percent_inputs(region, mask, image, track_region)
+        return self._percent_from_bar_mask_result(
+            percent_mask,
+            percent_image,
+            require_clear_tail,
+        )
 
     def _bar_percent_inputs(
         self,
