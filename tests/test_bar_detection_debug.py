@@ -108,6 +108,79 @@ class BarDetectionDebugTests(unittest.TestCase):
         self.assertLess(regions["hp"][1], hp_track[1])
         self.assertGreater(regions["hp"][3], hp_track[3])
 
+    def test_bottom_bar_search_areas_prefer_centered_gameplay_content_for_wide_window(self):
+        controller = self.make_controller()
+
+        areas = controller._bottom_bar_search_areas((0, 0, 3840, 1080))
+
+        self.assertGreaterEqual(len(areas), 2)
+        centered = areas[0]
+        self.assertEqual(centered.reference_left, 960)
+        self.assertEqual(centered.reference_width, 1920)
+        self.assertEqual(centered.reference_height, 1080)
+        self.assertEqual(centered.left, 960 + round(1920 * 0.16))
+        self.assertEqual(centered.width, round(1920 * 0.70))
+
+    def test_bottom_bar_search_areas_include_centered_gameplay_content_for_tall_window(self):
+        controller = self.make_controller()
+
+        areas = controller._bottom_bar_search_areas((0, 0, 900, 900))
+
+        self.assertGreaterEqual(len(areas), 2)
+        centered = areas[0]
+        self.assertEqual(centered.reference_left, 0)
+        self.assertEqual(centered.reference_width, 900)
+        self.assertEqual(centered.reference_height, 506)
+        self.assertEqual(centered.top, 197 + round(506 * 0.84))
+
+    def test_bottom_bar_pair_accepts_centered_wide_window_coordinates(self):
+        controller = self.make_controller()
+
+        regions = controller._bottom_bar_pair_regions_from_candidates(
+            hp_candidates=[(179, 118, 220)],
+            mp_candidates=[(488, 118, 220)],
+            hp_mask=None,
+            mp_mask=None,
+            search_left=1267,
+            search_top=900,
+            search_width=1344,
+            search_height=180,
+            client_width=1920,
+            client_height=1080,
+            reference_left=960,
+        )
+
+        self.assertEqual(set(regions), {"hp", "mp"})
+        self.assertLess(regions["hp"][0], regions["mp"][0])
+        self.assertGreaterEqual(regions["hp"][0], 1267)
+
+    def test_transition_fade_guard_samples_centered_gameplay_content(self):
+        controller = self.make_controller()
+        controller._foreground_client_bounds = Mock(return_value=(0, 0, 3840, 1080))
+        controller.sct = Mock()
+        controller.sct.grab.return_value = np.zeros((12, 24, 4), dtype=np.uint8)
+
+        controller._is_transition_fade_active()
+
+        region = controller.sct.grab.call_args.args[0]
+        self.assertEqual(region["left"], 960)
+        self.assertEqual(region["width"], 1920)
+        self.assertEqual(region["top"], round(1080 * 0.88))
+
+    def test_loading_guard_samples_centered_gameplay_content(self):
+        controller = self.make_controller()
+        controller._foreground_client_bounds = Mock(return_value=(0, 0, 3840, 1080))
+        controller.sct = Mock()
+        image = np.full((12, 24, 4), 255, dtype=np.uint8)
+        controller.sct.grab.return_value = image
+
+        controller._is_channel_loading_screen_active()
+
+        region = controller.sct.grab.call_args.args[0]
+        self.assertEqual(region["left"], 960 + round(1920 * 0.14))
+        self.assertEqual(region["width"], round(1920 * 0.72))
+        self.assertEqual(region["top"], round(1080 * 0.12))
+
     def test_capture_bar_percent_reports_auto_locator_failure(self):
         controller = self.make_controller()
         controller._find_bottom_bar_pair_regions = Mock(return_value={})

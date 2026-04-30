@@ -48,6 +48,8 @@ from .constants import (
     FADE_GUARD_RECOVERY_SECONDS,
     FADE_GUARD_REQUIRED_FRAMES,
     FULL_BAR_SNAP_PERCENT,
+    GAME_CONTENT_ASPECT_RATIO,
+    GAME_CONTENT_LETTERBOX_MIN_MARGIN_PIXELS,
     LOADING_GUARD_BRIGHT_PIXEL_RATIO,
     LOADING_GUARD_LOW_SATURATION_RATIO,
     LOADING_GUARD_MEAN_LUMINANCE,
@@ -111,6 +113,17 @@ class BarDetectionDebug:
 class ExperienceOcrJob:
     submitted_at: float
     future: Future[ExperienceTextReading]
+
+
+@dataclass(frozen=True)
+class HudSearchArea:
+    left: int
+    top: int
+    width: int
+    height: int
+    reference_left: int
+    reference_width: int
+    reference_height: int
 
 
 def normalize_bar_percent(percent: float) -> float:
@@ -915,38 +928,40 @@ class AutoPotionController:
         old_track_regions = dict(getattr(self, "bottom_bar_track_regions", {}))
         self.bottom_bar_client_bounds = client_bounds
         self.bottom_bar_regions_at = now
-        client_left, client_top, client_width, client_height = client_bounds
-        search_left = client_left + round(client_width * BAR_DYNAMIC_SEARCH_LEFT_RATIO)
-        search_top = client_top + round(client_height * BAR_DYNAMIC_SEARCH_TOP_RATIO)
-        search_width = max(1, round(client_width * BAR_DYNAMIC_SEARCH_WIDTH_RATIO))
-        search_height = max(1, round(client_height * BAR_DYNAMIC_SEARCH_HEIGHT_RATIO))
-        image = np.asarray(
-            self.sct.grab(
-                {
-                    "left": search_left,
-                    "top": search_top,
-                    "width": search_width,
-                    "height": search_height,
-                }
-            )
-        )
-        hp_mask = self._bar_color_mask(image, "hp")
-        mp_mask = self._bar_color_mask(image, "mp")
-        hp_candidates = self._bar_run_candidates(hp_mask, client_width)
-        mp_candidates = self._bar_run_candidates(mp_mask, client_width)
 
-        regions = self._bottom_bar_pair_regions_from_candidates(
-            hp_candidates,
-            mp_candidates,
-            hp_mask=hp_mask,
-            mp_mask=mp_mask,
-            search_left=search_left,
-            search_top=search_top,
-            search_width=search_width,
-            search_height=search_height,
-            client_width=client_width,
-            client_height=client_height,
-        )
+        regions: dict[str, tuple[int, int, int, int]] = {}
+        for search_area in self._bottom_bar_search_areas(client_bounds):
+            image = np.asarray(
+                self.sct.grab(
+                    {
+                        "left": search_area.left,
+                        "top": search_area.top,
+                        "width": search_area.width,
+                        "height": search_area.height,
+                    }
+                )
+            )
+            hp_mask = self._bar_color_mask(image, "hp")
+            mp_mask = self._bar_color_mask(image, "mp")
+            hp_candidates = self._bar_run_candidates(hp_mask, search_area.reference_width)
+            mp_candidates = self._bar_run_candidates(mp_mask, search_area.reference_width)
+
+            regions = self._bottom_bar_pair_regions_from_candidates(
+                hp_candidates,
+                mp_candidates,
+                hp_mask=hp_mask,
+                mp_mask=mp_mask,
+                search_left=search_area.left,
+                search_top=search_area.top,
+                search_width=search_area.width,
+                search_height=search_area.height,
+                client_width=search_area.reference_width,
+                client_height=search_area.reference_height,
+                reference_left=search_area.reference_left,
+            )
+            if regions:
+                break
+
         if regions:
             self.bottom_bar_regions = regions
             self.bottom_bar_track_regions = getattr(self, "pending_bottom_bar_track_regions", {})
@@ -957,6 +972,76 @@ class AutoPotionController:
             self.bottom_bar_regions = {}
             self.bottom_bar_track_regions = {}
         return self.bottom_bar_regions
+
+    def _bottom_bar_search_areas(self, client_bounds: tuple[int, int, int, int]) -> list[HudSearchArea]:
+        areas: list[HudSearchArea] = []
+        client_left, client_top, client_width, client_height = client_bounds
+        gameplay_left, gameplay_top, gameplay_width, gameplay_height = self._gameplay_content_bounds(client_bounds)
+        if (gameplay_left, gameplay_top, gameplay_width, gameplay_height) != client_bounds:
+            areas.append(self._bottom_bar_search_area_from_content_bounds(
+                gameplay_left,
+                gameplay_top,
+                gameplay_width,
+                gameplay_height,
+            ))
+        areas.append(self._bottom_bar_search_area_from_content_bounds(
+            client_left,
+            client_top,
+            client_width,
+            client_height,
+        ))
+
+        unique: list[HudSearchArea] = []
+        seen: set[tuple[int, int, int, int]] = set()
+        for area in areas:
+            key = (area.left, area.top, area.width, area.height)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(area)
+        return unique
+
+    def _bottom_bar_search_area_from_content_bounds(
+        self,
+        content_left: int,
+        content_top: int,
+        content_width: int,
+        content_height: int,
+    ) -> HudSearchArea:
+        search_left = content_left + round(content_width * BAR_DYNAMIC_SEARCH_LEFT_RATIO)
+        search_top = content_top + round(content_height * BAR_DYNAMIC_SEARCH_TOP_RATIO)
+        search_width = max(1, round(content_width * BAR_DYNAMIC_SEARCH_WIDTH_RATIO))
+        search_height = max(1, round(content_height * BAR_DYNAMIC_SEARCH_HEIGHT_RATIO))
+        return HudSearchArea(
+            left=search_left,
+            top=search_top,
+            width=search_width,
+            height=search_height,
+            reference_left=content_left,
+            reference_width=content_width,
+            reference_height=content_height,
+        )
+
+    def _gameplay_content_bounds(self, client_bounds: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+        client_left, client_top, client_width, client_height = client_bounds
+        if client_width <= 0 or client_height <= 0:
+            return client_bounds
+
+        fit_width = min(client_width, round(client_height * GAME_CONTENT_ASPECT_RATIO))
+        fit_height = min(client_height, round(client_width / GAME_CONTENT_ASPECT_RATIO))
+        horizontal_margin = max(0, (client_width - fit_width) // 2)
+        vertical_margin = max(0, (client_height - fit_height) // 2)
+        if (
+            horizontal_margin < GAME_CONTENT_LETTERBOX_MIN_MARGIN_PIXELS
+            and vertical_margin < GAME_CONTENT_LETTERBOX_MIN_MARGIN_PIXELS
+        ):
+            return client_bounds
+        return (
+            client_left + horizontal_margin,
+            client_top + vertical_margin,
+            max(1, fit_width),
+            max(1, fit_height),
+        )
 
     def _bottom_bar_pair_regions_from_candidates(
         self,
@@ -971,6 +1056,7 @@ class AutoPotionController:
         search_height: int,
         client_width: int,
         client_height: int,
+        reference_left: int = 0,
     ) -> dict[str, tuple[int, int, int, int]]:
         best_pair: tuple[tuple[int, int, int], tuple[int, int, int], float] | None = None
         max_y_delta = max(4, round(client_height * 0.018))
@@ -979,7 +1065,8 @@ class AutoPotionController:
         max_hp_left = max(1, round(client_width * BAR_PAIR_HP_MAX_LEFT_RATIO))
 
         for hp_start, hp_row, hp_length in hp_candidates:
-            if search_left + hp_start > max_hp_left:
+            hp_left_in_reference = search_left - reference_left + hp_start
+            if hp_left_in_reference > max_hp_left:
                 continue
             for mp_start, mp_row, mp_length in mp_candidates:
                 if mp_start <= hp_start:
@@ -1478,15 +1565,17 @@ class AutoPotionController:
         return (blue > 140) & (green > 75) & (red < 140) & (blue > red + 35)
 
     def _is_transition_fade_active(self) -> bool:
-        client_left, client_top, client_width, client_height = self._foreground_client_bounds()
-        sample_top = client_top + round(client_height * 0.88)
-        sample_height = max(1, round(client_height * 0.10))
+        gameplay_left, gameplay_top, gameplay_width, gameplay_height = self._gameplay_content_bounds(
+            self._foreground_client_bounds()
+        )
+        sample_top = gameplay_top + round(gameplay_height * 0.88)
+        sample_height = max(1, round(gameplay_height * 0.10))
         image = np.asarray(
             self.sct.grab(
                 {
-                    "left": client_left,
+                    "left": gameplay_left,
                     "top": sample_top,
-                    "width": client_width,
+                    "width": gameplay_width,
                     "height": sample_height,
                 }
             )
@@ -1501,11 +1590,13 @@ class AutoPotionController:
         )
 
     def _is_channel_loading_screen_active(self) -> bool:
-        client_left, client_top, client_width, client_height = self._foreground_client_bounds()
-        sample_left = client_left + round(client_width * 0.14)
-        sample_top = client_top + round(client_height * 0.12)
-        sample_width = max(1, round(client_width * 0.72))
-        sample_height = max(1, round(client_height * 0.76))
+        gameplay_left, gameplay_top, gameplay_width, gameplay_height = self._gameplay_content_bounds(
+            self._foreground_client_bounds()
+        )
+        sample_left = gameplay_left + round(gameplay_width * 0.14)
+        sample_top = gameplay_top + round(gameplay_height * 0.12)
+        sample_width = max(1, round(gameplay_width * 0.72))
+        sample_height = max(1, round(gameplay_height * 0.76))
         image = np.asarray(
             self.sct.grab(
                 {
