@@ -9,6 +9,11 @@ from ctypes import wintypes
 from pathlib import Path
 from tempfile import gettempdir
 
+from maple_star.debug_logging import configure_debug_logging
+
+
+configure_debug_logging()
+
 MB_ICONINFORMATION = 0x00000040
 ERROR_ALREADY_EXISTS = 183
 SINGLE_INSTANCE_MUTEX_NAME = "Local\\MapleStarScript"

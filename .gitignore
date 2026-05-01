@@ -8,4 +8,5 @@ dist/
 release/
 *.spec
 startup_error.log
+debug.log
 settings.json

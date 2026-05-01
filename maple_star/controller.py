@@ -65,6 +65,7 @@ from .constants import (
     TOGGLE_HOTKEY_DEBOUNCE_SECONDS,
     WM_HOTKEY,
 )
+from .debug_logging import log_exception
 from .experience import (
     ExperienceEfficiencyTracker,
     ExperienceTextReading,
@@ -728,19 +729,23 @@ class AutoPotionController:
         try:
             reading = job.future.result()
         except Exception as exc:
+            log_exception("OCR 背景工作失敗")
             reading = ExperienceTextReading(reason=f"OCR 背景工作失敗：{exc}")
 
         self._log_experience_ocr_reading(reading)
         if reading.success and reading.current_exp is not None:
             if not self.experience_tracker.add_reading(now, reading.current_exp, reading.percent):
+                self.experience_tracker.record_ocr_result(False)
                 self._log_experience_sample_rejection(now, self.experience_tracker.last_status, reading)
                 snapshot = self.experience_tracker.snapshot(now)
                 snapshot.status = "樣本已拒絕，詳見 Console"
                 self.gui.set_experience_snapshot(snapshot)
                 return True
+            self.experience_tracker.record_ocr_result(True)
             self.gui.set_experience_snapshot(self.experience_tracker.snapshot(now))
             return True
 
+        self.experience_tracker.record_ocr_result(False)
         self._log_experience_ocr_error(now, reading.reason, reading.text)
         snapshot = self.experience_tracker.snapshot(now)
         if snapshot.sample_count == 0:

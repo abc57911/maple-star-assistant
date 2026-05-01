@@ -1,12 +1,15 @@
 import contextlib
 import io
+import json
 import os
 import subprocess
 import sys
 import types
 import unittest
 import warnings
+from pathlib import Path
 
+import cv2
 import numpy as np
 
 from maple_star.experience import (
@@ -18,9 +21,11 @@ from maple_star.experience import (
     _binarize_experience_text,
     _clean_experience_text_mask,
     _experience_text_structure_score,
+    estimate_experience_bar_percent,
     extract_paddle_text_items,
     format_eta,
     format_exp_rate,
+    format_ocr_success_rate,
     parse_exp_percent_text,
     parse_current_exp_text,
     prepare_experience_ocr_image,
@@ -153,6 +158,18 @@ class ExperienceTests(unittest.TestCase):
         self.assertFalse(cleaned[2:4, :].any())
         self.assertTrue(cleaned[4, 10:16].all())
 
+    def test_binary_fallback_removes_top_horizontal_border_residue(self):
+        mask = np.zeros((72, 180), dtype=bool)
+        mask[5:10, 0:100] = True
+        mask[16:24, 40:48] = True
+        mask[16:24, 56:64] = True
+
+        cleaned = _clean_experience_text_mask(mask)
+
+        self.assertFalse(cleaned[5:10, 0:100].any())
+        self.assertTrue(cleaned[16:24, 40:48].all())
+        self.assertTrue(cleaned[16:24, 56:64].all())
+
     def test_binary_fallback_ignores_dim_vertical_background_noise(self):
         image = np.zeros((30, 80, 4), dtype=np.uint8)
         image[:, :, :3] = 45
@@ -168,12 +185,39 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(int(binary[12, 20, 0]), 0)
         self.assertEqual(int(binary[18, 43, 0]), 255)
 
+    def test_binary_fallback_includes_bolder_text_variant(self):
+        image = np.zeros((30, 180, 4), dtype=np.uint8)
+        image[:, :, :3] = (45, 215, 95)
+        image[:, :, 3] = 255
+        for left in range(58, 130, 12):
+            image[10:19, left : left + 5, :3] = 245
+
+        variants = prepare_experience_ocr_images(image)
+
+        self.assertGreaterEqual(len(variants), 4)
+        normal_black = int((variants[-2][:, :, 0] == 0).sum())
+        bold_black = int((variants[-1][:, :, 0] == 0).sum())
+        self.assertGreater(bold_black, normal_black)
+
+    def test_estimate_experience_bar_percent_uses_green_fill_as_guard_hint(self):
+        image = np.zeros((30, 325, 4), dtype=np.uint8)
+        image[:, :, :3] = (30, 30, 30)
+        image[:, :, 3] = 255
+        image[:, :288, :3] = (40, 215, 95)
+
+        percent = estimate_experience_bar_percent(image)
+
+        self.assertIsNotNone(percent)
+        assert percent is not None
+        self.assertGreater(percent, 90.0)
+        self.assertLess(percent, 100.0)
+
     def test_paddle_reader_prefers_high_confidence_raw_roi(self):
         class FakeOcr:
             def predict(self, input):
                 if input.shape[0] == 30:
-                    return [{"res": {"rec_texts": ["283744[27.06X]"], "rec_scores": [0.94]}}]
-                return [{"res": {"rec_texts": ["288744[27.062]"], "rec_scores": [0.89]}}]
+                    return [{"res": {"rec_texts": ["283744[27.06%]"], "rec_scores": [0.94]}}]
+                return [{"res": {"rec_texts": ["288744[27.06%]"], "rec_scores": [0.89]}}]
 
         reader = PaddleExperienceTextReader()
         reader.ocr = FakeOcr()
@@ -195,7 +239,7 @@ class ExperienceTests(unittest.TestCase):
                     return [{"res": {"rec_texts": ["1960868197.028"], "rec_scores": [0.96]}}]
                 if self.calls == 2:
                     return [{"res": {"rec_texts": ["1960262197.088 1"], "rec_scores": [0.62]}}]
-                return [{"res": {"rec_texts": ["1960363[97.03XT"], "rec_scores": [0.89]}}]
+                return [{"res": {"rec_texts": ["1960363[97.03%]"], "rec_scores": [0.91]}}]
 
         reader = PaddleExperienceTextReader()
         reader.ocr = FakeOcr()
@@ -212,7 +256,91 @@ class ExperienceTests(unittest.TestCase):
         self.assertTrue(reading.success)
         self.assertEqual(reading.current_exp, 1960363)
         self.assertEqual(reading.percent, 97.03)
-        self.assertEqual(reader.ocr.calls, 3)
+        self.assertGreaterEqual(reader.ocr.calls, 3)
+
+    def test_paddle_reader_prefers_binary_candidate_over_conflicting_raw_candidate(self):
+        class FakeOcr:
+            def __init__(self):
+                self.calls = 0
+
+            def predict(self, input):
+                self.calls += 1
+                if self.calls == 1:
+                    return [{"res": {"rec_texts": ["2828712[99.91]"], "rec_scores": [0.92]}}]
+                if self.calls == 2:
+                    return [{"res": {"rec_texts": ["3828712199.91X"], "rec_scores": [0.88]}}]
+                return [{"res": {"rec_texts": ["3828712[99.9141]"], "rec_scores": [0.91]}}]
+
+        reader = PaddleExperienceTextReader()
+        reader.ocr = FakeOcr()
+        image = np.zeros((30, 325, 4), dtype=np.uint8)
+        image[:, :, :3] = 30
+        image[:, :, 3] = 255
+        for left in range(70, 220, 16):
+            image[10:19, left : left + 6, :3] = 245
+
+        reading = reader.read(image)
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 3828712)
+        self.assertEqual(reading.percent, 99.91)
+
+    def test_paddle_reader_prefers_missing_open_bracket_candidate_over_binary_percent_noise(self):
+        class FakeOcr:
+            def __init__(self):
+                self.calls = 0
+
+            def predict(self, input):
+                self.calls += 1
+                if self.calls == 1:
+                    return [{"res": {"rec_texts": ["159557139.47%]"], "rec_scores": [0.86]}}]
+                if self.calls == 2:
+                    return [{"res": {"rec_texts": ["159557139.47%]"], "rec_scores": [0.96]}}]
+                if self.calls == 3:
+                    return [{"res": {"rec_texts": ["1595571[33.47]"], "rec_scores": [0.95]}}]
+                return [{"res": {"rec_texts": ["1595571[33.473]"], "rec_scores": [0.92]}}]
+
+        reader = PaddleExperienceTextReader()
+        reader.ocr = FakeOcr()
+        image = np.zeros((30, 325, 4), dtype=np.uint8)
+        image[:, :, :3] = 30
+        image[:, :, 3] = 255
+        for left in range(70, 220, 16):
+            image[10:19, left : left + 6, :3] = 245
+
+        reading = reader.read(image)
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 1595571)
+        self.assertEqual(reading.percent, 39.47)
+
+    def test_paddle_reader_rejects_ambiguous_binary_percent_disagreement(self):
+        class FakeOcr:
+            def __init__(self):
+                self.calls = 0
+
+            def predict(self, input):
+                self.calls += 1
+                if self.calls == 1:
+                    return [{"res": {"rec_texts": ["1577819[39.03X]"], "rec_scores": [0.864]}}]
+                if self.calls == 2:
+                    return [{"res": {"rec_texts": ["1577819[89.03X]"], "rec_scores": [0.886]}}]
+                if self.calls == 3:
+                    return [{"res": {"rec_texts": ["1577819[38.03*]"], "rec_scores": [0.899]}}]
+                return [{"res": {"rec_texts": ["1577819[38.037]"], "rec_scores": [0.882]}}]
+
+        reader = PaddleExperienceTextReader()
+        reader.ocr = FakeOcr()
+        image = np.zeros((30, 325, 4), dtype=np.uint8)
+        image[:, :, :3] = 30
+        image[:, :, 3] = 255
+        for left in range(70, 220, 16):
+            image[10:19, left : left + 6, :3] = 245
+
+        reading = reader.read(image)
+
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.reason, "EXP OCR 候選不一致")
 
     def test_paddle_reader_rejects_weak_merged_percent_structure(self):
         class FakeOcr:
@@ -227,9 +355,9 @@ class ExperienceTests(unittest.TestCase):
         self.assertFalse(reading.success)
         self.assertIsNone(reading.current_exp)
         self.assertIsNone(reading.percent)
-        self.assertEqual(reading.reason, "EXP OCR 結構不可信")
+        self.assertEqual(reading.reason, "EXP 百分比解析失敗")
 
-    def test_paddle_reader_repairs_missing_decimal_in_bracketed_percent(self):
+    def test_paddle_reader_rejects_missing_decimal_in_bracketed_percent(self):
         class FakeOcr:
             def predict(self, input):
                 return [{"res": {"rec_texts": ["1448234[6108%]"], "rec_scores": [0.98]}}]
@@ -239,43 +367,125 @@ class ExperienceTests(unittest.TestCase):
 
         reading = reader.read(np.zeros((30, 325, 4), dtype=np.uint8))
 
-        self.assertTrue(reading.success)
-        self.assertEqual(reading.current_exp, 1448234)
-        self.assertEqual(reading.percent, 61.08)
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.reason, "EXP 百分比解析失敗")
+
+    def test_paddle_reader_rejects_percent_that_conflicts_with_green_bar(self):
+        class FakeOcr:
+            def predict(self, input):
+                return [{"res": {"rec_texts": ["3147582[12.13%]"], "rec_scores": [0.98]}}]
+
+        reader = PaddleExperienceTextReader()
+        reader.ocr = FakeOcr()
+        image = np.zeros((30, 325, 4), dtype=np.uint8)
+        image[:, :, :3] = (30, 30, 30)
+        image[:, :, 3] = 255
+        image[:, :288, :3] = (40, 215, 95)
+
+        reading = reader.read(image)
+
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.reason, "EXP 百分比與綠條不一致")
 
     def test_experience_text_structure_prefers_bracketed_percent(self):
         self.assertGreater(
-            _experience_text_structure_score("1960363[97.03XT"),
+            _experience_text_structure_score("1960363[97.03%]"),
             _experience_text_structure_score("1960868197.028"),
         )
 
-    def test_reading_from_paddle_result_accepts_percent_symbol_noise(self):
+    def test_reading_from_paddle_result_repairs_percent_symbol_read_as_x(self):
         reading = reading_from_paddle_result([{"res": {"rec_texts": ["283744[27.06X]"], "rec_scores": [0.94]}}])
 
         self.assertTrue(reading.success)
         self.assertEqual(reading.current_exp, 283744)
         self.assertEqual(reading.percent, 27.06)
 
-    def test_reading_from_paddle_result_handles_open_bracket_as_one(self):
-        reading = reading_from_paddle_result([{"res": {"rec_texts": ["283744127:06X"], "rec_scores": [0.87]}}])
+    def test_reading_from_paddle_result_repairs_missing_percent_marker(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["3704316[96.66]"], "rec_scores": [0.91]}}])
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 3704316)
+        self.assertEqual(reading.percent, 96.66)
+
+    def test_reading_from_paddle_result_accepts_missing_open_bracket_with_closing_bracket(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["158289139.16%]"], "rec_scores": [0.92]}}])
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 1582891)
+        self.assertEqual(reading.percent, 39.16)
+
+    def test_reading_from_paddle_result_accepts_safe_trailing_punctuation(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["4005069[93.93x]:"], "rec_scores": [0.90]}}])
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 4005069)
+        self.assertEqual(reading.percent, 93.93)
+
+    def test_reading_from_paddle_result_accepts_comma_decimal_inside_percent(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["739393[16,44%]"], "rec_scores": [0.86]}}])
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 739393)
+        self.assertEqual(reading.percent, 16.44)
+
+    def test_reading_from_paddle_result_normalizes_multiply_sign_as_percent_marker(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["3972101[93.16×]"], "rec_scores": [0.90]}}])
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 3972101)
+        self.assertEqual(reading.percent, 93.16)
+
+    def test_reading_from_paddle_result_repairs_percent_marker_read_as_three(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["3696708[96.463]"], "rec_scores": [0.91]}}])
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 3696708)
+        self.assertEqual(reading.percent, 96.46)
+
+    def test_reading_from_paddle_result_rejects_open_bracket_as_one(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["283744127:06X"], "rec_scores": [0.91]}}])
+
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.reason, "EXP 百分比解析失敗")
+
+    def test_reading_from_paddle_result_rejects_stray_closing_bracket_inside_exp(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["37943]6[96.66%]"], "rec_scores": [0.96]}}])
+
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.reason, "EXP 數字解析失敗")
+
+    def test_reading_from_paddle_result_accepts_structured_candidate_at_089_confidence(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["283744[27.06%]"], "rec_scores": [0.89]}}])
 
         self.assertTrue(reading.success)
         self.assertEqual(reading.current_exp, 283744)
         self.assertEqual(reading.percent, 27.06)
 
-    def test_reading_from_paddle_result_repairs_missing_decimal_in_bracketed_percent(self):
+    def test_reading_from_paddle_result_rejects_candidate_below_accept_confidence(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["283744[27.06%]"], "rec_scores": [0.84]}}])
+
+        self.assertFalse(reading.success)
+        self.assertIsNone(reading.current_exp)
+        self.assertEqual(reading.reason, "PaddleOCR 信心未達可信門檻")
+
+    def test_reading_from_paddle_result_rejects_extremely_low_confidence_before_parsing(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["283744[27.06%]"], "rec_scores": [0.69]}}])
+
+        self.assertFalse(reading.success)
+        self.assertIsNone(reading.current_exp)
+        self.assertEqual(reading.reason, "PaddleOCR 信心過低")
+
+    def test_reading_from_paddle_result_rejects_missing_decimal_in_bracketed_percent(self):
         reading = reading_from_paddle_result([{"res": {"rec_texts": ["1448234[6108%]"], "rec_scores": [0.98]}}])
 
-        self.assertTrue(reading.success)
-        self.assertEqual(reading.current_exp, 1448234)
-        self.assertEqual(reading.percent, 61.08)
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.reason, "EXP 百分比解析失敗")
 
-    def test_reading_from_paddle_result_repairs_another_missing_decimal_in_bracketed_percent(self):
+    def test_reading_from_paddle_result_rejects_another_missing_decimal_in_bracketed_percent(self):
         reading = reading_from_paddle_result([{"res": {"rec_texts": ["942948[4195%]"], "rec_scores": [0.98]}}])
 
-        self.assertTrue(reading.success)
-        self.assertEqual(reading.current_exp, 942948)
-        self.assertEqual(reading.percent, 41.95)
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.reason, "EXP 百分比解析失敗")
 
     def test_reading_from_paddle_result_rejects_letters_inside_exp_digits(self):
         reading = reading_from_paddle_result([{"res": {"rec_texts": ["4E145[1.84%]"], "rec_scores": [0.89]}}])
@@ -305,6 +515,46 @@ class ExperienceTests(unittest.TestCase):
         self.assertTrue(reading.success)
         self.assertEqual(reading.current_exp, 2374841)
         self.assertEqual(reading.percent, 88.72)
+
+    def test_experience_tracker_records_ocr_success_rate_and_reset_clears_it(self):
+        tracker = ExperienceEfficiencyTracker()
+
+        tracker.record_ocr_result(False)
+        tracker.record_ocr_result(True)
+
+        snapshot = tracker.snapshot(1.0)
+        self.assertEqual(snapshot.ocr_attempt_count, 2)
+        self.assertEqual(snapshot.ocr_success_count, 1)
+        self.assertEqual(snapshot.ocr_success_rate, 0.5)
+
+        tracker.reset()
+        snapshot = tracker.snapshot(2.0)
+        self.assertEqual(snapshot.ocr_attempt_count, 0)
+        self.assertEqual(snapshot.ocr_success_count, 0)
+        self.assertIsNone(snapshot.ocr_success_rate)
+
+    def test_experience_tracker_rejects_lost_exp_prefix_instead_of_correcting(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 3901093, 91.49))
+        self.assertTrue(tracker.add_reading(10.0, 3913773, 91.79))
+
+        self.assertFalse(tracker.add_reading(20.0, 3320113, 91.94))
+
+        snapshot = tracker.snapshot(20.0)
+        self.assertEqual(snapshot.current_exp, 3913773)
+        self.assertIn("樣本拒絕", snapshot.status)
+
+    def test_experience_tracker_rejects_percent_regression_instead_of_correcting(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 3873137, 90.84))
+        self.assertTrue(tracker.add_reading(10.0, 3877001, 90.93))
+
+        self.assertFalse(tracker.add_reading(20.0, 3878269, 90.36))
+
+        snapshot = tracker.snapshot(20.0)
+        self.assertEqual(snapshot.current_exp, 3877001)
+        self.assertEqual(snapshot.current_percent, 90.93)
+        self.assertIn("樣本拒絕", snapshot.status)
 
     def test_paddle_reader_uses_traditional_chinese_ppocrv5_models(self):
         captured_kwargs = {}
@@ -337,6 +587,50 @@ class ExperienceTests(unittest.TestCase):
 
         self.assertEqual(calls[-1]["lang"], PADDLEOCR_LANGUAGE)
         self.assertFalse(calls[-1]["use_angle_cls"])
+
+    def test_paddle_reader_reaches_90_percent_accuracy_on_labeled_fixtures(self):
+        fixture_dir = Path(__file__).with_name("fixtures") / "experience_ocr"
+        manifest_path = fixture_dir / "manifest.json"
+        if not manifest_path.exists():
+            self.skipTest("缺少 EXP OCR fixture manifest")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        samples = manifest.get("samples", [])
+        if not samples:
+            self.skipTest("缺少 EXP OCR fixture samples")
+
+        reader = PaddleExperienceTextReader()
+        if not reader._ensure_ocr():
+            self.skipTest(reader.unavailable_reason or "PaddleOCR 不可用")
+
+        correct = 0
+        false_accepts: list[str] = []
+        misses: list[str] = []
+        for sample in samples:
+            image = cv2.imread(str(fixture_dir / sample["file"]), cv2.IMREAD_UNCHANGED)
+            self.assertIsNotNone(image, sample["file"])
+            reading = reader.read(image)
+            expected_exp = int(sample["current_exp"])
+            expected_percent = float(sample["percent"])
+            if (
+                reading.success
+                and reading.current_exp == expected_exp
+                and reading.percent is not None
+                and round(reading.percent, 2) == round(expected_percent, 2)
+            ):
+                correct += 1
+                continue
+            detail = (
+                f"{sample['id']}: expected={expected_exp}[{expected_percent:.2f}%] "
+                f"got={reading.current_exp}[{reading.percent}] text={reading.text!r} reason={reading.reason}"
+            )
+            if reading.success:
+                false_accepts.append(detail)
+            else:
+                misses.append(detail)
+
+        self.assertEqual(false_accepts, [], "\n".join(false_accepts))
+        accuracy = correct / len(samples)
+        self.assertGreaterEqual(accuracy, 0.90, "\n".join(misses))
 
     def test_paddle_reader_suppresses_noisy_initialization_output(self):
         fake_module = types.ModuleType("paddleocr")
@@ -557,6 +851,35 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(snapshot.current_percent, 27.08)
         self.assertTrue(snapshot.status.startswith("樣本拒絕：EXP 跳動與百分比不一致"))
 
+    def test_tracker_repairs_recent_accepted_outliers_after_confirmation(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 100000, 10.0))
+        self.assertTrue(tracker.add_reading(60.0, 110000, 11.0))
+        self.assertTrue(tracker.add_reading(70.0, 130000, 13.0))
+        self.assertTrue(tracker.add_reading(80.0, 131000, 13.1))
+
+        self.assertFalse(tracker.add_reading(90.0, 112000, 11.2))
+        self.assertTrue(tracker.add_reading(100.0, 113000, 11.3))
+        snapshot = tracker.snapshot(100.0)
+
+        self.assertEqual([sample.current_exp for sample in tracker.samples], [100000, 110000, 113000])
+        self.assertEqual(tracker.total_gained_exp, 13000)
+        self.assertEqual(snapshot.current_exp, 113000)
+        self.assertLess(snapshot.xp_per_5m or 0, 50000)
+
+    def test_tracker_keeps_true_sample_when_lower_outlier_is_not_confirmed(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 100000, 10.0))
+        self.assertTrue(tracker.add_reading(60.0, 110000, 11.0))
+        self.assertTrue(tracker.add_reading(70.0, 130000, 13.0))
+
+        self.assertFalse(tracker.add_reading(80.0, 112000, 11.2))
+        self.assertTrue(tracker.add_reading(90.0, 131000, 13.1))
+        snapshot = tracker.snapshot(90.0)
+
+        self.assertEqual([sample.current_exp for sample in tracker.samples], [100000, 110000, 130000, 131000])
+        self.assertEqual(snapshot.current_exp, 131000)
+
     def test_tracker_keeps_last_rate_when_short_window_is_temporarily_insufficient(self):
         tracker = ExperienceEfficiencyTracker()
         tracker.add_reading(0.0, 1000, 10.0)
@@ -636,6 +959,11 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(format_exp_rate(84965), "8萬4")
         self.assertEqual(format_exp_rate(2001195), "200萬1")
         self.assertEqual(format_exp_rate(10759664), "1,075萬9")
+
+    def test_format_ocr_success_rate(self):
+        self.assertEqual(format_ocr_success_rate(0, 0), "--")
+        self.assertEqual(format_ocr_success_rate(9, 10), "90% (9/10)")
+        self.assertEqual(format_ocr_success_rate(28, 29), "96.6% (28/29)")
 
 
 if __name__ == "__main__":

@@ -43,6 +43,29 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._refresh_gameplay_hud_state = Mock(return_value=True)
         return controller
 
+    def test_experience_capture_submits_reader_without_runtime_templates(self):
+        class ImmediateExecutor:
+            def submit(self, fn, *args, **kwargs):
+                self.call = (fn, args, kwargs)
+                return Mock()
+
+        controller = self.make_controller([])
+        image = np.zeros((18, 140, 4), dtype=np.uint8)
+        controller.experience_ocr_job = None
+        controller.next_experience_capture_at = 0.0
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.samples = []
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot()
+        controller.experience_reader = Mock()
+        controller.experience_ocr_executor = ImmediateExecutor()
+        controller._experience_text_region = Mock(return_value=(10, 20, 140, 18))
+        controller.sct = Mock()
+        controller.sct.grab.return_value = image
+
+        controller._update_experience_efficiency(5.0)
+
+        self.assertEqual(controller.experience_ocr_executor.call[2], {})
+
     def test_actions_require_scripts_enabled_and_gameplay_hud(self):
         controller = self.make_controller([])
 
@@ -477,6 +500,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             self.assertTrue(controller._process_experience_ocr_job(8.0))
 
         controller.experience_tracker.add_reading.assert_called_once_with(8.0, 132553, 18.36)
+        controller.experience_tracker.record_ocr_result.assert_called_once_with(True)
         controller.gui.set_experience_snapshot.assert_called_once()
         print_mock.assert_not_called()
 
@@ -503,11 +527,12 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
         self.assertEqual(snapshot.status, "統計中")
+        controller.experience_tracker.record_ocr_result.assert_called_once_with(False)
         printed = "\n".join(call.args[0] for call in print_mock.call_args_list)
         self.assertIn("1325531836", printed)
         self.assertIn("經驗效率 OCR 錯誤", printed)
 
-    def test_experience_rejected_ocr_sample_logs_raw_text_and_values(self):
+    def test_experience_rejected_ocr_reading_logs_raw_text_and_values(self):
         class DoneFuture:
             def done(self):
                 return True
@@ -533,6 +558,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         with patch("builtins.print") as print_mock:
             self.assertTrue(controller._process_experience_ocr_job(8.0))
 
+        controller.experience_tracker.record_ocr_result.assert_called_once_with(False)
         printed = "\n".join(call.args[0] for call in print_mock.call_args_list)
         self.assertIn("經驗效率 異常樣本拒絕", printed)
         self.assertIn("288900[27.08%]", printed)

@@ -31,8 +31,8 @@ EXP_RATE_FAST_CHANGE_RATIO = 0.20
 EXP_RATE_FAST_SMOOTHING_ALPHA = 0.98
 EXP_LEVEL_WRAP_HIGH_PERCENT = 65.0
 EXP_LEVEL_WRAP_LOW_PERCENT = 35.0
-EXP_OCR_MIN_SCORE = 0.45
-EXP_OCR_ACCEPT_CONFIDENCE = 0.90
+EXP_OCR_MIN_SCORE = 0.70
+EXP_OCR_ACCEPT_CONFIDENCE = 0.85
 EXP_OCR_IMAGE_SCALE = 2
 EXP_OCR_PREPARED_SCALE = 3
 EXP_OCR_TARGET_HEIGHT = 72
@@ -48,9 +48,15 @@ EXP_OCR_TEXT_COLUMN_MIN_RATIO = 0.03
 EXP_OCR_TEXT_CROP_PADDING_RATIO = 0.18
 EXP_OCR_DENSE_BORDER_ROW_MAX_RATIO = 0.72
 EXP_OCR_DENSE_BORDER_ROW_PADDING = 1
+EXP_OCR_TOP_BORDER_ROW_MAX_RATIO = 0.45
+EXP_OCR_TOP_BORDER_MAX_HEIGHT_RATIO = 0.28
 EXP_OCR_BINARY_LUMINANCE_MIN = 200.0
 EXP_OCR_BINARY_MAX_CHROMA = 65.0
 EXP_OCR_MIN_STRUCTURE_SCORE = 1.0
+EXP_OCR_BAR_CROP_LEFT_RATIO = 0.44
+EXP_OCR_BAR_GREEN_COLUMN_MIN_RATIO = 0.18
+EXP_OCR_BAR_MIN_GREEN_SPAN_RATIO = 0.25
+EXP_OCR_BAR_PERCENT_TOLERANCE = 12.0
 EXP_TOTAL_ESTIMATE_MAX_DEVIATION_RATIO = 0.35
 EXP_SINGLE_GAIN_MAX_LEVEL_RATIO = 0.35
 EXP_GAIN_EXPECTED_TOLERANCE_RATIO = 3.0
@@ -65,6 +71,9 @@ EXP_REBASE_CONFIRM_SECONDS = 20.0
 EXP_REBASE_CONFIRM_MAX_PERCENT_DELTA = 0.30
 EXP_REBASE_CONFIRM_MAX_LEVEL_RATIO = 0.03
 EXP_REBASE_CONFIRM_MIN_ABSOLUTE_DELTA = 8000
+EXP_OUTLIER_REPAIR_MAX_REMOVED_SAMPLES = 3
+EXP_OUTLIER_REPAIR_MAX_AGE_SECONDS = 60.0
+EXP_OUTLIER_REPAIR_REASON_PREFIX = "離群修正候選"
 EXP_LONG_RATE_BLEND_START_SECONDS = 300.0
 EXP_LONG_RATE_BLEND_FULL_SECONDS = 3600.0
 PADDLEOCR_LANGUAGE = "chinese_cht"
@@ -130,6 +139,9 @@ class ExperienceSnapshot:
     xp_per_hour: float | None = None
     eta_seconds: float | None = None
     sample_count: int = 0
+    ocr_attempt_count: int = 0
+    ocr_success_count: int = 0
+    ocr_success_rate: float | None = None
     status: str = "尚未開始"
 
 
@@ -150,6 +162,18 @@ def format_exp_rate(value: float | int | None) -> str:
     if thousands:
         return f"{ten_thousands:,}萬{thousands}"
     return f"{ten_thousands:,}萬"
+
+
+def format_ocr_success_rate(success_count: int, attempt_count: int) -> str:
+    if attempt_count <= 0:
+        return "--"
+    success_count = max(0, min(success_count, attempt_count))
+    rate = success_count / attempt_count * 100.0
+    if abs(rate - round(rate)) < 0.05:
+        rate_text = f"{rate:.0f}%"
+    else:
+        rate_text = f"{rate:.1f}%"
+    return f"{rate_text} ({success_count}/{attempt_count})"
 
 
 def format_eta(seconds: float | None) -> str:
@@ -175,6 +199,8 @@ class ExperienceEfficiencyTracker:
         self.last_snapshot: ExperienceSnapshot | None = None
         self.last_rate_sample_at: float | None = None
         self.pending_rebase: PendingExperienceRebase | None = None
+        self.ocr_attempt_count = 0
+        self.ocr_success_count = 0
         self.last_status = "等待 EXP 數字"
 
     def clear_transient_rejection(self) -> None:
@@ -182,6 +208,11 @@ class ExperienceEfficiencyTracker:
         if not self.last_status.startswith("樣本拒絕"):
             return
         self.last_status = "等待下一次 EXP 樣本" if self.samples else "等待 EXP 數字"
+
+    def record_ocr_result(self, success: bool) -> None:
+        self.ocr_attempt_count += 1
+        if success:
+            self.ocr_success_count += 1
 
     def add_reading(self, now: float, current_exp: int, percent: float | None) -> bool:
         if current_exp < 0:
@@ -202,6 +233,11 @@ class ExperienceEfficiencyTracker:
             if self._pending_rebase_matches(now, current_exp, percent):
                 pending = self.pending_rebase
                 self.pending_rebase = None
+                if self._is_pending_outlier_repair(pending):
+                    if self._repair_recent_outlier_history(now, current_exp, percent):
+                        return self.add_reading(now, current_exp, percent)
+                    self._reject_sample("離群修正失敗：候選不再符合")
+                    return False
                 self._restart_session(
                     pending.captured_at,
                     pending.current_exp,
@@ -222,6 +258,14 @@ class ExperienceEfficiencyTracker:
                         current_exp,
                         percent,
                         "基準修正候選：EXP 回落但需二次確認",
+                    )
+                    return False
+                if self._recent_outlier_repair_anchor_index(now, current_exp, percent) is not None:
+                    self._queue_pending_rebase(
+                        now,
+                        current_exp,
+                        percent,
+                        f"{EXP_OUTLIER_REPAIR_REASON_PREFIX}：可疑錯值需二次確認",
                     )
                     return False
                 self._reject_sample("EXP 數字回落但不符合升級條件")
@@ -288,6 +332,7 @@ class ExperienceEfficiencyTracker:
             ),
             eta_seconds=self._eta_seconds(latest, preferred_rate),
             sample_count=len(self.samples),
+            **self._ocr_snapshot_fields(),
             status=self.last_status,
         )
         if snapshot.eta_seconds is None and self.last_snapshot is not None:
@@ -327,6 +372,94 @@ class ExperienceEfficiencyTracker:
     ) -> None:
         self.pending_rebase = PendingExperienceRebase(now, current_exp, percent, reason)
         self._reject_sample(reason)
+
+    def _is_pending_outlier_repair(self, pending: PendingExperienceRebase) -> bool:
+        return pending.reason.startswith(EXP_OUTLIER_REPAIR_REASON_PREFIX)
+
+    def _recent_outlier_repair_anchor_index(
+        self,
+        now: float,
+        current_exp: int,
+        percent: float | None,
+    ) -> int | None:
+        if len(self.samples) < 2:
+            return None
+        max_removed = min(EXP_OUTLIER_REPAIR_MAX_REMOVED_SAMPLES, len(self.samples) - 1)
+        for removed_count in range(1, max_removed + 1):
+            anchor_index = len(self.samples) - removed_count - 1
+            anchor = self.samples[anchor_index]
+            first_removed = self.samples[anchor_index + 1]
+            if now - first_removed.captured_at > EXP_OUTLIER_REPAIR_MAX_AGE_SECONDS:
+                continue
+            if self._reading_matches_repair_anchor(anchor, now, current_exp, percent):
+                return anchor_index
+        return None
+
+    def _reading_matches_repair_anchor(
+        self,
+        anchor: ExperienceSample,
+        now: float,
+        current_exp: int,
+        percent: float | None,
+    ) -> bool:
+        delta = current_exp - anchor.current_exp
+        if delta < 0:
+            return False
+
+        anchor_estimate = self._level_total_estimate(anchor.current_exp, anchor.percent)
+        current_estimate = self._level_total_estimate(current_exp, percent)
+        if anchor_estimate is not None and current_estimate is not None:
+            deviation = abs(current_estimate - anchor_estimate) / anchor_estimate
+            if deviation > EXP_TOTAL_ESTIMATE_MAX_DEVIATION_RATIO:
+                return False
+
+        estimate = anchor_estimate or current_estimate or self.estimated_level_total_exp
+        if anchor.percent is not None and percent is not None:
+            percent_delta = percent - anchor.percent
+            if percent_delta < -EXP_PERCENT_REGRESSION_TOLERANCE:
+                return False
+            if estimate is not None and estimate > 0:
+                expected_delta = estimate * (percent_delta / 100.0)
+                tolerance = max(
+                    float(EXP_PERCENT_DELTA_MIN_ABSOLUTE_TOLERANCE),
+                    estimate * EXP_PERCENT_ROUNDING_TOLERANCE_RATIO,
+                    abs(expected_delta) * EXP_PERCENT_DELTA_TOLERANCE_RATIO,
+                )
+                if delta > expected_delta + tolerance:
+                    return False
+                if expected_delta > tolerance and delta + tolerance < expected_delta:
+                    return False
+                return True
+
+        elapsed = max(0.0, now - anchor.captured_at)
+        max_delta = float(EXP_GAIN_MIN_ABSOLUTE_TOLERANCE)
+        if estimate is not None and estimate > 0:
+            max_delta = max(max_delta, estimate * 0.03)
+        session_rate = self._session_rate_per_second()
+        if session_rate is not None and elapsed > 0:
+            max_delta = max(max_delta, session_rate * elapsed * EXP_GAIN_RATE_SPIKE_MULTIPLIER)
+        return delta <= max_delta
+
+    def _repair_recent_outlier_history(
+        self,
+        now: float,
+        current_exp: int,
+        percent: float | None,
+    ) -> bool:
+        anchor_index = self._recent_outlier_repair_anchor_index(now, current_exp, percent)
+        if anchor_index is None:
+            return False
+        self.samples = self.samples[: anchor_index + 1]
+        latest = self.samples[-1]
+        self.last_current_exp = latest.current_exp
+        self.total_gained_exp = latest.total_gained_exp
+        self.estimated_level_total_exp = None
+        for index, sample in enumerate(self.samples):
+            self._update_level_total_estimate(sample.current_exp, sample.percent, force=index == 0)
+        self.last_snapshot = None
+        self.last_rate_sample_at = None
+        self.last_status = "離群修正：已移除短暫錯值"
+        return True
 
     def _pending_rebase_matches(
         self,
@@ -392,7 +525,7 @@ class ExperienceEfficiencyTracker:
 
     def _snapshot_from_last(self, status: str) -> ExperienceSnapshot:
         if self.last_snapshot is None:
-            return ExperienceSnapshot(status=status)
+            return ExperienceSnapshot(status=status, **self._ocr_snapshot_fields())
         return ExperienceSnapshot(
             current_exp=self.last_snapshot.current_exp,
             current_percent=self.last_snapshot.current_percent,
@@ -401,8 +534,19 @@ class ExperienceEfficiencyTracker:
             xp_per_hour=self.last_snapshot.xp_per_hour,
             eta_seconds=self.last_snapshot.eta_seconds,
             sample_count=self.last_snapshot.sample_count,
+            **self._ocr_snapshot_fields(),
             status=status,
         )
+
+    def _ocr_snapshot_fields(self) -> dict[str, int | float | None]:
+        rate = None
+        if self.ocr_attempt_count > 0:
+            rate = self.ocr_success_count / self.ocr_attempt_count
+        return {
+            "ocr_attempt_count": self.ocr_attempt_count,
+            "ocr_success_count": self.ocr_success_count,
+            "ocr_success_rate": rate,
+        }
 
     def _trim_samples(self, now: float) -> None:
         cutoff = now - EXP_SAMPLE_HISTORY_SECONDS
@@ -646,23 +790,26 @@ class PaddleExperienceTextReader:
         if not self._ensure_ocr():
             return ExperienceTextReading(reason=self.unavailable_reason or "PaddleOCR 尚未初始化")
 
+        bar_percent = estimate_experience_bar_percent(image)
         fallback_reading: ExperienceTextReading | None = None
-        best_success: tuple[tuple[float, float, int], ExperienceTextReading] | None = None
+        successes: list[tuple[tuple[float, float, float, int], int, ExperienceTextReading]] = []
         for variant_index, prepared in enumerate(prepare_experience_ocr_images(image)):
             try:
                 result = self._predict(prepared)
             except Exception as exc:
                 return ExperienceTextReading(reason=f"PaddleOCR 辨識失敗：{exc}")
 
-            reading = reading_from_paddle_result(result)
+            reading = _apply_experience_bar_percent_guard(
+                reading_from_paddle_result(result),
+                bar_percent,
+            )
             if reading.success:
                 rank = _experience_reading_rank(reading, variant_index)
-                if best_success is None or rank > best_success[0]:
-                    best_success = (rank, reading)
+                successes.append((rank, variant_index, reading))
             if fallback_reading is None or reading.confidence > fallback_reading.confidence:
                 fallback_reading = reading
-        if best_success is not None:
-            rank, reading = best_success
+        if successes:
+            rank, reading = _select_best_experience_reading(successes)
             if rank[0] < EXP_OCR_MIN_STRUCTURE_SCORE:
                 return ExperienceTextReading(
                     text=reading.text,
@@ -763,7 +910,46 @@ def prepare_experience_ocr_images(image: np.ndarray) -> list[np.ndarray]:
     binary = _binarize_experience_text(binary_source)
     if binary is not None:
         variants.append(binary)
+    bold_binary = _binarize_experience_text(binary_source, text_expansion_iterations=2)
+    if bold_binary is not None:
+        variants.append(bold_binary)
     return variants
+
+
+def estimate_experience_bar_percent(image: np.ndarray) -> float | None:
+    bgr = image[:, :, :3].astype(np.float32)
+    if bgr.size == 0:
+        return None
+    blue = bgr[:, :, 0]
+    green = bgr[:, :, 1]
+    red = bgr[:, :, 2]
+    green_mask = (green >= 120.0) & (green - red >= 40.0) & (green - blue >= 20.0)
+    column_density = green_mask.mean(axis=0)
+    green_columns = np.flatnonzero(column_density >= EXP_OCR_BAR_GREEN_COLUMN_MIN_RATIO)
+    if green_columns.size == 0:
+        return None
+    width = bgr.shape[1]
+    span_ratio = (int(green_columns[-1]) - int(green_columns[0]) + 1) / max(1, width)
+    if span_ratio < EXP_OCR_BAR_MIN_GREEN_SPAN_RATIO:
+        return None
+    cropped_fill_ratio = (int(green_columns[-1]) + 1) / max(1, width)
+    full_fill_ratio = EXP_OCR_BAR_CROP_LEFT_RATIO + cropped_fill_ratio * (1.0 - EXP_OCR_BAR_CROP_LEFT_RATIO)
+    return max(0.0, min(100.0, full_fill_ratio * 100.0))
+
+
+def _apply_experience_bar_percent_guard(
+    reading: ExperienceTextReading,
+    bar_percent: float | None,
+) -> ExperienceTextReading:
+    if not reading.success or reading.percent is None or bar_percent is None:
+        return reading
+    if abs(reading.percent - bar_percent) <= EXP_OCR_BAR_PERCENT_TOLERANCE:
+        return reading
+    return ExperienceTextReading(
+        text=reading.text,
+        confidence=reading.confidence,
+        reason="EXP 百分比與綠條不一致",
+    )
 
 
 def reading_from_paddle_result(result: object) -> ExperienceTextReading:
@@ -776,9 +962,13 @@ def reading_from_paddle_result(result: object) -> ExperienceTextReading:
 
     candidate = _best_experience_text_candidate(text)
     if candidate is None:
-        if _exp_percent_matches(normalize_exp_ocr_text(text)):
-            return ExperienceTextReading(text=text, confidence=confidence, reason="EXP 數字解析失敗")
-        return ExperienceTextReading(text=text, confidence=confidence, reason="EXP 百分比解析失敗")
+        return ExperienceTextReading(
+            text=text,
+            confidence=confidence,
+            reason=_strict_experience_parse_failure_reason(normalize_exp_ocr_text(text)),
+        )
+    if not confidence_values or confidence < EXP_OCR_ACCEPT_CONFIDENCE:
+        return ExperienceTextReading(text=text, confidence=confidence, reason="PaddleOCR 信心未達可信門檻")
     return ExperienceTextReading(
         current_exp=candidate.current_exp,
         percent=candidate.percent,
@@ -789,11 +979,114 @@ def reading_from_paddle_result(result: object) -> ExperienceTextReading:
     )
 
 
-def _experience_reading_rank(reading: ExperienceTextReading, variant_index: int) -> tuple[float, float, int]:
+def _experience_reading_rank(reading: ExperienceTextReading, variant_index: int) -> tuple[float, float, float, int]:
     return (
         _experience_text_structure_score(reading.text),
+        1.0 if variant_index >= 2 else 0.0,
         reading.confidence,
         -variant_index,
+    )
+
+
+def _select_best_experience_reading(
+    successes: list[tuple[tuple[float, float, float, int], int, ExperienceTextReading]],
+) -> tuple[tuple[float, float, float, int], ExperienceTextReading]:
+    groups: dict[tuple[int | None, float | None], list[tuple[tuple[float, float, float, int], int, ExperienceTextReading]]] = {}
+    for item in successes:
+        _rank, _variant_index, reading = item
+        percent = None if reading.percent is None else round(reading.percent, 2)
+        groups.setdefault((reading.current_exp, percent), []).append(item)
+
+    best_key, best_group = max(
+        groups.items(),
+        key=lambda item: _experience_group_score(item[1]),
+    )
+    resolved_group = _resolve_binary_percent_disagreement(groups, best_key, best_group)
+    if resolved_group is None:
+        best_item = max(best_group, key=lambda item: item[0])
+        return best_item[0], ExperienceTextReading(
+            text=best_item[2].text,
+            confidence=best_item[2].confidence,
+            reason="EXP OCR 候選不一致",
+        )
+    best_item = max(resolved_group, key=lambda item: item[0])
+    return best_item[0], best_item[2]
+
+
+def _experience_group_score(
+    group: list[tuple[tuple[float, float, float, int], int, ExperienceTextReading]],
+) -> tuple[float, int, float]:
+    max_confidence = max(item[2].confidence for item in group)
+    is_binary_only = all(variant_index >= 2 for _rank, variant_index, _reading in group)
+    variant_support_bonus = min(0.06, len(group) * 0.02)
+    binary_bonus = 0.04 if is_binary_only else 0.0
+    max_rank = max(group, key=lambda item: item[0])[0]
+    return (max_confidence + binary_bonus + variant_support_bonus, len(group), max_rank[0])
+
+
+def _resolve_binary_percent_disagreement(
+    groups: dict[tuple[int | None, float | None], list[tuple[tuple[float, float, float, int], int, ExperienceTextReading]]],
+    best_key: tuple[int | None, float | None],
+    best_group: list[tuple[tuple[float, float, float, int], int, ExperienceTextReading]],
+) -> list[tuple[tuple[float, float, float, int], int, ExperienceTextReading]] | None:
+    current_exp, percent = best_key
+    if current_exp is None or percent is None:
+        return best_group
+    if not _experience_group_is_binary_only(best_group):
+        return best_group
+
+    best_confidence = _experience_group_max_confidence(best_group)
+    alternatives = [
+        group
+        for key, group in groups.items()
+        if key[0] == current_exp
+        and key[1] is not None
+        and abs(key[1] - percent) >= 0.5
+        and _experience_group_has_nonbinary_vote(group)
+        and _experience_group_max_confidence(group) >= best_confidence - 0.08
+    ]
+    if not alternatives:
+        return best_group
+    alternatives.sort(
+        key=lambda group: (
+            _experience_group_max_nonbinary_confidence(group),
+            _experience_group_score(group),
+        ),
+        reverse=True,
+    )
+    if len(alternatives) == 1:
+        return alternatives[0]
+    top_confidence = _experience_group_max_nonbinary_confidence(alternatives[0])
+    next_confidence = _experience_group_max_nonbinary_confidence(alternatives[1])
+    if top_confidence - next_confidence >= 0.05:
+        return alternatives[0]
+    return None
+
+
+def _experience_group_is_binary_only(
+    group: list[tuple[tuple[float, float, float, int], int, ExperienceTextReading]],
+) -> bool:
+    return all(variant_index >= 2 for _rank, variant_index, _reading in group)
+
+
+def _experience_group_has_nonbinary_vote(
+    group: list[tuple[tuple[float, float, float, int], int, ExperienceTextReading]],
+) -> bool:
+    return any(variant_index < 2 for _rank, variant_index, _reading in group)
+
+
+def _experience_group_max_confidence(
+    group: list[tuple[tuple[float, float, float, int], int, ExperienceTextReading]],
+) -> float:
+    return max(reading.confidence for _rank, _variant_index, reading in group)
+
+
+def _experience_group_max_nonbinary_confidence(
+    group: list[tuple[tuple[float, float, float, int], int, ExperienceTextReading]],
+) -> float:
+    return max(
+        (reading.confidence for _rank, variant_index, reading in group if variant_index < 2),
+        default=0.0,
     )
 
 
@@ -821,28 +1114,92 @@ def _best_experience_text_candidate(text: str) -> ExperienceTextCandidate | None
 def _experience_text_candidates(text: str) -> list[ExperienceTextCandidate]:
     compact = normalize_exp_ocr_text(text)
     candidates: list[ExperienceTextCandidate] = []
-    for percent, span, repaired_percent in _exp_percent_matches(compact):
-        start, end = span
-        if start <= 0:
-            continue
-        exp_digits = _exp_digits_before_percent(compact, start)
-        if not exp_digits:
-            continue
-        candidates.append(
-            ExperienceTextCandidate(
-                current_exp=int(exp_digits),
-                percent=percent,
-                percent_span=span,
-                structure_score=_experience_text_structure_score_for_match(
-                    compact,
-                    span,
-                    exp_digits,
-                    repaired_percent,
-                ),
-                repaired_percent=repaired_percent,
-            )
-        )
+    match = re.fullmatch(
+        r"(?:EXP[:：]?)?([0-9][0-9,.]*)\[((?:[0-9]{1,2}|100)[\.,][0-9]{2})([%Xx3*147Il|JjTt;:>]*)([\]\)]*)[;:>]*",
+        compact,
+        flags=re.IGNORECASE,
+    )
+    if match is not None:
+        exp_segment = match.group(1)
+        if _exp_number_separators_are_valid(exp_segment):
+            exp_digits = "".join(char for char in exp_segment if char.isdigit())
+            percent = float(match.group(2).replace(",", "."))
+            tail = match.group(3)
+            closers = match.group(4)
+            if (
+                exp_digits
+                and 0.0 <= percent <= 100.0
+                and len(tail) <= 3
+                and (tail or closers)
+            ):
+                candidates.append(
+                    ExperienceTextCandidate(
+                        current_exp=int(exp_digits),
+                        percent=percent,
+                        percent_span=match.span(2),
+                        structure_score=5.0 + min(len(exp_digits), 8) / 10.0,
+                        repaired_percent=tail not in ("", "%"),
+                    )
+                )
+    candidates.extend(_missing_open_bracket_experience_text_candidates(compact))
     return candidates
+
+
+def _missing_open_bracket_experience_text_candidates(compact: str) -> list[ExperienceTextCandidate]:
+    if "[" in compact or "(" in compact:
+        return []
+    match = re.fullmatch(
+        r"(?:EXP[:：]?)?([0-9][0-9,.]*)([%Xx3*147Il|JjTt;:>]+)([\]\)])[;:>]*",
+        compact,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return []
+
+    body = match.group(1)
+    decimal_index = body.rfind(".")
+    if decimal_index < 0 or decimal_index + 3 != len(body):
+        return []
+    decimals = body[decimal_index + 1 :]
+    before_decimal = body[:decimal_index]
+    digit_match = re.search(r"(\d{1,3})$", before_decimal)
+    if digit_match is None:
+        return []
+
+    integer_digits = digit_match.group(1)
+    if len(integer_digits) == 3 and int(integer_digits) > 100:
+        integer_digits = integer_digits[-2:]
+    elif len(integer_digits) == 3 and integer_digits != "100":
+        return []
+
+    percent = float(f"{integer_digits}.{decimals}")
+    if not 10.0 <= percent <= 100.0:
+        return []
+    exp_segment = before_decimal[: len(before_decimal) - len(integer_digits)]
+    if not _exp_number_separators_are_valid(exp_segment):
+        return []
+    exp_digits = "".join(char for char in exp_segment if char.isdigit())
+    if len(exp_digits) < 5:
+        return []
+    percent_start = len(exp_segment)
+    percent_span = (percent_start, len(body))
+    return [
+        ExperienceTextCandidate(
+            current_exp=int(exp_digits),
+            percent=percent,
+            percent_span=percent_span,
+            structure_score=4.3 + min(len(exp_digits), 8) / 10.0,
+            repaired_percent=True,
+        )
+    ]
+
+
+def _strict_experience_parse_failure_reason(text: str) -> str:
+    if "[" not in text:
+        return "EXP 百分比解析失敗"
+    if re.search(r"\[(?:[0-9]{1,2}|100)[\.,][0-9]{2}[%Xx3*147Il|JjTt;:>]{0,3}[\]\)]*[;:>]*", text) is None:
+        return "EXP 百分比解析失敗"
+    return "EXP 數字解析失敗"
 
 
 def _experience_text_structure_score_for_match(
@@ -918,7 +1275,7 @@ def crop_experience_text_image(image: np.ndarray) -> np.ndarray:
     return image[crop_top:crop_bottom, crop_left:crop_right]
 
 
-def _binarize_experience_text(image: np.ndarray) -> np.ndarray | None:
+def _binarize_experience_text(image: np.ndarray, *, text_expansion_iterations: int = 1) -> np.ndarray | None:
     text_mask = _clean_experience_text_mask(_experience_binary_text_mask(image))
     text_ratio = float(text_mask.mean())
     if not EXP_OCR_TEXT_MIN_RATIO <= text_ratio <= EXP_OCR_TEXT_BINARY_MAX_RATIO:
@@ -927,7 +1284,12 @@ def _binarize_experience_text(image: np.ndarray) -> np.ndarray | None:
     black_text_on_white = np.full(text_mask.shape, 255, dtype=np.uint8)
     black_text_on_white[text_mask] = 0
     kernel = np.ones((2, 2), dtype=np.uint8)
-    black_text_on_white = cv2.erode(black_text_on_white, kernel, iterations=1)
+    if text_expansion_iterations > 0:
+        black_text_on_white = cv2.erode(
+            black_text_on_white,
+            kernel,
+            iterations=text_expansion_iterations,
+        )
     return cv2.cvtColor(black_text_on_white, cv2.COLOR_GRAY2BGR)
 
 
@@ -955,6 +1317,7 @@ def _clean_experience_text_mask(mask: np.ndarray) -> np.ndarray:
     if mask.size == 0:
         return mask
     cleaned = mask.copy()
+    _remove_experience_top_border_noise(cleaned)
     row_density = cleaned.mean(axis=1)
     dense_runs = _boolean_runs(row_density >= EXP_OCR_DENSE_BORDER_ROW_MAX_RATIO)
     midpoint = cleaned.shape[0] / 2
@@ -968,6 +1331,18 @@ def _clean_experience_text_mask(mask: np.ndarray) -> np.ndarray:
             bottom = min(cleaned.shape[0], end + EXP_OCR_DENSE_BORDER_ROW_PADDING)
         cleaned[top:bottom, :] = False
     return cleaned
+
+
+def _remove_experience_top_border_noise(mask: np.ndarray) -> None:
+    if mask.size == 0:
+        return
+    top_limit = max(1, round(mask.shape[0] * EXP_OCR_TOP_BORDER_MAX_HEIGHT_RATIO))
+    row_density = mask[:top_limit, :].mean(axis=1)
+    top_border_runs = _boolean_runs(row_density >= EXP_OCR_TOP_BORDER_ROW_MAX_RATIO)
+    for start, end in top_border_runs:
+        top = max(0, start - EXP_OCR_DENSE_BORDER_ROW_PADDING)
+        bottom = min(mask.shape[0], end + EXP_OCR_DENSE_BORDER_ROW_PADDING)
+        mask[top:bottom, :] = False
 
 
 def _boolean_runs(values: np.ndarray) -> list[tuple[int, int]]:
@@ -1184,6 +1559,7 @@ def normalize_exp_ocr_text(text: str) -> str:
             "】": "]",
             "（": "(",
             "）": ")",
+            "×": "X",
             " ": "",
             "\t": "",
             "\n": "",
@@ -1212,6 +1588,9 @@ def _exp_digits_before_percent(text: str, percent_start: int) -> str:
 def _exp_number_segment_from_prefix(prefix: str) -> str | None:
     prefix = prefix.rstrip("[(")
     segment = _raw_exp_number_segment_from_prefix(prefix)
+    noisy_segment = _raw_exp_number_segment_from_prefix(prefix, allow_closing_bracket_noise=True)
+    if len(noisy_segment) > len(segment):
+        segment = noisy_segment.replace("]", "").replace(")", "")
     if not segment:
         return ""
 
@@ -1228,11 +1607,11 @@ def _exp_number_segment_from_prefix(prefix: str) -> str | None:
     return segment
 
 
-def _raw_exp_number_segment_from_prefix(prefix: str) -> str:
+def _raw_exp_number_segment_from_prefix(prefix: str, *, allow_closing_bracket_noise: bool = False) -> str:
     start = len(prefix)
     while start > 0:
         char = prefix[start - 1]
-        if char.isalnum() or char in ",.":
+        if char.isalnum() or char in ",." or (allow_closing_bracket_noise and char in "])"):
             start -= 1
             continue
         break

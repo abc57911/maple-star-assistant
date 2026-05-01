@@ -9,10 +9,6 @@
 - `maple_star/controller.py`：主控制流程，整合 GUI、視窗擷取、自動喝水、快捷鍵、HP/MP 預覽與經驗 OCR 背景工作。
 - `maple_star/experience.py`：經驗效率統計、PaddleOCR adapter、EXP OCR 前處理與 OCR 文字解析。
 - `maple_star/settings.py`：設定檔、設定檔遷移、profile 與快捷鍵預設值。
-- `auction_market/`：拍賣場市價調查統計子專案，包含市價查詢產品、爬蟲控制台、crawler、OCR、parser、SQLite storage、本機設定與測試。
-- `auction_market/auction_main.pyw`：市價查詢產品入口，只查詢 SQLite，不啟動爬蟲控制 UI。
-- `auction_market/crawler_main.pyw`：爬蟲控制台入口，只負責掃描/停止/快捷鍵/掃描紀錄。
-- `auction_market/README.md`：拍賣場子專案任務計畫、進度追蹤與驗證方式。
 - `maple_gamepad_macro.py`：手把 RB/LB 巨集與主流程整合。
 - `build_release.bat`：PyInstaller 打包流程。
 
@@ -26,24 +22,6 @@
 - 新增或調整自動喝水功能時，優先放在 `maple_star/` 內合適模組。
 - 新增或調整共用常數時，優先放在 `maple_star/constants.py`，避免在 controller、GUI 或測試中散落 magic number。
 - 快捷鍵設定目前設計為單鍵；設定快捷鍵時必須暫時攔截腳本功能，避免按鍵設定動作同時觸發暫停、停止或經驗統計切換。
-- 拍賣場功能是獨立子專案；除非使用者明確要求整合，避免把拍賣場 crawler/GUI 混入自動喝水 controller。
-- `auction_market/auction_settings.json` 與 `auction_market/auction_market.sqlite3` 是本機產物，不應提交，也不應打包進 release。
-
-## 拍賣場市價調查
-- 任務計畫與進度以 `auction_market/README.md` 為準。
-- 市價查詢產品與爬蟲控制台必須保持分離；查價 GUI 不應 import crawler worker、Win32 hotkey 或滑鼠輸入邏輯。
-- 爬蟲控制台不應包含查價表格；需要查價時開 `auction_market/auction_main.pyw`。
-- 市價查詢產品只顯示有效單價，不顯示拍賣場 `價格` 欄；可堆疊道具有效單價為 `unit_price`，裝備有效單價為 `total_price`。
-- 拍賣場物品分類 taxonomy 集中在 `auction_market/auction/categories.py`；查詢 GUI 與 SQLite 分類欄位應共用此模組，不要在 GUI 或 storage 內各自散落分類字串。
-- 裝備分類只可依 tooltip 的 `裝備分類` 明確對應；若對應不到，不要用物品名稱自行歸類，需保留未分類並在爬蟲 log 記錄 `裝備分類未對應`。
-- v1 鎖定 MapleStory Worlds client area `1920x1080`，ROI 與按鈕座標集中在 `auction_market/auction/layout.py`。
-- v1 只掃描使用者已在遊戲內選好的拍賣場分類/搜尋結果，不自動搜尋物品、不巡覽全分類。
-- 掃描前需確保位於 `市價` 分類；若不在，crawler 應自動點選 `市價` 分頁並再次確認。
-- 掃描流程應循環讀取第 1-10 頁，每輪完成後點完成時間欄位上方刷新按鈕再繼續。
-- 若偵測到中央遊戲提示彈窗，應立即停止掃描並在 GUI console 顯示原因。
-- 裝備類或單價欄為 `-` 的列需 hover 道具圖片擷取 tooltip，保存 raw text、逐行內容與已解析欄位。
-- SQLite 寫入需用 fingerprint 去重，避免刷新後重複統計同一筆成交。
-- 自動化範圍只包含拍賣場 UI 操作；不要加入 process memory、hook/inject 或 packet analysis 路徑。
 
 ## PaddleOCR 與經驗效率
 - 經驗效率功能使用 PaddleOCR，主要語言為繁體中文，模型設定預設使用 `chinese_cht` 與 PP-OCRv5 mobile det/rec。
@@ -82,14 +60,6 @@
 ```powershell
 python -m py_compile main.py main.pyw maple_gamepad_macro.py auto_potion.py
 python -m compileall -q maple_star
-```
-
-若修改拍賣場子專案，`py_compile` 需包含兩個入口，並至少補跑：
-
-```powershell
-python -m py_compile main.py main.pyw maple_gamepad_macro.py auto_potion.py auction_market/auction_main.pyw auction_market/crawler_main.pyw
-python -m compileall -q maple_star
-python -m unittest discover -s auction_market/tests
 ```
 
 若修改 settings 遷移、快捷鍵偵測、HP/MP 偵測、EXP OCR、經驗統計或 GUI pump，需補跑對應的最小回歸測試或 Python snippet。

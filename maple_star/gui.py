@@ -14,7 +14,8 @@ from typing import Callable
 import customtkinter as ctk
 
 from .constants import MAX_CONSOLE_LINES
-from .experience import ExperienceSnapshot, format_eta, format_exp, format_exp_rate
+from .debug_logging import install_tk_exception_logging
+from .experience import ExperienceSnapshot, format_eta, format_exp, format_exp_rate, format_ocr_success_rate
 from .key_capture import DETECTABLE_KEY_VKS, event_to_hotkey, pressed_detectable_vks, vk_to_key_name
 from .settings import (
     SETTINGS_PATH,
@@ -42,17 +43,18 @@ SECTION_HEADER_BG = "#172943"
 SECTION_HEADER_BORDER = "#355579"
 HEADER_TEXT = "#e5f2ff"
 BODY_TEXT = "#d6e3f0"
+BUTTON_TEXT = "#f8fbff"
 MUTED_TEXT = "#8da2b8"
 ACCENT_BLUE = "#2f8cff"
 ACCENT_GREEN = "#18b981"
 HP_RED = "#ff5b6e"
 MP_BLUE = "#45a3ff"
 WARNING_YELLOW = "#f6c44f"
-BUTTON_BG = "#1f6feb"
-BUTTON_HOVER = "#2d81ff"
-BUTTON_BORDER = "#4b7fb8"
-SECONDARY_BUTTON_BG = "#23486f"
-SECONDARY_BUTTON_HOVER = "#2c5c8d"
+BUTTON_BG = "#2d81ff"
+BUTTON_HOVER = "#4d9aff"
+BUTTON_BORDER = "#6ba5df"
+SECONDARY_BUTTON_BG = "#2b5f91"
+SECONDARY_BUTTON_HOVER = "#3475b3"
 ENTRY_BG = "#0b1424"
 CONSOLE_BG = "#050b14"
 CONSOLE_TEXT = "#b8f7d4"
@@ -90,7 +92,7 @@ SECTION_PAD_X = 12
 SECTION_PAD_Y = 10
 UI_FONT = (FONT_FAMILY, 13)
 SMALL_FONT = (FONT_FAMILY, 12)
-BUTTON_FONT = (FONT_FAMILY, 13)
+BUTTON_FONT = (FONT_FAMILY, 14, "bold")
 TITLE_FONT = (FONT_FAMILY, 13, "bold")
 MONO_FONT = (MONO_FONT_FAMILY, 12)
 EXP_FONT = (FONT_FAMILY, 14)
@@ -129,6 +131,7 @@ class AutoPotionSettingsGui:
         self.settings = settings
         self.closed = False
         self.root = ctk.CTk(fg_color=APP_BG)
+        install_tk_exception_logging(self.root)
         self.root.title("大雞雞專用")
         self.root.resizable(True, True)
         self.root.minsize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
@@ -222,6 +225,7 @@ class AutoPotionSettingsGui:
         self.exp_rate_10m_status = tk.StringVar(value="10m：--")
         self.exp_rate_1h_status = tk.StringVar(value="1h：--")
         self.exp_eta_status = tk.StringVar(value="升級預估：--")
+        self.exp_ocr_success_status = tk.StringVar(value="OCR：--")
         self.exp_reader_status = tk.StringVar(value="狀態：尚未開始")
 
         frame = ctk.CTkFrame(self.root, fg_color=APP_BG, corner_radius=0)
@@ -321,7 +325,8 @@ class AutoPotionSettingsGui:
         self._label(exp_rate_frame, textvariable=self.exp_rate_5m_status, font=EXP_MONO_FONT).grid(row=0, column=0, sticky="w")
         self._label(exp_rate_frame, textvariable=self.exp_rate_10m_status, font=EXP_MONO_FONT).grid(row=0, column=1, sticky="w")
         self._label(exp_rate_frame, textvariable=self.exp_rate_1h_status, font=EXP_MONO_FONT).grid(row=0, column=2, sticky="w")
-        self._label(exp_frame, textvariable=self.exp_reader_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=2, column=0, columnspan=4, sticky="w", padx=(0, 12), pady=(0, 6))
+        self._label(exp_frame, textvariable=self.exp_reader_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=2, column=0, columnspan=2, sticky="w", padx=(0, 12), pady=(0, 6))
+        self._label(exp_frame, textvariable=self.exp_ocr_success_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=2, column=2, columnspan=2, sticky="w", padx=(0, 12), pady=(0, 6))
 
         detection_section, detection_title, detection_frame = self._build_section(monitor_frame, "", row=0, column=1, sticky="nsew", pady=0)
         self.detection_section = detection_section
@@ -905,11 +910,11 @@ class AutoPotionSettingsGui:
             text=text,
             command=command,
             width=width,
-            height=30,
+            height=32,
             corner_radius=CONTROL_RADIUS,
             fg_color=fg_color,
             hover_color=hover_color,
-            text_color=HEADER_TEXT,
+            text_color=BUTTON_TEXT,
             border_width=1,
             border_color=BUTTON_BORDER,
             font=BUTTON_FONT,
@@ -1690,6 +1695,9 @@ class AutoPotionSettingsGui:
         self.exp_rate_10m_status.set(f"10m：{format_exp_rate(snapshot.xp_per_10m)}")
         self.exp_rate_1h_status.set(f"1h：{format_exp_rate(snapshot.xp_per_hour)}")
         self.exp_eta_status.set(f"升級預估：{format_eta(snapshot.eta_seconds)}")
+        self.exp_ocr_success_status.set(
+            f"OCR：{format_ocr_success_rate(snapshot.ocr_success_count, snapshot.ocr_attempt_count)}"
+        )
         self.exp_reader_status.set(f"狀態：{snapshot.status}")
 
     def set_status(self, message: str) -> None:

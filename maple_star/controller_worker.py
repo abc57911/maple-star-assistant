@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from .debug_logging import configure_debug_logging, log_exception
+
 EVENT_STATUS = "status"
 EVENT_ERROR = "error"
 EVENT_DEVICE_ADDED = "device_added"
@@ -87,11 +89,13 @@ def stop_controller_event_worker(worker: ControllerEventWorker) -> None:
 
 
 def run_controller_event_worker(event_queue: mp.Queue, stop_event: mp.Event, poll_interval_seconds: float) -> None:
+    configure_debug_logging()
     os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
     try:
         import pygame
         import pygame._sdl2.controller as controller
     except Exception as exc:
+        log_exception("手把監聽 worker 初始化失敗")
         _put_event(event_queue, (EVENT_ERROR, None, f"缺少 pygame-ce 或 SDL controller 初始化失敗：{exc}"))
         return
 
@@ -148,6 +152,7 @@ def run_controller_event_worker(event_queue: mp.Queue, stop_event: mp.Event, pol
 
             time.sleep(max(0.001, poll_interval_seconds))
     except Exception as exc:
+        log_exception("手把監聽 worker 未預期錯誤")
         _put_event(event_queue, (EVENT_ERROR, None, f"手把監聽 worker 錯誤：{exc}"))
     finally:
         for pad in controllers_by_id.values():
