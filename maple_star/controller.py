@@ -54,15 +54,14 @@ from .constants import (
     LOADING_GUARD_LOW_SATURATION_RATIO,
     LOADING_GUARD_MEAN_LUMINANCE,
     MOD_NOREPEAT,
-    PAUSE_BEEP_FREQUENCY,
     PM_REMOVE,
-    EMERGENCY_STOP_BEEP_FREQUENCY,
-    RESUME_BEEP_FREQUENCY,
+    EMERGENCY_STOP_BEEP_PATTERN,
+    PAUSE_BEEP_PATTERN,
+    RESUME_BEEP_PATTERN,
     SCRIPT_EMERGENCY_STOP_HOTKEY_ID,
     SCRIPT_EXPERIENCE_TOGGLE_HOTKEY_ID,
     SCRIPT_TOGGLE_HOTKEY_ID,
     SETTINGS_SAVE_DEBOUNCE_SECONDS,
-    TOGGLE_BEEP_DURATION_MS,
     TOGGLE_HOTKEY_DEBOUNCE_SECONDS,
     WM_HOTKEY,
 )
@@ -448,7 +447,7 @@ class AutoPotionController:
     def toggle_scripts_enabled(self) -> None:
         self.scripts_enabled = not self.scripts_enabled
         if self.scripts_enabled:
-            self._play_toggle_beep(RESUME_BEEP_FREQUENCY)
+            self._play_toggle_beep(RESUME_BEEP_PATTERN)
             self.gui.set_status("腳本已啟用")
             self.gui.show_toggle_notice("腳本已啟用")
             self.last_action = f"{self.settings.toggle_hotkey} 啟用"
@@ -457,7 +456,7 @@ class AutoPotionController:
 
         self.last_hp_drink_at = time.monotonic()
         self.last_mp_drink_at = self.last_hp_drink_at
-        self._play_toggle_beep(PAUSE_BEEP_FREQUENCY)
+        self._play_toggle_beep(PAUSE_BEEP_PATTERN)
         self.gui.set_status(f"腳本已暫停，按 {self.settings.toggle_hotkey} 恢復")
         self.gui.show_toggle_notice("腳本已暫停")
         self.gui.set_current_percentages(None, None)
@@ -475,7 +474,7 @@ class AutoPotionController:
             snapshot = self.experience_tracker.snapshot(now)
             snapshot.status = "等待下一次 EXP 樣本" if snapshot.sample_count else "等待有效 EXP 樣本"
             self.gui.set_experience_snapshot(snapshot)
-            self._play_toggle_beep(RESUME_BEEP_FREQUENCY)
+            self._play_toggle_beep(RESUME_BEEP_PATTERN)
             self.gui.set_status("經驗統計已啟用")
             self.gui.show_toggle_notice("經驗統計已啟用")
             self.last_action = f"{self.settings.experience_toggle_hotkey} 經驗統計啟用"
@@ -486,7 +485,7 @@ class AutoPotionController:
         snapshot = self.experience_tracker.snapshot(time.monotonic())
         snapshot.status = "已停用，保留統計" if snapshot.sample_count else "已停用"
         self.gui.set_experience_snapshot(snapshot)
-        self._play_toggle_beep(PAUSE_BEEP_FREQUENCY)
+        self._play_toggle_beep(PAUSE_BEEP_PATTERN)
         self.gui.set_status("經驗統計已停用")
         self.gui.show_toggle_notice("經驗統計已停用")
         self.last_action = f"{self.settings.experience_toggle_hotkey} 經驗統計停用"
@@ -498,16 +497,17 @@ class AutoPotionController:
         self.emergency_stop_requested = True
         self.last_hp_drink_at = now
         self.last_mp_drink_at = now
-        self._play_toggle_beep(EMERGENCY_STOP_BEEP_FREQUENCY)
+        self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
         self.gui.set_status(f"{self.settings.emergency_stop_hotkey} 硬停止：所有腳本已暫停")
         self.gui.show_toggle_notice(f"{self.settings.emergency_stop_hotkey} 硬停止")
         self.gui.set_current_percentages(None, None)
         self.last_action = f"{self.settings.emergency_stop_hotkey} 硬停止"
         print(f"{self.settings.emergency_stop_hotkey}：硬停止，所有腳本已暫停")
 
-    def _play_toggle_beep(self, frequency: int) -> None:
+    def _play_toggle_beep(self, pattern: tuple[tuple[int, int], ...]) -> None:
         try:
-            winsound.Beep(frequency, TOGGLE_BEEP_DURATION_MS)
+            for frequency, duration_ms in pattern:
+                winsound.Beep(frequency, duration_ms)
         except RuntimeError:
             try:
                 winsound.MessageBeep()

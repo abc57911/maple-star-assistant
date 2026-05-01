@@ -98,6 +98,8 @@ EXP_MONO_FONT = (MONO_FONT_FAMILY, 13)
 CONSOLE_FONT = (CONSOLE_FONT_FAMILY, 14)
 WINDOW_INTERACTION_GRACE_SECONDS = 0.12
 RESIZE_SETTLE_DELAY_MS = 140
+TOGGLE_NOTICE_VERTICAL_RATIO = 0.45
+TOGGLE_NOTICE_EDGE_PADDING = 16
 
 
 class GuiConsoleWriter:
@@ -130,7 +132,8 @@ class AutoPotionSettingsGui:
         self.root.title("大雞雞專用")
         self.root.resizable(True, True)
         self.root.minsize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
-        self.root.geometry(f"{WINDOW_DEFAULT_WIDTH}x{WINDOW_DEFAULT_HEIGHT}")
+        initial_position = self._saved_position(settings.full_panel_window_x, settings.full_panel_window_y)
+        self.root.geometry(self._geometry_string(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT, initial_position))
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.detecting_key_target: tk.StringVar | None = None
         self.detecting_key_label = ""
@@ -463,7 +466,7 @@ class AutoPotionSettingsGui:
         self.root.bind("<Configure>", self._on_root_configure, add="+")
         self.set_window_topmost(settings.window_topmost)
         self.set_console_collapsed(settings.console_collapsed)
-        self.set_compact_experience_mode(settings.compact_experience_mode)
+        self.set_compact_experience_mode(settings.compact_experience_mode, restore_saved_position=True)
 
     def _on_root_configure(self, event: tk.Event) -> None:
         if event.widget is not self.root:
@@ -504,19 +507,32 @@ class AutoPotionSettingsGui:
     def toggle_compact_experience_mode(self) -> None:
         self.set_compact_experience_mode(not self.compact_experience_mode)
 
-    def set_compact_experience_mode(self, compact: bool) -> None:
+    def set_compact_experience_mode(self, compact: bool, *, restore_saved_position: bool = False) -> None:
         if self.compact_experience_mode == compact:
             self.settings.compact_experience_mode = compact
             self._update_panel_mode_buttons()
             return
         if compact:
+            experience_anchor = None if restore_saved_position else self._experience_section_screen_position()
             self._remember_default_window_size()
+            self._remember_full_panel_window_position()
             self.compact_experience_mode = True
             self.settings.compact_experience_mode = True
             self._enter_compact_experience_mode()
-            self._set_window_size(COMPACT_WINDOW_WIDTH, COMPACT_WINDOW_HEIGHT)
+            target_position = None
+            if restore_saved_position:
+                target_position = self._saved_position(
+                    self.settings.compact_experience_window_x,
+                    self.settings.compact_experience_window_y,
+                )
+            if target_position is None:
+                target_position = self._compact_window_position_for_experience_anchor(experience_anchor)
+            self._set_window_size(COMPACT_WINDOW_WIDTH, COMPACT_WINDOW_HEIGHT, target_position)
+            if target_position is not None:
+                self._store_compact_experience_window_position(target_position)
             self._update_panel_mode_buttons()
             return
+        self._remember_compact_experience_window_position()
         self.compact_experience_mode = False
         self.settings.compact_experience_mode = False
         self._leave_compact_experience_mode()
@@ -525,7 +541,10 @@ class AutoPotionSettingsGui:
             width = WINDOW_COLLAPSED_WIDTH
         else:
             width = max(WINDOW_EXPANDED_MIN_WIDTH, width)
-        self._set_window_size(width, max(WINDOW_MIN_HEIGHT, height))
+        target_position = self._saved_position(self.settings.full_panel_window_x, self.settings.full_panel_window_y)
+        self._set_window_size(width, max(WINDOW_MIN_HEIGHT, height), target_position)
+        if target_position is not None:
+            self._store_full_panel_window_position(target_position)
         self._update_panel_mode_buttons()
 
     def toggle_window_topmost(self) -> None:
@@ -570,6 +589,81 @@ class AutoPotionSettingsGui:
                 max(WINDOW_MIN_HEIGHT, height),
             )
 
+    def _saved_position(self, x: int | None, y: int | None) -> tuple[int, int] | None:
+        if x is None or y is None:
+            return None
+        return int(x), int(y)
+
+    def _current_window_position(self) -> tuple[int, int] | None:
+        try:
+            return int(self.root.winfo_x()), int(self.root.winfo_y())
+        except tk.TclError:
+            return None
+
+    def _remember_current_mode_window_position(self) -> None:
+        if self.compact_experience_mode:
+            self._remember_compact_experience_window_position()
+            return
+        self._remember_full_panel_window_position()
+
+    def _remember_full_panel_window_position(self) -> None:
+        position = self._current_window_position()
+        if position is not None:
+            self._store_full_panel_window_position(position)
+
+    def _remember_compact_experience_window_position(self) -> None:
+        position = self._current_window_position()
+        if position is not None:
+            self._store_compact_experience_window_position(position)
+
+    def _store_full_panel_window_position(self, position: tuple[int, int]) -> None:
+        self.settings.full_panel_window_x = int(position[0])
+        self.settings.full_panel_window_y = int(position[1])
+
+    def _store_compact_experience_window_position(self, position: tuple[int, int]) -> None:
+        self.settings.compact_experience_window_x = int(position[0])
+        self.settings.compact_experience_window_y = int(position[1])
+
+    def _experience_section_screen_position(self) -> tuple[int, int] | None:
+        if self.exp_section is None:
+            return None
+        try:
+            self.root.update_idletasks()
+            return int(self.exp_section.winfo_rootx()), int(self.exp_section.winfo_rooty())
+        except tk.TclError:
+            return None
+
+    def _compact_window_position_for_experience_anchor(
+        self,
+        experience_anchor: tuple[int, int] | None,
+    ) -> tuple[int, int] | None:
+        if experience_anchor is None or self.exp_section is None:
+            return None
+        current_position = self._current_window_position()
+        if current_position is None:
+            return None
+        try:
+            self.root.update_idletasks()
+            exp_x = int(self.exp_section.winfo_rootx())
+            exp_y = int(self.exp_section.winfo_rooty())
+        except tk.TclError:
+            return None
+        return (
+            current_position[0] + experience_anchor[0] - exp_x,
+            current_position[1] + experience_anchor[1] - exp_y,
+        )
+
+    def _geometry_string(
+        self,
+        width: int,
+        height: int,
+        position: tuple[int, int] | None = None,
+    ) -> str:
+        geometry = f"{int(width)}x{int(height)}"
+        if position is None:
+            return geometry
+        return f"{geometry}{int(position[0]):+d}{int(position[1]):+d}"
+
     def _set_window_width(self, width: int) -> None:
         try:
             height = max(WINDOW_MIN_HEIGHT, int(self.root.winfo_height()))
@@ -577,10 +671,15 @@ class AutoPotionSettingsGui:
             return
         self._set_window_size(width, height)
 
-    def _set_window_size(self, width: int, height: int) -> None:
+    def _set_window_size(
+        self,
+        width: int,
+        height: int,
+        position: tuple[int, int] | None = None,
+    ) -> None:
         try:
             self.suppress_resize_suspend_until = time.monotonic() + 0.25
-            self.root.geometry(f"{int(width)}x{int(height)}")
+            self.root.geometry(self._geometry_string(width, height, position))
         except tk.TclError:
             return
 
@@ -702,6 +801,7 @@ class AutoPotionSettingsGui:
         self.window_interaction_pause_until = 0.0
         self._restore_layout_after_resize()
         self._unfreeze_console_resize()
+        self._remember_current_mode_window_position()
 
     def _unfreeze_console_resize(self) -> None:
         if self.console_collapsed or not self.console_resize_frozen or self.console_container is None:
@@ -1166,6 +1266,9 @@ class AutoPotionSettingsGui:
 
     def close(self) -> None:
         self.cancel_key_detection()
+        self._remember_current_mode_window_position()
+        self.apply_to_settings()
+        save_settings(self.settings, SETTINGS_PATH)
         self._destroy_toggle_notice()
         self._hide_tooltip()
         if self.console_resize_after_id is not None:
@@ -1658,17 +1761,41 @@ class AutoPotionSettingsGui:
         if rect is None:
             screen_width = self.root.winfo_screenwidth()
             screen_height = self.root.winfo_screenheight()
-            return (
-                max(0, (screen_width - width) // 2),
-                max(0, int(screen_height * 0.12) - height // 2),
+            return self._clamp_notice_position(
+                (screen_width - width) // 2,
+                int(screen_height * TOGGLE_NOTICE_VERTICAL_RATIO) - height // 2,
+                width,
+                height,
+                (0, 0, screen_width, screen_height),
             )
 
         left, top, right, bottom = rect
         target_width = max(1, right - left)
         target_height = max(1, bottom - top)
+        return self._clamp_notice_position(
+            left + (target_width - width) // 2,
+            top + int(target_height * TOGGLE_NOTICE_VERTICAL_RATIO) - height // 2,
+            width,
+            height,
+            rect,
+        )
+
+    def _clamp_notice_position(
+        self,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        bounds: tuple[int, int, int, int],
+    ) -> tuple[int, int]:
+        left, top, right, bottom = bounds
+        min_x = left + TOGGLE_NOTICE_EDGE_PADDING
+        min_y = top + TOGGLE_NOTICE_EDGE_PADDING
+        max_x = max(min_x, right - width - TOGGLE_NOTICE_EDGE_PADDING)
+        max_y = max(min_y, bottom - height - TOGGLE_NOTICE_EDGE_PADDING)
         return (
-            left + max(0, (target_width - width) // 2),
-            top + max(0, int(target_height * 0.10) - height // 2),
+            max(min_x, min(max_x, x)),
+            max(min_y, min(max_y, y)),
         )
 
     def _foreground_client_rect(self) -> tuple[int, int, int, int] | None:

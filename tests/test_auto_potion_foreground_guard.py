@@ -287,6 +287,30 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(controller.last_action, "Pause 硬停止")
         controller.gui.set_status.assert_called_with("Pause 硬停止：所有腳本已暫停")
 
+    def test_play_toggle_beep_uses_tone_sequence(self):
+        controller = AutoPotionController.__new__(AutoPotionController)
+
+        with (
+            patch("maple_star.controller.winsound.Beep") as beep,
+            patch("maple_star.controller.winsound.MessageBeep") as message_beep,
+        ):
+            controller._play_toggle_beep(((659, 45), (880, 55)))
+
+        self.assertEqual(beep.call_args_list[0].args, (659, 45))
+        self.assertEqual(beep.call_args_list[1].args, (880, 55))
+        message_beep.assert_not_called()
+
+    def test_play_toggle_beep_falls_back_to_message_beep(self):
+        controller = AutoPotionController.__new__(AutoPotionController)
+
+        with (
+            patch("maple_star.controller.winsound.Beep", side_effect=RuntimeError),
+            patch("maple_star.controller.winsound.MessageBeep") as message_beep,
+        ):
+            controller._play_toggle_beep(((659, 45), (880, 55)))
+
+        message_beep.assert_called_once()
+
     def test_control_hotkeys_are_ignored_while_key_capture_is_active(self):
         controller = self.make_controller([])
         controller.gui.is_detecting_key.return_value = True

@@ -86,6 +86,10 @@ class AutoPotionSettings:
     console_collapsed: bool = False
     compact_experience_mode: bool = False
     window_topmost: bool = False
+    full_panel_window_x: int | None = None
+    full_panel_window_y: int | None = None
+    compact_experience_window_x: int | None = None
+    compact_experience_window_y: int | None = None
     active_profile: str = DEFAULT_PROFILE_NAME
     profiles: dict[str, dict[str, object]] = field(default_factory=dict)
 
@@ -117,6 +121,10 @@ class AutoPotionSettings:
             self.console_collapsed,
             self.compact_experience_mode,
             self.window_topmost,
+            self.full_panel_window_x,
+            self.full_panel_window_y,
+            self.compact_experience_window_x,
+            self.compact_experience_window_y,
             self.active_profile,
             json.dumps(self.profiles, ensure_ascii=False, sort_keys=True),
         )
@@ -156,6 +164,10 @@ class AutoPotionSettings:
             "console_collapsed": self.console_collapsed,
             "compact_experience_mode": self.compact_experience_mode,
             "window_topmost": self.window_topmost,
+            "full_panel_window_x": self.full_panel_window_x,
+            "full_panel_window_y": self.full_panel_window_y,
+            "compact_experience_window_x": self.compact_experience_window_x,
+            "compact_experience_window_y": self.compact_experience_window_y,
             "active_profile": normalize_profile_name(self.active_profile),
             "profiles": profiles,
         }
@@ -236,6 +248,10 @@ GLOBAL_SETTING_KEYS = (
     "console_collapsed",
     "compact_experience_mode",
     "window_topmost",
+    "full_panel_window_x",
+    "full_panel_window_y",
+    "compact_experience_window_x",
+    "compact_experience_window_y",
 )
 
 
@@ -267,6 +283,18 @@ def _read_string(data: dict[str, object], key: str, fallback: str) -> str:
         return fallback
     value = value.strip()
     return value or fallback
+
+
+def _read_optional_int(data: dict[str, object], key: str, fallback: int | None) -> int | None:
+    value = data.get(key, fallback)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return fallback
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
 
 
 def _read_profile_payload(raw: object, fallback: AutoPotionSettings) -> dict[str, object]:
@@ -322,6 +350,10 @@ def settings_from_profile_payload(
         console_collapsed=fallback.console_collapsed,
         compact_experience_mode=fallback.compact_experience_mode,
         window_topmost=fallback.window_topmost,
+        full_panel_window_x=fallback.full_panel_window_x,
+        full_panel_window_y=fallback.full_panel_window_y,
+        compact_experience_window_x=fallback.compact_experience_window_x,
+        compact_experience_window_y=fallback.compact_experience_window_y,
         active_profile=normalize_profile_name(active_profile),
         profiles=profiles,
     )
@@ -380,6 +412,18 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
         console_collapsed=_read_bool(raw, "console_collapsed", settings.console_collapsed),
         compact_experience_mode=_read_bool(raw, "compact_experience_mode", settings.compact_experience_mode),
         window_topmost=_read_bool(raw, "window_topmost", settings.window_topmost),
+        full_panel_window_x=_read_optional_int(raw, "full_panel_window_x", settings.full_panel_window_x),
+        full_panel_window_y=_read_optional_int(raw, "full_panel_window_y", settings.full_panel_window_y),
+        compact_experience_window_x=_read_optional_int(
+            raw,
+            "compact_experience_window_x",
+            settings.compact_experience_window_x,
+        ),
+        compact_experience_window_y=_read_optional_int(
+            raw,
+            "compact_experience_window_y",
+            settings.compact_experience_window_y,
+        ),
         active_profile=normalize_profile_name(raw.get("active_profile"), DEFAULT_PROFILE_NAME),
     )
     profiles = _read_profiles(raw.get("profiles"), base_settings)

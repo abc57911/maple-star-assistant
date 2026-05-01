@@ -30,6 +30,10 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertFalse(settings.console_collapsed)
         self.assertFalse(settings.compact_experience_mode)
         self.assertFalse(settings.window_topmost)
+        self.assertIsNone(settings.full_panel_window_x)
+        self.assertIsNone(settings.full_panel_window_y)
+        self.assertIsNone(settings.compact_experience_window_x)
+        self.assertIsNone(settings.compact_experience_window_y)
         self.assertIn("Default", saved["profiles"])
         self.assertEqual(saved["profiles"]["Default"]["hp_key"], "9")
         self.assertFalse(saved["profiles"]["Default"]["exp_efficiency_enabled"])
@@ -39,6 +43,10 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertFalse(saved["console_collapsed"])
         self.assertFalse(saved["compact_experience_mode"])
         self.assertFalse(saved["window_topmost"])
+        self.assertIsNone(saved["full_panel_window_x"])
+        self.assertIsNone(saved["full_panel_window_y"])
+        self.assertIsNone(saved["compact_experience_window_x"])
+        self.assertIsNone(saved["compact_experience_window_y"])
 
     def test_load_settings_can_skip_writing_migrations(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -61,7 +69,43 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertTrue(settings.console_collapsed)
         self.assertTrue(settings.compact_experience_mode)
         self.assertTrue(settings.window_topmost)
+        self.assertIsNone(settings.full_panel_window_x)
+        self.assertIsNone(settings.full_panel_window_y)
+        self.assertIsNone(settings.compact_experience_window_x)
+        self.assertIsNone(settings.compact_experience_window_y)
         self.assertEqual(saved, original)
+
+    def test_window_positions_are_global_settings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "full_panel_window_x": 120,
+                        "full_panel_window_y": 240,
+                        "compact_experience_window_x": 360,
+                        "compact_experience_window_y": 480,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("builtins.print"):
+                settings = load_settings(settings_path)
+            saved = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(settings.full_panel_window_x, 120)
+        self.assertEqual(settings.full_panel_window_y, 240)
+        self.assertEqual(settings.compact_experience_window_x, 360)
+        self.assertEqual(settings.compact_experience_window_y, 480)
+        self.assertEqual(saved["full_panel_window_x"], 120)
+        self.assertEqual(saved["full_panel_window_y"], 240)
+        self.assertEqual(saved["compact_experience_window_x"], 360)
+        self.assertEqual(saved["compact_experience_window_y"], 480)
+        self.assertNotIn("full_panel_window_x", saved["profiles"]["Default"])
+        self.assertNotIn("full_panel_window_y", saved["profiles"]["Default"])
+        self.assertNotIn("compact_experience_window_x", saved["profiles"]["Default"])
+        self.assertNotIn("compact_experience_window_y", saved["profiles"]["Default"])
 
     def test_apply_profile_saves_current_profile_before_switching(self):
         settings = AutoPotionSettings(hp_key="9", active_profile="Main")
@@ -103,6 +147,10 @@ class SettingsProfileTests(unittest.TestCase):
             console_collapsed=True,
             compact_experience_mode=True,
             window_topmost=True,
+            full_panel_window_x=100,
+            full_panel_window_y=200,
+            compact_experience_window_x=300,
+            compact_experience_window_y=400,
         )
         payload = settings.to_json_dict()
 
@@ -112,9 +160,17 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertTrue(payload["console_collapsed"])
         self.assertTrue(payload["compact_experience_mode"])
         self.assertTrue(payload["window_topmost"])
+        self.assertEqual(payload["full_panel_window_x"], 100)
+        self.assertEqual(payload["full_panel_window_y"], 200)
+        self.assertEqual(payload["compact_experience_window_x"], 300)
+        self.assertEqual(payload["compact_experience_window_y"], 400)
         self.assertNotIn("toggle_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("emergency_stop_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("experience_toggle_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("console_collapsed", payload["profiles"]["Default"])
         self.assertNotIn("compact_experience_mode", payload["profiles"]["Default"])
         self.assertNotIn("window_topmost", payload["profiles"]["Default"])
+        self.assertNotIn("full_panel_window_x", payload["profiles"]["Default"])
+        self.assertNotIn("full_panel_window_y", payload["profiles"]["Default"])
+        self.assertNotIn("compact_experience_window_x", payload["profiles"]["Default"])
+        self.assertNotIn("compact_experience_window_y", payload["profiles"]["Default"])
