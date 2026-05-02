@@ -108,13 +108,17 @@ class BarDetectionDebugTests(unittest.TestCase):
         self.assertLess(regions["hp"][1], hp_track[1])
         self.assertGreater(regions["hp"][3], hp_track[3])
 
-    def test_bottom_bar_search_areas_prefer_centered_gameplay_content_for_wide_window(self):
+    def test_bottom_bar_search_areas_include_centered_gameplay_content_for_wide_window(self):
         controller = self.make_controller()
 
         areas = controller._bottom_bar_search_areas((0, 0, 3840, 1080))
 
         self.assertGreaterEqual(len(areas), 2)
-        centered = areas[0]
+        full_client = areas[0]
+        self.assertEqual(full_client.reference_left, 0)
+        self.assertEqual(full_client.reference_width, 3840)
+        self.assertEqual(full_client.reference_height, 1080)
+        centered = areas[1]
         self.assertEqual(centered.reference_left, 960)
         self.assertEqual(centered.reference_width, 1920)
         self.assertEqual(centered.reference_height, 1080)
@@ -127,7 +131,11 @@ class BarDetectionDebugTests(unittest.TestCase):
         areas = controller._bottom_bar_search_areas((0, 0, 900, 900))
 
         self.assertGreaterEqual(len(areas), 2)
-        centered = areas[0]
+        full_client = areas[0]
+        self.assertEqual(full_client.reference_left, 0)
+        self.assertEqual(full_client.reference_width, 900)
+        self.assertEqual(full_client.reference_height, 900)
+        centered = areas[1]
         self.assertEqual(centered.reference_left, 0)
         self.assertEqual(centered.reference_width, 900)
         self.assertEqual(centered.reference_height, 506)

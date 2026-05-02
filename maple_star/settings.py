@@ -84,6 +84,7 @@ class AutoPotionSettings:
     emergency_stop_hotkey: str = DEFAULT_EMERGENCY_STOP_HOTKEY
     experience_toggle_hotkey: str = DEFAULT_EXPERIENCE_TOGGLE_HOTKEY
     console_collapsed: bool = False
+    combo_group_collapsed: bool = False
     compact_experience_mode: bool = False
     window_topmost: bool = False
     full_panel_window_x: int | None = None
@@ -119,6 +120,7 @@ class AutoPotionSettings:
             self.emergency_stop_hotkey,
             self.experience_toggle_hotkey,
             self.console_collapsed,
+            self.combo_group_collapsed,
             self.compact_experience_mode,
             self.window_topmost,
             self.full_panel_window_x,
@@ -162,6 +164,7 @@ class AutoPotionSettings:
             "emergency_stop_hotkey": self.emergency_stop_hotkey,
             "experience_toggle_hotkey": self.experience_toggle_hotkey,
             "console_collapsed": self.console_collapsed,
+            "combo_group_collapsed": self.combo_group_collapsed,
             "compact_experience_mode": self.compact_experience_mode,
             "window_topmost": self.window_topmost,
             "full_panel_window_x": self.full_panel_window_x,
@@ -246,6 +249,7 @@ GLOBAL_SETTING_KEYS = (
     "emergency_stop_hotkey",
     "experience_toggle_hotkey",
     "console_collapsed",
+    "combo_group_collapsed",
     "compact_experience_mode",
     "window_topmost",
     "full_panel_window_x",
@@ -348,6 +352,7 @@ def settings_from_profile_payload(
         emergency_stop_hotkey=fallback.emergency_stop_hotkey,
         experience_toggle_hotkey=fallback.experience_toggle_hotkey,
         console_collapsed=fallback.console_collapsed,
+        combo_group_collapsed=fallback.combo_group_collapsed,
         compact_experience_mode=fallback.compact_experience_mode,
         window_topmost=fallback.window_topmost,
         full_panel_window_x=fallback.full_panel_window_x,
@@ -410,6 +415,7 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
             settings.experience_toggle_hotkey,
         ),
         console_collapsed=_read_bool(raw, "console_collapsed", settings.console_collapsed),
+        combo_group_collapsed=_read_bool(raw, "combo_group_collapsed", settings.combo_group_collapsed),
         compact_experience_mode=_read_bool(raw, "compact_experience_mode", settings.compact_experience_mode),
         window_topmost=_read_bool(raw, "window_topmost", settings.window_topmost),
         full_panel_window_x=_read_optional_int(raw, "full_panel_window_x", settings.full_panel_window_x),

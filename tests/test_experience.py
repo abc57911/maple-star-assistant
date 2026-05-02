@@ -8,12 +8,14 @@ import types
 import unittest
 import warnings
 from pathlib import Path
+from unittest.mock import Mock
 
 import cv2
 import numpy as np
 
 from maple_star.experience import (
     ExperienceEfficiencyTracker,
+    ExperienceTextReading,
     PADDLEOCR_DETECTION_MODEL_NAME,
     PADDLEOCR_LANGUAGE,
     PADDLEOCR_RECOGNITION_MODEL_NAME,
@@ -36,6 +38,72 @@ from maple_star.experience import (
 
 
 class ExperienceTests(unittest.TestCase):
+    def test_paddle_reader_burst_uses_consensus_result(self):
+        reader = PaddleExperienceTextReader()
+        reader.read = Mock(
+            side_effect=[
+                ExperienceTextReading(current_exp=4266438, percent=94.86, text="4266438[94.86%]", confidence=0.87, success=True),
+                ExperienceTextReading(current_exp=4266438, percent=94.86, text="4266438[94.86%]", confidence=0.92, success=True),
+                ExperienceTextReading(current_exp=42664381, percent=94.86, text="4266438194.86", confidence=0.96, success=True),
+            ]
+        )
+
+        reading = reader.read_burst([np.zeros((1, 1, 3), dtype=np.uint8) for _ in range(3)])
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 4266438)
+        self.assertEqual(reading.percent, 94.86)
+        self.assertEqual(reading.confidence, 0.92)
+
+    def test_paddle_reader_burst_rejects_conflicting_successes_without_consensus(self):
+        reader = PaddleExperienceTextReader()
+        reader.read = Mock(
+            side_effect=[
+                ExperienceTextReading(current_exp=4266438, percent=94.86, text="4266438[94.86%]", confidence=0.87, success=True),
+                ExperienceTextReading(current_exp=4266439, percent=94.86, text="4266439[94.86%]", confidence=0.92, success=True),
+                ExperienceTextReading(current_exp=4266437, percent=94.86, text="4266437[94.86%]", confidence=0.89, success=True),
+            ]
+        )
+
+        reading = reader.read_burst([np.zeros((1, 1, 3), dtype=np.uint8) for _ in range(3)])
+
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.reason, "EXP burst 結果不一致")
+        self.assertEqual(reading.confidence, 0.92)
+
+    def test_paddle_reader_burst_rejects_tied_conflicting_consensus(self):
+        reader = PaddleExperienceTextReader()
+        reader.read = Mock(
+            side_effect=[
+                ExperienceTextReading(current_exp=4266438, percent=94.86, text="4266438[94.86%]", confidence=0.87, success=True),
+                ExperienceTextReading(current_exp=4266438, percent=94.86, text="4266438[94.86%]", confidence=0.91, success=True),
+                ExperienceTextReading(current_exp=42664381, percent=94.86, text="42664381[94.86%]", confidence=0.92, success=True),
+                ExperienceTextReading(current_exp=42664381, percent=94.86, text="42664381[94.86%]", confidence=0.96, success=True),
+            ]
+        )
+
+        reading = reader.read_burst([np.zeros((1, 1, 3), dtype=np.uint8) for _ in range(4)])
+
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.reason, "EXP burst 結果不一致")
+        self.assertEqual(reading.confidence, 0.96)
+
+    def test_paddle_reader_burst_keeps_single_success_when_other_frames_fail(self):
+        reader = PaddleExperienceTextReader()
+        reader.read = Mock(
+            side_effect=[
+                ExperienceTextReading(text="--", confidence=0.30, reason="EXP 數字解析失敗"),
+                ExperienceTextReading(current_exp=4266438, percent=94.86, text="4266438[94.86%]", confidence=0.91, success=True),
+                ExperienceTextReading(text="4266438", confidence=0.66, reason="EXP 百分比解析失敗"),
+            ]
+        )
+
+        reading = reader.read_burst([np.zeros((1, 1, 3), dtype=np.uint8) for _ in range(3)])
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 4266438)
+        self.assertEqual(reading.percent, 94.86)
+
     def test_parse_current_exp_before_percent_text(self):
         self.assertEqual(parse_current_exp_text("132553[18.36%]"), 132553)
         self.assertEqual(parse_current_exp_text("132,553 [18.36%]"), 132553)
@@ -386,6 +454,38 @@ class ExperienceTests(unittest.TestCase):
 
         self.assertFalse(reading.success)
         self.assertEqual(reading.reason, "EXP 百分比與綠條不一致")
+
+    def test_paddle_reader_accepts_merged_exp_percent_when_green_bar_confirms(self):
+        class FakeOcr:
+            def predict(self, input):
+                return [{"res": {"rec_texts": ["4266438194.86"], "rec_scores": [0.91]}}]
+
+        reader = PaddleExperienceTextReader()
+        reader.ocr = FakeOcr()
+        image = np.zeros((30, 325, 4), dtype=np.uint8)
+        image[:, :, :3] = (30, 30, 30)
+        image[:, :, 3] = 255
+        image[:, :293, :3] = (40, 215, 95)
+
+        reading = reader.read(image)
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 4266438)
+        self.assertEqual(reading.percent, 94.86)
+
+    def test_paddle_reader_rejects_merged_exp_percent_without_green_bar(self):
+        class FakeOcr:
+            def predict(self, input):
+                return [{"res": {"rec_texts": ["4266438194.86"], "rec_scores": [0.91]}}]
+
+        reader = PaddleExperienceTextReader()
+        reader.ocr = FakeOcr()
+        image = np.zeros((30, 325, 4), dtype=np.uint8)
+
+        reading = reader.read(image)
+
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.reason, "EXP 百分比需要綠條確認")
 
     def test_experience_text_structure_prefers_bracketed_percent(self):
         self.assertGreater(

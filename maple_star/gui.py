@@ -158,6 +158,10 @@ class AutoPotionSettingsGui:
         self.monitor_frame: ctk.CTkFrame | None = None
         self.exp_section: ctk.CTkFrame | None = None
         self.detection_section: ctk.CTkFrame | None = None
+        self.combo_group_section: ctk.CTkFrame | None = None
+        self.combo_group_body: ctk.CTkFrame | None = None
+        self.combo_group_title_label: ctk.CTkLabel | None = None
+        self.combo_group_collapsed = False
         self.full_panel_widgets: list[tk.Misc] = []
         self.panel_mode_button: ctk.CTkButton | None = None
         self.topmost_button: ctk.CTkButton | None = None
@@ -170,6 +174,7 @@ class AutoPotionSettingsGui:
         self.console_scrollbar: ctk.CTkScrollbar | None = None
         self.console_collapsed = False
         self.console_resize_after_id: str | None = None
+        self.console_height_after_id: str | None = None
         self.console_resize_frozen = False
         self.resize_layout_suspended = False
         self.suppress_resize_suspend_until = 0.0
@@ -215,9 +220,7 @@ class AutoPotionSettingsGui:
         self.status = tk.StringVar(value="只在楓星為前景視窗時生效")
         self.runtime_script_status = tk.StringVar(value="腳本：啟用")
         self.runtime_foreground_status = tk.StringVar(value="前景：--")
-        self.runtime_macro_status = tk.StringVar(value="巨集：--")
-        self.runtime_held_keys_status = tk.StringVar(value="按住：--")
-        self.runtime_last_action_status = tk.StringVar(value="最近動作：啟動")
+        self.runtime_status_message = tk.StringVar(value=f"狀態：{self.status.get()}")
         self.hp_detection_status = tk.StringVar(value="HP: --")
         self.mp_detection_status = tk.StringVar(value="MP: --")
         self.exp_current_status = tk.StringVar(value="EXP：--")
@@ -225,7 +228,6 @@ class AutoPotionSettingsGui:
         self.exp_rate_10m_status = tk.StringVar(value="10m：--")
         self.exp_rate_1h_status = tk.StringVar(value="1h：--")
         self.exp_eta_status = tk.StringVar(value="升級預估：--")
-        self.exp_ocr_success_status = tk.StringVar(value="OCR：--")
         self.exp_reader_status = tk.StringVar(value="狀態：尚未開始")
 
         frame = ctk.CTkFrame(self.root, fg_color=APP_BG, corner_radius=0)
@@ -314,19 +316,17 @@ class AutoPotionSettingsGui:
         self.panel_mode_button.grid(row=0, column=98, sticky="e", padx=(8, 4), pady=4)
         self.topmost_button = self._button(exp_title, "置頂", self.toggle_window_topmost, width=76)
         self.topmost_button.grid(row=0, column=99, sticky="e", padx=(0, 8), pady=4)
-        for column in range(5):
-            exp_frame.columnconfigure(column, weight=1 if column else 0)
-        self._label(exp_frame, textvariable=self.exp_current_status, font=EXP_MONO_FONT, color=ACCENT_GREEN).grid(row=0, column=0, sticky="w", padx=(0, 12), pady=6)
-        self._label(exp_frame, textvariable=self.exp_eta_status, color=WARNING_YELLOW, font=EXP_FONT).grid(row=0, column=1, sticky="w", padx=(0, 12), pady=6)
+        exp_frame.columnconfigure(0, weight=1)
+        self._label(exp_frame, textvariable=self.exp_current_status, font=EXP_MONO_FONT, color=ACCENT_GREEN).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(4, 0))
+        self._label(exp_frame, textvariable=self.exp_eta_status, color=WARNING_YELLOW, font=EXP_FONT).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(0, 2))
         exp_rate_frame = ctk.CTkFrame(exp_frame, fg_color="transparent")
-        exp_rate_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=(0, 12), pady=(0, 6))
+        exp_rate_frame.grid(row=2, column=0, sticky="ew", padx=(0, 8), pady=(0, 2))
         for column in range(3):
             exp_rate_frame.columnconfigure(column, weight=1, uniform="exp_rate")
         self._label(exp_rate_frame, textvariable=self.exp_rate_5m_status, font=EXP_MONO_FONT).grid(row=0, column=0, sticky="w")
         self._label(exp_rate_frame, textvariable=self.exp_rate_10m_status, font=EXP_MONO_FONT).grid(row=0, column=1, sticky="w")
         self._label(exp_rate_frame, textvariable=self.exp_rate_1h_status, font=EXP_MONO_FONT).grid(row=0, column=2, sticky="w")
-        self._label(exp_frame, textvariable=self.exp_reader_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=2, column=0, columnspan=2, sticky="w", padx=(0, 12), pady=(0, 6))
-        self._label(exp_frame, textvariable=self.exp_ocr_success_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=2, column=2, columnspan=2, sticky="w", padx=(0, 12), pady=(0, 6))
+        self._label(exp_frame, textvariable=self.exp_reader_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=3, column=0, sticky="w", padx=(0, 8), pady=(0, 0))
 
         detection_section, detection_title, detection_frame = self._build_section(monitor_frame, "", row=0, column=1, sticky="nsew", pady=0)
         self.detection_section = detection_section
@@ -342,8 +342,23 @@ class AutoPotionSettingsGui:
         self.bar_preview_labels["mp"] = self._label(detection_frame, "尚未刷新預覽", color=MUTED_TEXT)
         self.bar_preview_labels["mp"].grid(row=3, column=0, sticky="w", pady=(0, 6))
 
-        combos_frame = ctk.CTkFrame(controls_frame, fg_color="transparent")
-        combos_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        combo_group_section, combo_group_header, combo_group_body = self._build_section(
+            controls_frame,
+            "",
+            row=4,
+            sticky="ew",
+            pady=(8, 0),
+        )
+        self.combo_group_section = combo_group_section
+        self.combo_group_body = combo_group_body
+        self.combo_group_title_label = self._title_label(combo_group_header, "組合設定")
+        self.combo_group_title_label.grid(row=0, column=0, sticky="w", padx=8, pady=4)
+        combo_group_header.bind("<Button-1>", lambda _event: self.toggle_combo_group_collapsed())
+        self.combo_group_title_label.bind("<Button-1>", lambda _event: self.toggle_combo_group_collapsed())
+        combo_group_body.columnconfigure(0, weight=1)
+
+        combos_frame = ctk.CTkFrame(combo_group_body, fg_color="transparent")
+        combos_frame.grid(row=0, column=0, sticky="ew")
         combos_frame.columnconfigure(0, weight=1)
         combos_frame.columnconfigure(1, weight=1)
 
@@ -390,28 +405,22 @@ class AutoPotionSettingsGui:
         self._label(combo_b_frame, "技能延遲").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
         self._build_seconds_stepper(combo_b_frame, 1, 1, self.lb_skill_delay, 0.0, 10.0, pady=(0, 4))
 
-        status_label = self._label(controls_frame, textvariable=self.status, color=WARNING_YELLOW)
-        status_label.grid(row=5, column=0, sticky="w", pady=(8, 4))
-
         runtime_frame = ctk.CTkFrame(controls_frame, fg_color=PANEL_BG_ALT, corner_radius=SECTION_RADIUS, border_width=1, border_color=PANEL_BORDER)
-        runtime_frame.grid(row=6, column=0, sticky="ew", pady=(0, 6))
-        for column in range(5):
+        runtime_frame.grid(row=5, column=0, sticky="ew", pady=(8, 6))
+        for column in range(3):
             runtime_frame.columnconfigure(column, weight=1)
         self._label(runtime_frame, textvariable=self.runtime_script_status, color=ACCENT_GREEN).grid(row=0, column=0, sticky="w", padx=(10, 12), pady=8)
         self._label(runtime_frame, textvariable=self.runtime_foreground_status).grid(row=0, column=1, sticky="w", padx=(0, 12), pady=8)
-        self._label(runtime_frame, textvariable=self.runtime_macro_status).grid(row=0, column=2, sticky="w", padx=(0, 12), pady=8)
-        self._label(runtime_frame, textvariable=self.runtime_held_keys_status).grid(row=0, column=3, sticky="w", padx=(0, 12), pady=8)
-        self._label(runtime_frame, textvariable=self.runtime_last_action_status, color=MUTED_TEXT).grid(row=0, column=4, sticky="w", padx=(0, 10), pady=8)
+        self._label(runtime_frame, textvariable=self.runtime_status_message, color=WARNING_YELLOW).grid(row=0, column=2, sticky="w", padx=(0, 12), pady=8)
         self.console_restore_button = self._button(runtime_frame, "Console ›", self.toggle_console_collapsed, width=92)
-        self.console_restore_button.grid(row=0, column=5, sticky="e", padx=(0, 10), pady=8)
+        self.console_restore_button.grid(row=0, column=3, sticky="e", padx=(0, 10), pady=8)
         self.console_restore_button.grid_remove()
         self.full_panel_widgets = [
             control_hotkey_section,
             profile_section,
             potion_section,
             detection_section,
-            combos_frame,
-            status_label,
+            combo_group_section,
             runtime_frame,
         ]
 
@@ -470,6 +479,7 @@ class AutoPotionSettingsGui:
         self.console_scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 1), pady=1)
         self.root.bind("<Configure>", self._on_root_configure, add="+")
         self.set_window_topmost(settings.window_topmost)
+        self.set_combo_group_collapsed(settings.combo_group_collapsed)
         self.set_console_collapsed(settings.console_collapsed)
         self.set_compact_experience_mode(settings.compact_experience_mode, restore_saved_position=True)
 
@@ -489,6 +499,26 @@ class AutoPotionSettingsGui:
 
     def toggle_console_collapsed(self) -> None:
         self.set_console_collapsed(not self.console_collapsed)
+
+    def toggle_combo_group_collapsed(self) -> None:
+        self.set_combo_group_collapsed(not self.combo_group_collapsed)
+
+    def set_combo_group_collapsed(self, collapsed: bool) -> None:
+        collapsed = bool(collapsed)
+        self.combo_group_collapsed = collapsed
+        if hasattr(self, "settings"):
+            self.settings.combo_group_collapsed = collapsed
+        try:
+            if self.combo_group_body is not None:
+                if collapsed:
+                    self.combo_group_body.grid_remove()
+                else:
+                    self.combo_group_body.grid()
+            if self.combo_group_title_label is not None:
+                self.combo_group_title_label.configure(text="組合設定（已收合）" if collapsed else "組合設定")
+        except tk.TclError:
+            return
+        self._schedule_console_height_sync()
 
     def set_console_collapsed(self, collapsed: bool) -> None:
         if self.console_collapsed == collapsed:
@@ -771,6 +801,7 @@ class AutoPotionSettingsGui:
                 self.console_restore_button.grid_remove()
         except tk.TclError:
             return
+        self._schedule_console_height_sync()
 
     def _suspend_layout_for_resize(self) -> None:
         if self.resize_layout_suspended or self.content_frame is None:
@@ -806,6 +837,7 @@ class AutoPotionSettingsGui:
         self.window_interaction_pause_until = 0.0
         self._restore_layout_after_resize()
         self._unfreeze_console_resize()
+        self._schedule_console_height_sync()
         self._remember_current_mode_window_position()
 
     def _unfreeze_console_resize(self) -> None:
@@ -815,11 +847,50 @@ class AutoPotionSettingsGui:
             if self.console_frame is not None:
                 self.console_frame.columnconfigure(0, weight=1)
                 self.console_frame.rowconfigure(0, weight=1)
-            self.console_container.configure(width=CONSOLE_MIN_WIDTH, height=620)
+            self.console_container.configure(width=CONSOLE_MIN_WIDTH)
             self.console_container.grid_configure(sticky="nsew")
         except tk.TclError:
             return
         self.console_resize_frozen = False
+        self._schedule_console_height_sync()
+
+    def _schedule_console_height_sync(self) -> None:
+        if (
+            getattr(self, "closed", False)
+            or getattr(self, "compact_experience_mode", False)
+            or getattr(self, "console_collapsed", False)
+            or getattr(self, "controls_frame", None) is None
+            or getattr(self, "console_container", None) is None
+        ):
+            return
+        if getattr(self, "console_height_after_id", None) is not None:
+            try:
+                self.root.after_cancel(self.console_height_after_id)
+            except tk.TclError:
+                pass
+        try:
+            self.console_height_after_id = self.root.after(20, self._sync_console_height_to_left_panel)
+        except tk.TclError:
+            self.console_height_after_id = None
+
+    def _sync_console_height_to_left_panel(self) -> None:
+        self.console_height_after_id = None
+        if self.closed or self.compact_experience_mode or self.console_collapsed:
+            return
+        if self.controls_frame is None or self.console_container is None:
+            return
+        try:
+            self.root.update_idletasks()
+            left_height = max(int(self.controls_frame.winfo_reqheight()), int(self.controls_frame.winfo_height()))
+            if left_height <= 0:
+                return
+            console_height = max(120, left_height - 54)
+            if self.console_section is not None:
+                self.console_section.configure(height=left_height)
+            self.console_container.configure(width=CONSOLE_MIN_WIDTH, height=console_height)
+            self.console_container.grid_configure(sticky="nsew")
+        except tk.TclError:
+            return
 
     def _build_section(
         self,
@@ -1282,6 +1353,12 @@ class AutoPotionSettingsGui:
             except tk.TclError:
                 pass
             self.console_resize_after_id = None
+        if self.console_height_after_id is not None:
+            try:
+                self.root.after_cancel(self.console_height_after_id)
+            except tk.TclError:
+                pass
+            self.console_height_after_id = None
         self.closed = True
         self.root.destroy()
 
@@ -1653,6 +1730,7 @@ class AutoPotionSettingsGui:
             self.experience_toggle_hotkey.get().strip() or self.settings.experience_toggle_hotkey
         )
         self.settings.console_collapsed = self.console_collapsed
+        self.settings.combo_group_collapsed = self.combo_group_collapsed
         self.settings.compact_experience_mode = self.compact_experience_mode
         self.settings.window_topmost = self.window_topmost
 
@@ -1690,18 +1768,17 @@ class AutoPotionSettingsGui:
 
     def set_experience_snapshot(self, snapshot: ExperienceSnapshot) -> None:
         percent = "" if snapshot.current_percent is None else f" ({snapshot.current_percent:.2f}%)"
-        self.exp_current_status.set(f"EXP：{format_exp(snapshot.current_exp)}{percent}")
+        ocr_success = format_ocr_success_rate(snapshot.ocr_success_count, snapshot.ocr_attempt_count)
+        self.exp_current_status.set(f"EXP：{format_exp(snapshot.current_exp)}{percent}    OCR：{ocr_success}")
         self.exp_rate_5m_status.set(f"5m：{format_exp_rate(snapshot.xp_per_5m)}")
         self.exp_rate_10m_status.set(f"10m：{format_exp_rate(snapshot.xp_per_10m)}")
         self.exp_rate_1h_status.set(f"1h：{format_exp_rate(snapshot.xp_per_hour)}")
         self.exp_eta_status.set(f"升級預估：{format_eta(snapshot.eta_seconds)}")
-        self.exp_ocr_success_status.set(
-            f"OCR：{format_ocr_success_rate(snapshot.ocr_success_count, snapshot.ocr_attempt_count)}"
-        )
         self.exp_reader_status.set(f"狀態：{snapshot.status}")
 
     def set_status(self, message: str) -> None:
         self.status.set(message)
+        self.runtime_status_message.set(f"狀態：{message or '--'}")
 
     def set_runtime_info(
         self,
@@ -1718,9 +1795,6 @@ class AutoPotionSettingsGui:
         if len(foreground_label) > 24:
             foreground_label = foreground_label[:23] + "..."
         self.runtime_foreground_status.set(f"前景：{foreground_label}")
-        self.runtime_macro_status.set(f"巨集：{macro_status or '--'}")
-        self.runtime_held_keys_status.set(f"按住：{held_keys or '--'}")
-        self.runtime_last_action_status.set(f"最近動作：{last_action or '--'}")
 
     def show_toggle_notice(self, message: str) -> None:
         if self.closed:

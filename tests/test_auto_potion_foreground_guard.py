@@ -4,7 +4,13 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 from maple_star.controller import AutoPotionController, ExperienceOcrJob
-from maple_star.constants import ASYNC_KEY_DOWN_MASK, BAR_CONFIRM_CAPTURE_ATTEMPTS, BAR_TRANSIENT_CAPTURE_ATTEMPTS
+from maple_star.constants import (
+    ASYNC_KEY_DOWN_MASK,
+    BAR_CONFIRM_CAPTURE_ATTEMPTS,
+    BAR_TRANSIENT_CAPTURE_ATTEMPTS,
+    EXPERIENCE_BURST_CAPTURE_ATTEMPTS,
+    EXPERIENCE_BURST_CAPTURE_INTERVAL_SECONDS,
+)
 from maple_star.experience import ExperienceSnapshot, ExperienceTextReading
 from maple_star.settings import AutoPotionSettings
 
@@ -37,13 +43,14 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.gameplay_hud_active = False
         controller.control_hotkeys_suppressed_until_release = False
         controller.last_action = "啟動"
+        controller.experience_ocr_burst = None
         controller._log_unstable_bar = Mock()
         controller._play_toggle_beep = Mock()
         controller._capture_bar_percent = Mock(return_value=25.0)
         controller._refresh_gameplay_hud_state = Mock(return_value=True)
         return controller
 
-    def test_experience_capture_submits_reader_without_runtime_templates(self):
+    def test_experience_capture_submits_burst_reader_without_runtime_templates(self):
         class ImmediateExecutor:
             def submit(self, fn, *args, **kwargs):
                 self.call = (fn, args, kwargs)
@@ -64,7 +71,45 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         controller._update_experience_efficiency(5.0)
 
+        self.assertFalse(hasattr(controller.experience_ocr_executor, "call"))
+        for index in range(1, EXPERIENCE_BURST_CAPTURE_ATTEMPTS):
+            controller._update_experience_efficiency(5.0 + EXPERIENCE_BURST_CAPTURE_INTERVAL_SECONDS * index)
+
         self.assertEqual(controller.experience_ocr_executor.call[2], {})
+        submitted_fn, submitted_args, _submitted_kwargs = controller.experience_ocr_executor.call
+        self.assertEqual(submitted_fn, controller.experience_reader.read_burst)
+        self.assertEqual(len(submitted_args[0]), EXPERIENCE_BURST_CAPTURE_ATTEMPTS)
+
+    def test_experience_capture_submits_all_roi_candidates_for_each_burst_frame(self):
+        class ImmediateExecutor:
+            def submit(self, fn, *args, **kwargs):
+                self.call = (fn, args, kwargs)
+                return Mock()
+
+        controller = self.make_controller([])
+        image = np.zeros((32, 420, 4), dtype=np.uint8)
+        controller.experience_ocr_job = None
+        controller.next_experience_capture_at = 0.0
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.samples = []
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot()
+        controller.experience_reader = Mock()
+        controller.experience_ocr_executor = ImmediateExecutor()
+        controller.bottom_bar_regions = {
+            "hp": (100, 700, 250, 24),
+            "mp": (400, 700, 250, 24),
+        }
+        controller._foreground_client_bounds = Mock(return_value=(0, 0, 1000, 800))
+        controller.sct = Mock()
+        controller.sct.grab.return_value = image
+
+        for index in range(EXPERIENCE_BURST_CAPTURE_ATTEMPTS):
+            controller._update_experience_efficiency(5.0 + EXPERIENCE_BURST_CAPTURE_INTERVAL_SECONDS * index)
+
+        submitted_fn, submitted_args, _submitted_kwargs = controller.experience_ocr_executor.call
+        self.assertEqual(submitted_fn, controller.experience_reader.read_burst)
+        self.assertEqual(len(submitted_args[0]), EXPERIENCE_BURST_CAPTURE_ATTEMPTS * 2)
+        self.assertEqual(controller.sct.grab.call_count, EXPERIENCE_BURST_CAPTURE_ATTEMPTS * 2)
 
     def test_actions_require_scripts_enabled_and_gameplay_hud(self):
         controller = self.make_controller([])
@@ -504,6 +549,36 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.gui.set_experience_snapshot.assert_called_once()
         print_mock.assert_not_called()
 
+    def test_experience_ocr_does_not_use_merged_text_as_initial_baseline(self):
+        class DoneFuture:
+            def done(self):
+                return True
+
+            def result(self):
+                return ExperienceTextReading(
+                    current_exp=4266438,
+                    percent=94.86,
+                    text="4266438194.86",
+                    confidence=0.91,
+                    success=True,
+                    needs_bar_percent_guard=True,
+                )
+
+        controller = self.make_controller([])
+        controller.experience_ocr_job = ExperienceOcrJob(submitted_at=0.0, future=DoneFuture())
+        controller.next_experience_capture_at = 0.0
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.samples = []
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot(sample_count=0)
+
+        with patch("builtins.print"):
+            self.assertTrue(controller._process_experience_ocr_job(8.0))
+
+        controller.experience_tracker.add_reading.assert_not_called()
+        controller.experience_tracker.record_ocr_result.assert_called_once_with(False)
+        snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
+        self.assertEqual(snapshot.status, "等待明確 EXP 樣本")
+
     def test_experience_ocr_failure_keeps_business_status_and_logs_raw_text(self):
         class DoneFuture:
             def done(self):
@@ -610,6 +685,76 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertGreaterEqual(top, 1053)
         self.assertLess(width, 1048 - 486)
         self.assertGreaterEqual(height, 14)
+
+    def test_experience_text_regions_include_wider_fallback_roi(self):
+        controller = self.make_controller([])
+        controller.bottom_bar_regions = {
+            "hp": (100, 700, 250, 24),
+            "mp": (400, 700, 250, 24),
+        }
+        controller._foreground_client_bounds = Mock(return_value=(0, 0, 1000, 800))
+
+        regions = controller._experience_text_regions()
+
+        self.assertEqual(len(regions), 2)
+        primary, wide = regions
+        self.assertLess(wide[0], primary[0])
+        self.assertGreaterEqual(wide[0] + wide[2], primary[0] + primary[2])
+        self.assertGreaterEqual(wide[3], primary[3])
+
+    def test_bottom_bar_search_areas_try_full_client_before_16_9_crop(self):
+        controller = self.make_controller([])
+
+        areas = controller._bottom_bar_search_areas((0, 0, 1440, 1080))
+
+        self.assertGreaterEqual(len(areas), 2)
+        self.assertEqual(areas[0].reference_width, 1440)
+        self.assertEqual(areas[0].reference_height, 1080)
+        self.assertGreaterEqual(areas[0].top + areas[0].height, 1080)
+        self.assertEqual(areas[1].reference_width, 1440)
+        self.assertLess(areas[1].reference_height, 1080)
+
+    def test_bottom_bar_pair_accepts_tall_non_16_9_hud_geometry(self):
+        controller = self.make_controller([])
+
+        regions = controller._bottom_bar_pair_regions_from_candidates(
+            hp_candidates=[(260, 116, 178)],
+            mp_candidates=[(494, 116, 178)],
+            hp_mask=None,
+            mp_mask=None,
+            search_left=230,
+            search_top=907,
+            search_width=1008,
+            search_height=173,
+            client_width=1440,
+            client_height=1080,
+        )
+
+        self.assertEqual(set(regions), {"hp", "mp"})
+        self.assertLess(regions["hp"][0], regions["mp"][0])
+        self.assertGreaterEqual(regions["hp"][1], 907)
+        self.assertGreaterEqual(regions["mp"][1], 907)
+
+    def test_find_bottom_bar_pair_regions_detects_full_height_non_16_9_bottom_hud(self):
+        controller = self.make_controller([])
+        controller.bottom_bar_regions = {}
+        controller.bottom_bar_track_regions = {}
+        controller.bottom_bar_regions_at = -999.0
+        controller._foreground_client_bounds = Mock(return_value=(0, 0, 1440, 1080))
+        image = np.zeros((173, 1008, 4), dtype=np.uint8)
+        image[:, :, 3] = 255
+        image[112:125, 260:438, :3] = (30, 60, 220)
+        image[112:125, 494:672, :3] = (220, 110, 40)
+        controller.sct = Mock()
+        controller.sct.grab.return_value = image
+
+        regions = controller._find_bottom_bar_pair_regions(use_cache=False)
+
+        self.assertEqual(set(regions), {"hp", "mp"})
+        self.assertLess(regions["hp"][0], regions["mp"][0])
+        self.assertGreaterEqual(regions["hp"][1], 1015)
+        self.assertGreaterEqual(regions["mp"][1], 1015)
+        controller.sct.grab.assert_called_once()
 
     def test_bottom_bar_pair_rejects_right_side_shortcut_colors(self):
         controller = self.make_controller([])

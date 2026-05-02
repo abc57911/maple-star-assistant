@@ -42,6 +42,8 @@ from .constants import (
     BAR_UNSTABLE_LOG_INTERVAL_SECONDS,
     BAR_VERTICAL_BODY_ROW_DENSITY,
     DEFAULT_CAPTURE_INTERVAL_SECONDS,
+    EXPERIENCE_BURST_CAPTURE_ATTEMPTS,
+    EXPERIENCE_BURST_CAPTURE_INTERVAL_SECONDS,
     EXPERIENCE_CAPTURE_INTERVAL_SECONDS,
     FADE_GUARD_BRIGHT_PIXEL_RATIO,
     FADE_GUARD_MEAN_LUMINANCE,
@@ -92,6 +94,9 @@ BAR_PREVIEW_RENDER_SETTLE_SECONDS = 0.18
 EXPERIENCE_OCR_ERROR_LOG_INTERVAL_SECONDS = 10.0
 EXPERIENCE_TEXT_LEFT_RATIO = 0.44
 EXPERIENCE_TEXT_HEIGHT_RATIO = 1.35
+EXPERIENCE_WIDE_TEXT_LEFT_RATIO = 0.34
+EXPERIENCE_WIDE_TEXT_RIGHT_PADDING_RATIO = 0.08
+EXPERIENCE_WIDE_TEXT_HEIGHT_RATIO = 1.65
 BAR_PAIR_HP_MAX_LEFT_RATIO = 0.48
 BAR_PAIR_MIN_GAP_RATIO = 0.10
 BAR_PAIR_MAX_GAP_RATIO = 0.24
@@ -113,6 +118,15 @@ class BarDetectionDebug:
 class ExperienceOcrJob:
     submitted_at: float
     future: Future[ExperienceTextReading]
+
+
+@dataclass
+class ExperienceOcrBurst:
+    started_at: float
+    next_capture_at: float
+    regions: list[tuple[int, int, int, int]]
+    images: list[np.ndarray]
+    capture_count: int
 
 
 @dataclass(frozen=True)
@@ -239,6 +253,7 @@ class AutoPotionController:
         self.experience_reader = PaddleExperienceTextReader()
         self.experience_ocr_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="maple-exp-ocr")
         self.experience_ocr_job: ExperienceOcrJob | None = None
+        self.experience_ocr_burst: ExperienceOcrBurst | None = None
         self.last_experience_ocr_error_at = -999.0
         self.last_experience_ocr_error_reason = ""
         self.last_target_hwnd: int = 0
@@ -691,23 +706,71 @@ class AutoPotionController:
         if self._process_experience_ocr_job(now):
             return
 
+        if self._continue_experience_ocr_burst(now):
+            return
+
         if now < self.next_experience_capture_at:
             self.gui.set_experience_snapshot(self.experience_tracker.snapshot(now))
             return
 
-        region = self._experience_text_region()
-        if region is None:
+        regions = self._experience_text_regions()
+        if not regions:
             self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
             snapshot = self.experience_tracker.snapshot(now)
             snapshot.status = "找不到 EXP 區域，保留統計" if snapshot.sample_count else "找不到 EXP 區域"
             self.gui.set_experience_snapshot(snapshot)
             return
 
+        images = self._capture_experience_text_images(regions)
+        if EXPERIENCE_BURST_CAPTURE_ATTEMPTS <= 1:
+            self._submit_experience_ocr_burst(now, images)
+            return
+
+        self.experience_ocr_burst = ExperienceOcrBurst(
+            started_at=now,
+            next_capture_at=now + EXPERIENCE_BURST_CAPTURE_INTERVAL_SECONDS,
+            regions=regions,
+            images=images,
+            capture_count=1,
+        )
+        snapshot = self.experience_tracker.snapshot(now)
+        snapshot.status = f"擷取經驗樣本中 1/{EXPERIENCE_BURST_CAPTURE_ATTEMPTS}"
+        self.gui.set_experience_snapshot(snapshot)
+
+    def _continue_experience_ocr_burst(self, now: float) -> bool:
+        burst = getattr(self, "experience_ocr_burst", None)
+        if burst is None:
+            return False
+        if now < burst.next_capture_at:
+            snapshot = self.experience_tracker.snapshot(now)
+            snapshot.status = f"擷取經驗樣本中 {burst.capture_count}/{EXPERIENCE_BURST_CAPTURE_ATTEMPTS}"
+            self.gui.set_experience_snapshot(snapshot)
+            return True
+
+        burst.images.extend(self._capture_experience_text_images(burst.regions))
+        burst.capture_count += 1
+        if burst.capture_count < EXPERIENCE_BURST_CAPTURE_ATTEMPTS:
+            burst.next_capture_at = now + EXPERIENCE_BURST_CAPTURE_INTERVAL_SECONDS
+            snapshot = self.experience_tracker.snapshot(now)
+            snapshot.status = f"擷取經驗樣本中 {burst.capture_count}/{EXPERIENCE_BURST_CAPTURE_ATTEMPTS}"
+            self.gui.set_experience_snapshot(snapshot)
+            return True
+
+        self.experience_ocr_burst = None
+        self._submit_experience_ocr_burst(now, burst.images)
+        return True
+
+    def _capture_experience_text_image(self, region: tuple[int, int, int, int]) -> np.ndarray:
         left, top, width, height = region
-        image = np.asarray(self.sct.grab({"left": left, "top": top, "width": width, "height": height}))
+        return np.asarray(self.sct.grab({"left": left, "top": top, "width": width, "height": height})).copy()
+
+    def _capture_experience_text_images(self, regions: list[tuple[int, int, int, int]]) -> list[np.ndarray]:
+        return [self._capture_experience_text_image(region) for region in regions]
+
+    def _submit_experience_ocr_burst(self, now: float, images: list[np.ndarray]) -> None:
         self.experience_ocr_job = ExperienceOcrJob(
             submitted_at=now,
-            future=self.experience_ocr_executor.submit(self.experience_reader.read, image.copy()),
+            future=self.experience_ocr_executor.submit(self.experience_reader.read_burst, [image.copy() for image in images]),
         )
         self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
         snapshot = self.experience_tracker.snapshot(now)
@@ -734,6 +797,16 @@ class AutoPotionController:
 
         self._log_experience_ocr_reading(reading)
         if reading.success and reading.current_exp is not None:
+            tracker_samples = getattr(self.experience_tracker, "samples", None)
+            has_tracker_samples = not isinstance(tracker_samples, list) or bool(tracker_samples)
+            if reading.needs_bar_percent_guard and not has_tracker_samples:
+                self.experience_tracker.record_ocr_result(False)
+                self._log_experience_ocr_error(now, "EXP 合併格式需既有基準確認", reading.text)
+                snapshot = self.experience_tracker.snapshot(now)
+                if snapshot.sample_count == 0:
+                    snapshot.status = "等待明確 EXP 樣本"
+                self.gui.set_experience_snapshot(snapshot)
+                return True
             if not self.experience_tracker.add_reading(now, reading.current_exp, reading.percent):
                 self.experience_tracker.record_ocr_result(False)
                 self._log_experience_sample_rejection(now, self.experience_tracker.last_status, reading)
@@ -754,6 +827,7 @@ class AutoPotionController:
         return True
 
     def _stop_experience_ocr_job(self) -> None:
+        self.experience_ocr_burst = None
         if self.experience_ocr_job is None:
             return
         self.experience_ocr_job.future.cancel()
@@ -804,6 +878,17 @@ class AutoPotionController:
             f"exp={current_exp} | percent={percent}"
         )
 
+    def _experience_text_regions(self) -> list[tuple[int, int, int, int]]:
+        primary = self._experience_text_region()
+        if primary is None:
+            return []
+
+        regions = [primary]
+        wide = self._wide_experience_text_region()
+        if wide is not None and wide not in regions:
+            regions.append(wide)
+        return regions
+
     def _experience_text_region(self) -> tuple[int, int, int, int] | None:
         hp_region = self.bottom_bar_regions.get("hp")
         mp_region = self.bottom_bar_regions.get("mp")
@@ -822,6 +907,39 @@ class AutoPotionController:
         region_bottom = min(client_bottom, top + max(14, round(bar_height * EXPERIENCE_TEXT_HEIGHT_RATIO)))
         region_left = max(client_left, left + round(base_width * EXPERIENCE_TEXT_LEFT_RATIO))
         region_right = min(client_right, right)
+        if region_right - region_left < 20 or region_bottom - region_top < 8:
+            return None
+        return (
+            region_left,
+            region_top,
+            region_right - region_left,
+            region_bottom - region_top,
+        )
+
+    def _wide_experience_text_region(self) -> tuple[int, int, int, int] | None:
+        bottom_bar_regions = getattr(self, "bottom_bar_regions", None)
+        if not isinstance(bottom_bar_regions, dict):
+            return None
+        hp_region = bottom_bar_regions.get("hp")
+        mp_region = bottom_bar_regions.get("mp")
+        if hp_region is None or mp_region is None:
+            return None
+
+        client_left, client_top, client_width, client_height = self._foreground_client_bounds()
+        client_right = client_left + client_width
+        client_bottom = client_top + client_height
+        left = min(hp_region[0], mp_region[0])
+        right = max(hp_region[0] + hp_region[2], mp_region[0] + mp_region[2])
+        top = max(hp_region[1] + hp_region[3], mp_region[1] + mp_region[3])
+        base_width = max(1, right - left)
+        bar_height = max(hp_region[3], mp_region[3])
+        region_top = max(client_top, top)
+        region_bottom = min(
+            client_bottom,
+            top + max(16, round(bar_height * EXPERIENCE_WIDE_TEXT_HEIGHT_RATIO)),
+        )
+        region_left = max(client_left, left + round(base_width * EXPERIENCE_WIDE_TEXT_LEFT_RATIO))
+        region_right = min(client_right, right + round(base_width * EXPERIENCE_WIDE_TEXT_RIGHT_PADDING_RATIO))
         if region_right - region_left < 20 or region_bottom - region_top < 8:
             return None
         return (
@@ -1033,6 +1151,12 @@ class AutoPotionController:
     def _bottom_bar_search_areas(self, client_bounds: tuple[int, int, int, int]) -> list[HudSearchArea]:
         areas: list[HudSearchArea] = []
         client_left, client_top, client_width, client_height = client_bounds
+        areas.append(self._bottom_bar_search_area_from_content_bounds(
+            client_left,
+            client_top,
+            client_width,
+            client_height,
+        ))
         gameplay_left, gameplay_top, gameplay_width, gameplay_height = self._gameplay_content_bounds(client_bounds)
         if (gameplay_left, gameplay_top, gameplay_width, gameplay_height) != client_bounds:
             areas.append(self._bottom_bar_search_area_from_content_bounds(
@@ -1041,12 +1165,6 @@ class AutoPotionController:
                 gameplay_width,
                 gameplay_height,
             ))
-        areas.append(self._bottom_bar_search_area_from_content_bounds(
-            client_left,
-            client_top,
-            client_width,
-            client_height,
-        ))
 
         unique: list[HudSearchArea] = []
         seen: set[tuple[int, int, int, int]] = set()

@@ -14,6 +14,8 @@ from typing import Any, Iterable
 import cv2
 import numpy as np
 
+from .constants import EXPERIENCE_BURST_CONSENSUS_MIN_COUNT
+
 
 EXP_SAMPLE_HISTORY_SECONDS = 3600.0
 EXP_RATE_MIN_SECONDS = 5.0
@@ -103,6 +105,7 @@ class ExperienceTextReading:
     confidence: float = 0.0
     success: bool = False
     reason: str = "尚未辨識"
+    needs_bar_percent_guard: bool = False
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,7 @@ class ExperienceTextCandidate:
     percent_span: tuple[int, int]
     structure_score: float
     repaired_percent: bool = False
+    needs_bar_percent_guard: bool = False
 
 
 @dataclass
@@ -786,6 +790,59 @@ class PaddleExperienceTextReader:
         self.ocr: Any | None = None
         self.unavailable_reason: str | None = None
 
+    def read_burst(self, images: Iterable[np.ndarray]) -> ExperienceTextReading:
+        readings = [self.read(image) for image in images]
+        if not readings:
+            return ExperienceTextReading(reason="EXP burst 未取得影像")
+
+        successes = [
+            reading
+            for reading in readings
+            if reading.success and reading.current_exp is not None and reading.percent is not None
+        ]
+        if not successes:
+            return max(readings, key=lambda reading: reading.confidence)
+
+        groups: dict[tuple[int, float], list[ExperienceTextReading]] = {}
+        for reading in successes:
+            assert reading.current_exp is not None
+            assert reading.percent is not None
+            groups.setdefault((reading.current_exp, round(reading.percent, 2)), []).append(reading)
+
+        consensus_groups = [
+            group
+            for group in groups.values()
+            if len(group) >= EXPERIENCE_BURST_CONSENSUS_MIN_COUNT
+        ]
+        if consensus_groups:
+            ranked_groups = sorted(
+                consensus_groups,
+                key=lambda group: (len(group), max(reading.confidence for reading in group)),
+                reverse=True,
+            )
+            best_group = ranked_groups[0]
+            if len(ranked_groups) > 1 and len(best_group) == len(ranked_groups[1]):
+                best_reading = max(
+                    (reading for group in ranked_groups for reading in group),
+                    key=lambda reading: reading.confidence,
+                )
+                return ExperienceTextReading(
+                    text=best_reading.text,
+                    confidence=best_reading.confidence,
+                    reason="EXP burst 結果不一致",
+                )
+            return max(best_group, key=lambda reading: reading.confidence)
+
+        if len(groups) == 1:
+            return max(successes, key=lambda reading: reading.confidence)
+
+        best_reading = max(successes, key=lambda reading: reading.confidence)
+        return ExperienceTextReading(
+            text=best_reading.text,
+            confidence=best_reading.confidence,
+            reason="EXP burst 結果不一致",
+        )
+
     def read(self, image: np.ndarray) -> ExperienceTextReading:
         if not self._ensure_ocr():
             return ExperienceTextReading(reason=self.unavailable_reason or "PaddleOCR 尚未初始化")
@@ -942,6 +999,12 @@ def _apply_experience_bar_percent_guard(
     bar_percent: float | None,
 ) -> ExperienceTextReading:
     if not reading.success or reading.percent is None or bar_percent is None:
+        if reading.success and reading.needs_bar_percent_guard:
+            return ExperienceTextReading(
+                text=reading.text,
+                confidence=reading.confidence,
+                reason="EXP 百分比需要綠條確認",
+            )
         return reading
     if abs(reading.percent - bar_percent) <= EXP_OCR_BAR_PERCENT_TOLERANCE:
         return reading
@@ -976,6 +1039,7 @@ def reading_from_paddle_result(result: object) -> ExperienceTextReading:
         confidence=confidence,
         success=True,
         reason="OK",
+        needs_bar_percent_guard=candidate.needs_bar_percent_guard,
     )
 
 
@@ -1142,6 +1206,7 @@ def _experience_text_candidates(text: str) -> list[ExperienceTextCandidate]:
                     )
                 )
     candidates.extend(_missing_open_bracket_experience_text_candidates(compact))
+    candidates.extend(_merged_exp_percent_text_candidates(compact))
     return candidates
 
 
@@ -1192,6 +1257,45 @@ def _missing_open_bracket_experience_text_candidates(compact: str) -> list[Exper
             repaired_percent=True,
         )
     ]
+
+
+def _merged_exp_percent_text_candidates(compact: str) -> list[ExperienceTextCandidate]:
+    body = re.sub(r"^EXP[:：]?", "", compact, flags=re.IGNORECASE)
+    if any(char in body for char in "[]()%Xx"):
+        return []
+    match = re.fullmatch(r"([0-9]{5,})([0-9]{2})[\.,]([0-9]{2})", body)
+    if match is None:
+        return []
+
+    exp_digits = match.group(1)
+    percent_integer = int(match.group(2))
+    percent = float(f"{percent_integer}.{match.group(3)}")
+    if not 10.0 <= percent <= 99.99:
+        return []
+    candidates: list[ExperienceTextCandidate] = []
+    if exp_digits.endswith("1") and len(exp_digits) >= 6:
+        repaired_exp_digits = exp_digits[:-1]
+        candidates.append(
+            ExperienceTextCandidate(
+                current_exp=int(repaired_exp_digits),
+                percent=percent,
+                percent_span=match.span(2),
+                structure_score=4.4 + min(len(repaired_exp_digits), 8) / 10.0,
+                repaired_percent=True,
+                needs_bar_percent_guard=True,
+            )
+        )
+    candidates.append(
+        ExperienceTextCandidate(
+            current_exp=int(exp_digits),
+            percent=percent,
+            percent_span=match.span(2),
+            structure_score=3.6 + min(len(exp_digits), 8) / 10.0,
+            repaired_percent=True,
+            needs_bar_percent_guard=True,
+        )
+    )
+    return candidates
 
 
 def _strict_experience_parse_failure_reason(text: str) -> str:
