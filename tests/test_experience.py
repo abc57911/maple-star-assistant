@@ -88,6 +88,58 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(reading.reason, "EXP burst 結果不一致")
         self.assertEqual(reading.confidence, 0.96)
 
+    def test_paddle_reader_burst_frames_accepts_temporal_progression(self):
+        reader = PaddleExperienceTextReader()
+        reader.read = Mock(
+            side_effect=[
+                ExperienceTextReading(current_exp=3796880, percent=99.08, text="3796880[99.08%]", confidence=0.91, success=True),
+                ExperienceTextReading(current_exp=3804488, percent=99.27, text="3804488[99.27%]", confidence=0.88, success=True),
+                ExperienceTextReading(current_exp=3805756, percent=99.31, text="3805756[99.31%]", confidence=0.89, success=True),
+            ]
+        )
+
+        reading = reader.read_burst_frames([[np.zeros((1, 1, 3), dtype=np.uint8)] for _ in range(3)])
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 3805756)
+        self.assertEqual(reading.percent, 99.31)
+
+    def test_paddle_reader_burst_frames_prefers_latest_progression_over_old_consensus(self):
+        reader = PaddleExperienceTextReader()
+        reader.read = Mock(
+            side_effect=[
+                ExperienceTextReading(current_exp=3696708, percent=96.46, text="3696708[96.46%]", confidence=0.96, success=True),
+                ExperienceTextReading(current_exp=3696708, percent=96.46, text="3696708[96.46%]", confidence=0.95, success=True),
+                ExperienceTextReading(current_exp=3704316, percent=96.66, text="3704316[96.66%]", confidence=0.89, success=True),
+            ]
+        )
+
+        reading = reader.read_burst_frames([[np.zeros((1, 1, 3), dtype=np.uint8)] for _ in range(3)])
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 3704316)
+        self.assertEqual(reading.percent, 96.66)
+
+    def test_paddle_reader_burst_frames_prefers_primary_roi_when_wide_conflicts(self):
+        reader = PaddleExperienceTextReader()
+        reader.read = Mock(
+            side_effect=[
+                ExperienceTextReading(current_exp=3796880, percent=99.08, text="3796880[99.08%]", confidence=0.88, success=True),
+                ExperienceTextReading(current_exp=37968801, percent=99.08, text="37968801[99.08%]", confidence=0.98, success=True),
+                ExperienceTextReading(current_exp=3804488, percent=99.27, text="3804488[99.27%]", confidence=0.89, success=True),
+                ExperienceTextReading(current_exp=38044881, percent=99.27, text="38044881[99.27%]", confidence=0.98, success=True),
+                ExperienceTextReading(current_exp=3805756, percent=99.31, text="3805756[99.31%]", confidence=0.90, success=True),
+                ExperienceTextReading(current_exp=38057561, percent=99.31, text="38057561[99.31%]", confidence=0.98, success=True),
+            ]
+        )
+        frames = [[np.zeros((1, 1, 3), dtype=np.uint8), np.zeros((1, 1, 3), dtype=np.uint8)] for _ in range(3)]
+
+        reading = reader.read_burst_frames(frames)
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 3805756)
+        self.assertEqual(reading.percent, 99.31)
+
     def test_paddle_reader_burst_keeps_single_success_when_other_frames_fail(self):
         reader = PaddleExperienceTextReader()
         reader.read = Mock(
@@ -820,7 +872,7 @@ class ExperienceTests(unittest.TestCase):
         self.assertFalse(tracker.add_reading(8.0, 132553, 18.36))
         baseline = tracker.snapshot(8.0)
 
-        self.assertIsNone(baseline.current_exp)
+        self.assertEqual(baseline.current_exp, 18886119)
         self.assertEqual(baseline.sample_count, 1)
         self.assertIsNone(baseline.xp_per_5m)
         self.assertTrue(baseline.status.startswith("樣本拒絕：基準修正候選"))
@@ -879,14 +931,18 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(snapshot.current_percent, 88.73)
         self.assertEqual(snapshot.sample_count, 2)
 
-    def test_tracker_does_not_display_unconfirmed_first_sample(self):
+    def test_tracker_displays_baseline_sample_before_rate_is_available(self):
         tracker = ExperienceEfficiencyTracker()
         self.assertTrue(tracker.add_reading(0.0, 2425901, 23.13))
 
         snapshot = tracker.snapshot(0.0)
 
-        self.assertIsNone(snapshot.current_exp)
-        self.assertIsNone(snapshot.current_percent)
+        self.assertEqual(snapshot.current_exp, 2425901)
+        self.assertEqual(snapshot.current_percent, 23.13)
+        self.assertIsNone(snapshot.xp_per_5m)
+        self.assertIsNone(snapshot.xp_per_10m)
+        self.assertIsNone(snapshot.xp_per_hour)
+        self.assertIsNone(snapshot.eta_seconds)
         self.assertEqual(snapshot.sample_count, 1)
         self.assertEqual(snapshot.status, "校準 EXP 基準")
 

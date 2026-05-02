@@ -101,6 +101,7 @@ def show_already_running_message() -> None:
 
 
 def main() -> int:
+    configure_debug_logging(reset=True)
     if not acquire_single_instance():
         show_already_running_message()
         return 0

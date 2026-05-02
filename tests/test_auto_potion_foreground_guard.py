@@ -38,6 +38,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.last_unstable_bar_at = -999.0
         controller.last_experience_ocr_error_at = -999.0
         controller.last_experience_ocr_error_reason = ""
+        controller.last_failed_experience_ocr_signature = None
         controller.emergency_stop_requested = False
         controller.scripts_enabled = True
         controller.gameplay_hud_active = False
@@ -77,8 +78,9 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         self.assertEqual(controller.experience_ocr_executor.call[2], {})
         submitted_fn, submitted_args, _submitted_kwargs = controller.experience_ocr_executor.call
-        self.assertEqual(submitted_fn, controller.experience_reader.read_burst)
+        self.assertEqual(submitted_fn, controller.experience_reader.read_burst_frames)
         self.assertEqual(len(submitted_args[0]), EXPERIENCE_BURST_CAPTURE_ATTEMPTS)
+        self.assertTrue(all(len(frame) == 1 for frame in submitted_args[0]))
 
     def test_experience_capture_submits_all_roi_candidates_for_each_burst_frame(self):
         class ImmediateExecutor:
@@ -107,9 +109,103 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             controller._update_experience_efficiency(5.0 + EXPERIENCE_BURST_CAPTURE_INTERVAL_SECONDS * index)
 
         submitted_fn, submitted_args, _submitted_kwargs = controller.experience_ocr_executor.call
-        self.assertEqual(submitted_fn, controller.experience_reader.read_burst)
-        self.assertEqual(len(submitted_args[0]), EXPERIENCE_BURST_CAPTURE_ATTEMPTS * 2)
+        self.assertEqual(submitted_fn, controller.experience_reader.read_burst_frames)
+        self.assertEqual(len(submitted_args[0]), EXPERIENCE_BURST_CAPTURE_ATTEMPTS)
+        self.assertTrue(all(len(frame) == 2 for frame in submitted_args[0]))
         self.assertEqual(controller.sct.grab.call_count, EXPERIENCE_BURST_CAPTURE_ATTEMPTS * 2)
+
+    def test_experience_ocr_signature_treats_identical_roi_as_similar(self):
+        controller = self.make_controller([])
+        image = np.zeros((24, 180, 4), dtype=np.uint8)
+        image[:, :, 3] = 255
+        image[7:15, 90:120, :3] = 255
+
+        first = controller._experience_ocr_image_signature([[image]])
+        second = controller._experience_ocr_image_signature([[image.copy()]])
+        changed = image.copy()
+        changed[7:15, 110:150, :3] = 0
+        changed[7:15, 130:160, :3] = 255
+        third = controller._experience_ocr_image_signature([[changed]])
+
+        self.assertTrue(controller._experience_ocr_signatures_are_similar(first, second))
+        self.assertFalse(controller._experience_ocr_signatures_are_similar(first, third))
+
+    def test_repeated_failed_experience_ocr_roi_skips_submit_without_counting_failure(self):
+        class ImmediateExecutor:
+            def submit(self, fn, *args, **kwargs):
+                self.call = (fn, args, kwargs)
+                return Mock()
+
+        controller = self.make_controller([])
+        image = np.zeros((24, 180, 4), dtype=np.uint8)
+        controller.experience_ocr_job = None
+        controller.next_experience_capture_at = 0.0
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot(sample_count=2, status="統計中")
+        controller.experience_reader = Mock()
+        controller.experience_ocr_executor = ImmediateExecutor()
+        controller.last_failed_experience_ocr_signature = controller._experience_ocr_image_signature([[image]])
+
+        controller._submit_experience_ocr_burst(9.0, [[image.copy()]])
+
+        self.assertFalse(hasattr(controller.experience_ocr_executor, "call"))
+        self.assertIsNone(controller.experience_ocr_job)
+        controller.experience_tracker.record_ocr_result.assert_not_called()
+        snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
+        self.assertEqual(snapshot.status, "OCR ROI 未變化，保留統計")
+        self.assertGreater(controller.next_experience_capture_at, 9.0)
+
+    def test_static_experience_roi_burst_skips_ocr_when_baseline_exists(self):
+        class ImmediateExecutor:
+            def submit(self, fn, *args, **kwargs):
+                self.call = (fn, args, kwargs)
+                return Mock()
+
+        controller = self.make_controller([])
+        image = np.zeros((24, 180, 4), dtype=np.uint8)
+        image[:, :, 3] = 255
+        image[7:15, 90:120, :3] = 255
+        controller.experience_ocr_job = None
+        controller.next_experience_capture_at = 0.0
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.samples = [object()]
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot(sample_count=1, status="統計中")
+        controller.experience_reader = Mock()
+        controller.experience_ocr_executor = ImmediateExecutor()
+
+        controller._submit_experience_ocr_burst(9.0, [[image], [image.copy()]])
+
+        self.assertFalse(hasattr(controller.experience_ocr_executor, "call"))
+        self.assertIsNone(controller.experience_ocr_job)
+        controller.experience_tracker.record_ocr_result.assert_not_called()
+        snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
+        self.assertEqual(snapshot.status, "EXP ROI 未變化，保留統計")
+        self.assertGreater(controller.next_experience_capture_at, 9.0)
+
+    def test_changed_failed_experience_ocr_roi_submits_again(self):
+        class ImmediateExecutor:
+            def submit(self, fn, *args, **kwargs):
+                self.call = (fn, args, kwargs)
+                return Mock()
+
+        controller = self.make_controller([])
+        image = np.zeros((24, 180, 4), dtype=np.uint8)
+        changed = image.copy()
+        changed[7:15, 120:160, :3] = 255
+        controller.experience_ocr_job = None
+        controller.next_experience_capture_at = 0.0
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot(sample_count=2, status="統計中")
+        controller.experience_reader = Mock()
+        controller.experience_ocr_executor = ImmediateExecutor()
+        controller.last_failed_experience_ocr_signature = controller._experience_ocr_image_signature([[image]])
+
+        controller._submit_experience_ocr_burst(9.0, [[changed]])
+
+        submitted_fn, _submitted_args, _submitted_kwargs = controller.experience_ocr_executor.call
+        self.assertEqual(submitted_fn, controller.experience_reader.read_burst_frames)
+        self.assertIsNotNone(controller.experience_ocr_job)
+        self.assertIsNotNone(controller.experience_ocr_job.image_signature)
 
     def test_actions_require_scripts_enabled_and_gameplay_hud(self):
         controller = self.make_controller([])
@@ -535,6 +631,9 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
                 )
 
         controller = self.make_controller([])
+        controller.last_failed_experience_ocr_signature = controller._experience_ocr_image_signature(
+            [[np.zeros((18, 140, 4), dtype=np.uint8)]]
+        )
         controller.experience_ocr_job = ExperienceOcrJob(submitted_at=0.0, future=DoneFuture())
         controller.next_experience_capture_at = 0.0
         controller.experience_tracker = Mock()
@@ -547,6 +646,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.experience_tracker.add_reading.assert_called_once_with(8.0, 132553, 18.36)
         controller.experience_tracker.record_ocr_result.assert_called_once_with(True)
         controller.gui.set_experience_snapshot.assert_called_once()
+        self.assertIsNone(controller.last_failed_experience_ocr_signature)
         print_mock.assert_not_called()
 
     def test_experience_ocr_does_not_use_merged_text_as_initial_baseline(self):
@@ -592,7 +692,12 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
                 )
 
         controller = self.make_controller([])
-        controller.experience_ocr_job = ExperienceOcrJob(submitted_at=0.0, future=DoneFuture())
+        image_signature = controller._experience_ocr_image_signature([[np.zeros((18, 140, 4), dtype=np.uint8)]])
+        controller.experience_ocr_job = ExperienceOcrJob(
+            submitted_at=0.0,
+            future=DoneFuture(),
+            image_signature=image_signature,
+        )
         controller.next_experience_capture_at = 0.0
         controller.experience_tracker = Mock()
         controller.experience_tracker.snapshot.return_value = ExperienceSnapshot(sample_count=2, status="統計中")
@@ -603,6 +708,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
         self.assertEqual(snapshot.status, "統計中")
         controller.experience_tracker.record_ocr_result.assert_called_once_with(False)
+        self.assertEqual(controller.last_failed_experience_ocr_signature, image_signature)
         printed = "\n".join(call.args[0] for call in print_mock.call_args_list)
         self.assertIn("1325531836", printed)
         self.assertIn("經驗效率 OCR 錯誤", printed)

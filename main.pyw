@@ -11,7 +11,7 @@ if __name__ == "__main__":
     try:
         from maple_star.debug_logging import configure_debug_logging, log_exception
 
-        configure_debug_logging()
+        configure_debug_logging(reset=True)
         from main import main
 
         raise SystemExit(main())

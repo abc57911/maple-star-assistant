@@ -296,8 +296,14 @@ class ExperienceEfficiencyTracker:
         if not self.samples:
             return self._snapshot_from_last(status=self.last_status)
         if self._has_only_baseline_sample():
-            snapshot = self._snapshot_from_last(status=self.last_status)
-            snapshot.sample_count = len(self.samples)
+            latest = self.samples[-1]
+            snapshot = ExperienceSnapshot(
+                current_exp=latest.current_exp,
+                current_percent=latest.percent,
+                sample_count=len(self.samples),
+                **self._ocr_snapshot_fields(),
+                status=self.last_status,
+            )
             self.last_snapshot = snapshot
             return snapshot
 
@@ -791,9 +797,16 @@ class PaddleExperienceTextReader:
         self.unavailable_reason: str | None = None
 
     def read_burst(self, images: Iterable[np.ndarray]) -> ExperienceTextReading:
+        return self.read_burst_frames([[image] for image in images])
+
+    def read_burst_frames(self, image_frames: Iterable[Iterable[np.ndarray]]) -> ExperienceTextReading:
+        frame_readings = [self._read_burst_frame(images) for images in image_frames]
+        return self._select_burst_reading(frame_readings)
+
+    def _read_burst_frame(self, images: Iterable[np.ndarray]) -> ExperienceTextReading:
         readings = [self.read(image) for image in images]
         if not readings:
-            return ExperienceTextReading(reason="EXP burst 未取得影像")
+            return ExperienceTextReading(reason="EXP burst frame 未取得影像")
 
         successes = [
             reading
@@ -808,6 +821,11 @@ class PaddleExperienceTextReader:
             assert reading.current_exp is not None
             assert reading.percent is not None
             groups.setdefault((reading.current_exp, round(reading.percent, 2)), []).append(reading)
+
+        if len(groups) > 1:
+            primary = readings[0]
+            if primary.success and primary.current_exp is not None and primary.percent is not None:
+                return primary
 
         consensus_groups = [
             group
@@ -842,6 +860,83 @@ class PaddleExperienceTextReader:
             confidence=best_reading.confidence,
             reason="EXP burst 結果不一致",
         )
+
+    def _select_burst_reading(self, readings: list[ExperienceTextReading]) -> ExperienceTextReading:
+        if not readings:
+            return ExperienceTextReading(reason="EXP burst 未取得影像")
+
+        successes = [
+            reading
+            for reading in readings
+            if reading.success and reading.current_exp is not None and reading.percent is not None
+        ]
+        if not successes:
+            return max(readings, key=lambda reading: reading.confidence)
+
+        groups: dict[tuple[int, float], list[ExperienceTextReading]] = {}
+        for reading in successes:
+            assert reading.current_exp is not None
+            assert reading.percent is not None
+            groups.setdefault((reading.current_exp, round(reading.percent, 2)), []).append(reading)
+
+        if len(groups) > 1:
+            progression = self._burst_progression_reading(successes)
+            if progression is not None:
+                return progression
+        if len(groups) == 1:
+            return max(successes, key=lambda reading: reading.confidence)
+
+        consensus_groups = [
+            group
+            for group in groups.values()
+            if len(group) >= EXPERIENCE_BURST_CONSENSUS_MIN_COUNT
+        ]
+        if consensus_groups:
+            ranked_groups = sorted(
+                consensus_groups,
+                key=lambda group: (len(group), max(reading.confidence for reading in group)),
+                reverse=True,
+            )
+            best_group = ranked_groups[0]
+            if len(ranked_groups) == 1 or len(best_group) > len(ranked_groups[1]):
+                return max(best_group, key=lambda reading: reading.confidence)
+
+        best_reading = max(successes, key=lambda reading: reading.confidence)
+        return ExperienceTextReading(
+            text=best_reading.text,
+            confidence=best_reading.confidence,
+            reason="EXP burst 結果不一致",
+        )
+
+    def _burst_progression_reading(self, readings: list[ExperienceTextReading]) -> ExperienceTextReading | None:
+        if not readings:
+            return None
+        if len(readings) == 1:
+            return readings[0]
+
+        previous: ExperienceTextReading | None = None
+        estimates: list[float] = []
+        for reading in readings:
+            if reading.current_exp is None or reading.percent is None:
+                return None
+            if previous is not None:
+                if previous.current_exp is None or previous.percent is None:
+                    return None
+                if reading.current_exp < previous.current_exp:
+                    return None
+                if reading.percent < previous.percent - EXP_PERCENT_REGRESSION_TOLERANCE:
+                    return None
+            if reading.percent >= 0.5:
+                estimates.append(reading.current_exp / max(0.01, reading.percent / 100.0))
+            previous = reading
+
+        if len(estimates) >= 2:
+            low = min(estimates)
+            high = max(estimates)
+            if low <= 0 or (high - low) / low > EXP_TOTAL_ESTIMATE_MAX_DEVIATION_RATIO:
+                return None
+
+        return readings[-1]
 
     def read(self, image: np.ndarray) -> ExperienceTextReading:
         if not self._ensure_ocr():

@@ -19,9 +19,9 @@ _original_excepthook = sys.excepthook
 _original_threading_excepthook = getattr(threading, "excepthook", None)
 
 
-def configure_debug_logging(path: Path | None = None) -> Path:
+def configure_debug_logging(path: Path | None = None, *, reset: bool = False) -> Path:
     log_path = path or DEBUG_LOG_PATH
-    _configure_logger(log_path)
+    _configure_logger(log_path, reset=reset)
     sys.excepthook = _handle_unhandled_exception
     if hasattr(threading, "excepthook"):
         threading.excepthook = _handle_thread_exception
@@ -55,6 +55,20 @@ def log_exception(
     logger.error(message, exc_info=exc_info)
 
 
+def log_debug(message: str) -> None:
+    if _configured_path is None:
+        configure_debug_logging()
+    logging.getLogger(_LOGGER_NAME).info(message)
+
+
+def write_debug_text(text: str) -> None:
+    if not text:
+        return
+    for line in text.rstrip("\n").splitlines():
+        if line:
+            log_debug(line)
+
+
 def write_exception_text(
     message: str,
     exc_info: tuple[type[BaseException], BaseException, TracebackType | None] | None = None,
@@ -75,22 +89,22 @@ def write_exception_text(
         pass
 
 
-def _configure_logger(log_path: Path) -> None:
+def _configure_logger(log_path: Path, *, reset: bool = False) -> None:
     global _configured_path
     resolved = log_path.resolve()
     logger = logging.getLogger(_LOGGER_NAME)
-    if _configured_path == resolved and logger.handlers:
+    if _configured_path == resolved and logger.handlers and not reset:
         return
 
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    logger.setLevel(logging.ERROR)
+    logger.setLevel(logging.DEBUG)
     logger.propagate = False
     for handler in list(logger.handlers):
         logger.removeHandler(handler)
         handler.close()
 
-    handler = logging.FileHandler(resolved, encoding="utf-8")
-    handler.setLevel(logging.ERROR)
+    handler = logging.FileHandler(resolved, mode="w" if reset else "a", encoding="utf-8")
+    handler.setLevel(logging.DEBUG)
     handler.setFormatter(
         logging.Formatter(
             "%(asctime)s [%(levelname)s] %(message)s",

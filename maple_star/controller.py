@@ -97,6 +97,11 @@ EXPERIENCE_TEXT_HEIGHT_RATIO = 1.35
 EXPERIENCE_WIDE_TEXT_LEFT_RATIO = 0.34
 EXPERIENCE_WIDE_TEXT_RIGHT_PADDING_RATIO = 0.08
 EXPERIENCE_WIDE_TEXT_HEIGHT_RATIO = 1.65
+EXPERIENCE_OCR_SIGNATURE_THUMB_WIDTH = 96
+EXPERIENCE_OCR_SIGNATURE_THUMB_HEIGHT = 18
+EXPERIENCE_OCR_SIGNATURE_CHANGED_PIXEL_DELTA = 4
+EXPERIENCE_OCR_SIGNATURE_MAX_MEAN_DIFF = 0.35
+EXPERIENCE_OCR_SIGNATURE_MAX_CHANGED_RATIO = 0.002
 BAR_PAIR_HP_MAX_LEFT_RATIO = 0.48
 BAR_PAIR_MIN_GAP_RATIO = 0.10
 BAR_PAIR_MAX_GAP_RATIO = 0.24
@@ -118,6 +123,7 @@ class BarDetectionDebug:
 class ExperienceOcrJob:
     submitted_at: float
     future: Future[ExperienceTextReading]
+    image_signature: ExperienceOcrImageSignature | None = None
 
 
 @dataclass
@@ -125,8 +131,14 @@ class ExperienceOcrBurst:
     started_at: float
     next_capture_at: float
     regions: list[tuple[int, int, int, int]]
-    images: list[np.ndarray]
+    image_frames: list[list[np.ndarray]]
     capture_count: int
+
+
+@dataclass(frozen=True)
+class ExperienceOcrImageSignature:
+    image_shapes: tuple[tuple[int, ...], ...]
+    thumbnails: tuple[bytes, ...]
 
 
 @dataclass(frozen=True)
@@ -254,6 +266,7 @@ class AutoPotionController:
         self.experience_ocr_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="maple-exp-ocr")
         self.experience_ocr_job: ExperienceOcrJob | None = None
         self.experience_ocr_burst: ExperienceOcrBurst | None = None
+        self.last_failed_experience_ocr_signature: ExperienceOcrImageSignature | None = None
         self.last_experience_ocr_error_at = -999.0
         self.last_experience_ocr_error_reason = ""
         self.last_target_hwnd: int = 0
@@ -715,6 +728,7 @@ class AutoPotionController:
 
         regions = self._experience_text_regions()
         if not regions:
+            self._clear_failed_experience_ocr_signature()
             self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
             snapshot = self.experience_tracker.snapshot(now)
             snapshot.status = "找不到 EXP 區域，保留統計" if snapshot.sample_count else "找不到 EXP 區域"
@@ -723,14 +737,14 @@ class AutoPotionController:
 
         images = self._capture_experience_text_images(regions)
         if EXPERIENCE_BURST_CAPTURE_ATTEMPTS <= 1:
-            self._submit_experience_ocr_burst(now, images)
+            self._submit_experience_ocr_burst(now, [images])
             return
 
         self.experience_ocr_burst = ExperienceOcrBurst(
             started_at=now,
             next_capture_at=now + EXPERIENCE_BURST_CAPTURE_INTERVAL_SECONDS,
             regions=regions,
-            images=images,
+            image_frames=[images],
             capture_count=1,
         )
         snapshot = self.experience_tracker.snapshot(now)
@@ -747,7 +761,7 @@ class AutoPotionController:
             self.gui.set_experience_snapshot(snapshot)
             return True
 
-        burst.images.extend(self._capture_experience_text_images(burst.regions))
+        burst.image_frames.append(self._capture_experience_text_images(burst.regions))
         burst.capture_count += 1
         if burst.capture_count < EXPERIENCE_BURST_CAPTURE_ATTEMPTS:
             burst.next_capture_at = now + EXPERIENCE_BURST_CAPTURE_INTERVAL_SECONDS
@@ -757,7 +771,7 @@ class AutoPotionController:
             return True
 
         self.experience_ocr_burst = None
-        self._submit_experience_ocr_burst(now, burst.images)
+        self._submit_experience_ocr_burst(now, burst.image_frames)
         return True
 
     def _capture_experience_text_image(self, region: tuple[int, int, int, int]) -> np.ndarray:
@@ -767,15 +781,105 @@ class AutoPotionController:
     def _capture_experience_text_images(self, regions: list[tuple[int, int, int, int]]) -> list[np.ndarray]:
         return [self._capture_experience_text_image(region) for region in regions]
 
-    def _submit_experience_ocr_burst(self, now: float, images: list[np.ndarray]) -> None:
+    def _submit_experience_ocr_burst(self, now: float, image_frames: list[list[np.ndarray]]) -> None:
+        image_signature = self._experience_ocr_image_signature(image_frames)
+        if self._experience_ocr_burst_frames_are_static(image_frames):
+            self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
+            snapshot = self.experience_tracker.snapshot(now)
+            snapshot.status = "EXP ROI 未變化，保留統計"
+            self.gui.set_experience_snapshot(snapshot)
+            return
+        if self._is_repeated_failed_experience_ocr_signature(image_signature):
+            self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
+            snapshot = self.experience_tracker.snapshot(now)
+            snapshot.status = "OCR ROI 未變化，保留統計" if snapshot.sample_count else "OCR ROI 未變化，等待畫面更新"
+            self.gui.set_experience_snapshot(snapshot)
+            return
+
         self.experience_ocr_job = ExperienceOcrJob(
             submitted_at=now,
-            future=self.experience_ocr_executor.submit(self.experience_reader.read_burst, [image.copy() for image in images]),
+            future=self.experience_ocr_executor.submit(
+                self.experience_reader.read_burst_frames,
+                [[image.copy() for image in images] for images in image_frames],
+            ),
+            image_signature=image_signature,
         )
         self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
         snapshot = self.experience_tracker.snapshot(now)
         snapshot.status = "讀取經驗樣本中"
         self.gui.set_experience_snapshot(snapshot)
+
+    def _experience_ocr_burst_frames_are_static(self, image_frames: list[list[np.ndarray]]) -> bool:
+        if len(image_frames) < 2:
+            return False
+        if not getattr(self.experience_tracker, "samples", []):
+            return False
+        first_signature = self._experience_ocr_image_signature([image_frames[0]])
+        last_signature = self._experience_ocr_image_signature([image_frames[-1]])
+        return self._experience_ocr_signatures_are_similar(first_signature, last_signature)
+
+    def _experience_ocr_image_signature(self, image_frames: list[list[np.ndarray]]) -> ExperienceOcrImageSignature:
+        shapes: list[tuple[int, ...]] = []
+        thumbnails: list[bytes] = []
+        for images in image_frames:
+            for image in images:
+                shapes.append(tuple(int(part) for part in image.shape))
+                thumbnails.append(self._experience_ocr_image_thumbnail(image))
+        return ExperienceOcrImageSignature(tuple(shapes), tuple(thumbnails))
+
+    def _experience_ocr_image_thumbnail(self, image: np.ndarray) -> bytes:
+        if image.size == 0:
+            return b""
+        if image.ndim == 2:
+            luminance = image.astype(np.float32)
+        else:
+            sample = image[:, :, :3].astype(np.float32)
+            blue = sample[:, :, 0]
+            green = sample[:, :, 1]
+            red = sample[:, :, 2]
+            luminance = red * 0.299 + green * 0.587 + blue * 0.114
+        height, width = luminance.shape[:2]
+        y_indices = np.linspace(0, height - 1, EXPERIENCE_OCR_SIGNATURE_THUMB_HEIGHT).astype(np.intp)
+        x_indices = np.linspace(0, width - 1, EXPERIENCE_OCR_SIGNATURE_THUMB_WIDTH).astype(np.intp)
+        thumbnail = luminance[np.ix_(y_indices, x_indices)]
+        return np.clip(np.rint(thumbnail), 0, 255).astype(np.uint8).tobytes()
+
+    def _is_repeated_failed_experience_ocr_signature(self, signature: ExperienceOcrImageSignature) -> bool:
+        previous = getattr(self, "last_failed_experience_ocr_signature", None)
+        return self._experience_ocr_signatures_are_similar(previous, signature)
+
+    def _remember_failed_experience_ocr_signature(self, job: ExperienceOcrJob) -> None:
+        self.last_failed_experience_ocr_signature = job.image_signature
+
+    def _clear_failed_experience_ocr_signature(self) -> None:
+        self.last_failed_experience_ocr_signature = None
+
+    def _experience_ocr_signatures_are_similar(
+        self,
+        first: ExperienceOcrImageSignature | None,
+        second: ExperienceOcrImageSignature | None,
+    ) -> bool:
+        if first is None or second is None:
+            return False
+        if first.image_shapes != second.image_shapes:
+            return False
+        if len(first.thumbnails) != len(second.thumbnails):
+            return False
+
+        for first_thumbnail, second_thumbnail in zip(first.thumbnails, second.thumbnails):
+            if len(first_thumbnail) != len(second_thumbnail):
+                return False
+            if not first_thumbnail and not second_thumbnail:
+                continue
+            first_values = np.frombuffer(first_thumbnail, dtype=np.uint8).astype(np.int16)
+            second_values = np.frombuffer(second_thumbnail, dtype=np.uint8).astype(np.int16)
+            diff = np.abs(first_values - second_values)
+            if float(np.mean(diff)) > EXPERIENCE_OCR_SIGNATURE_MAX_MEAN_DIFF:
+                return False
+            changed_ratio = float(np.count_nonzero(diff > EXPERIENCE_OCR_SIGNATURE_CHANGED_PIXEL_DELTA)) / diff.size
+            if changed_ratio > EXPERIENCE_OCR_SIGNATURE_MAX_CHANGED_RATIO:
+                return False
+        return True
 
     def _process_experience_ocr_job(self, now: float) -> bool:
         if self.experience_ocr_job is None:
@@ -800,6 +904,7 @@ class AutoPotionController:
             tracker_samples = getattr(self.experience_tracker, "samples", None)
             has_tracker_samples = not isinstance(tracker_samples, list) or bool(tracker_samples)
             if reading.needs_bar_percent_guard and not has_tracker_samples:
+                self._remember_failed_experience_ocr_signature(job)
                 self.experience_tracker.record_ocr_result(False)
                 self._log_experience_ocr_error(now, "EXP 合併格式需既有基準確認", reading.text)
                 snapshot = self.experience_tracker.snapshot(now)
@@ -808,16 +913,19 @@ class AutoPotionController:
                 self.gui.set_experience_snapshot(snapshot)
                 return True
             if not self.experience_tracker.add_reading(now, reading.current_exp, reading.percent):
+                self._remember_failed_experience_ocr_signature(job)
                 self.experience_tracker.record_ocr_result(False)
                 self._log_experience_sample_rejection(now, self.experience_tracker.last_status, reading)
                 snapshot = self.experience_tracker.snapshot(now)
                 snapshot.status = "樣本已拒絕，詳見 Console"
                 self.gui.set_experience_snapshot(snapshot)
                 return True
+            self._clear_failed_experience_ocr_signature()
             self.experience_tracker.record_ocr_result(True)
             self.gui.set_experience_snapshot(self.experience_tracker.snapshot(now))
             return True
 
+        self._remember_failed_experience_ocr_signature(job)
         self.experience_tracker.record_ocr_result(False)
         self._log_experience_ocr_error(now, reading.reason, reading.text)
         snapshot = self.experience_tracker.snapshot(now)
@@ -828,6 +936,7 @@ class AutoPotionController:
 
     def _stop_experience_ocr_job(self) -> None:
         self.experience_ocr_burst = None
+        self._clear_failed_experience_ocr_signature()
         if self.experience_ocr_job is None:
             return
         self.experience_ocr_job.future.cancel()

@@ -14,7 +14,7 @@ from typing import Callable
 import customtkinter as ctk
 
 from .constants import MAX_CONSOLE_LINES
-from .debug_logging import install_tk_exception_logging
+from .debug_logging import install_tk_exception_logging, write_debug_text
 from .experience import ExperienceSnapshot, format_eta, format_exp, format_exp_rate, format_ocr_success_rate
 from .key_capture import DETECTABLE_KEY_VKS, event_to_hotkey, pressed_detectable_vks, vk_to_key_name
 from .settings import (
@@ -115,6 +115,7 @@ class GuiConsoleWriter:
                 self.original.write(text)
             except Exception:
                 pass
+        write_debug_text(text)
         self.gui.append_console(text)
         return len(text)
 
@@ -310,7 +311,7 @@ class AutoPotionSettingsGui:
         exp_section.configure(width=EXP_PANEL_WIDTH, height=MONITOR_PANEL_HEIGHT)
         exp_section.grid_propagate(False)
         self._checkbox(exp_title, "", self.exp_efficiency_enabled, width=20).grid(row=0, column=0, sticky="w", padx=(8, 0), pady=4)
-        self._title_label(exp_title, "經驗效率").grid(row=0, column=1, sticky="w", padx=(2, 0), pady=4)
+        self._title_label(exp_title, "經驗計算").grid(row=0, column=1, sticky="w", padx=(2, 0), pady=4)
         self._button(exp_title, "重置統計", self.reset_experience_statistics, width=82).grid(row=0, column=2, sticky="w", padx=(8, 0), pady=4)
         self.panel_mode_button = self._button(exp_title, "經驗模式", self.toggle_compact_experience_mode, width=82)
         self.panel_mode_button.grid(row=0, column=98, sticky="e", padx=(8, 4), pady=4)
