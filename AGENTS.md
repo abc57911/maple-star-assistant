@@ -4,23 +4,30 @@
 - `main.pyw`：無 console 視窗的 GUI 入口，發行版本主要使用此入口。
 - `main.py`：一般 Python 入口，適合本機除錯。
 - `auto_potion.py`：相容用 facade，對外匯出自動喝水相關 API。
-- `maple_star/`：自動喝水、GUI、settings、Windows input、key capture、經驗效率等模組化實作。
+- `maple_gamepad_macro.py`：相容用 facade，可直接執行，也對外保留手把巨集相關 API。
+- `maple_star/`：主 package，採 MVC + services/adapters 結構。
+- `maple_star/models/`：資料模型、設定模型、經驗效率模型、controller runtime state dataclass。
+- `maple_star/views/`：GUI 與 console writer，包含 CustomTkinter view、theme 與 layout。
+- `maple_star/controllers/`：主流程 orchestration，例如自動喝水 controller 與手把主 loop controller。
+- `maple_star/services/`：純服務邏輯，例如 bar detection、settings store、hotkey worker、gamepad binding。
+- `maple_star/adapters/`：外部系統邊界，例如 Win32 input/window API、debug logging、pygame controller worker。
 - `maple_star/constants.py`：跨模組共用常數，包含偵測節奏、狀態條定位、快捷鍵 ID 與 loading/fade guard。
-- `maple_star/controller.py`：主控制流程，整合 GUI、視窗擷取、自動喝水、快捷鍵、HP/MP 預覽與經驗 OCR 背景工作。
-- `maple_star/experience.py`：經驗效率統計、PaddleOCR adapter、EXP OCR 前處理與 OCR 文字解析。
-- `maple_star/settings.py`：設定檔、設定檔遷移、profile 與快捷鍵預設值。
-- `maple_gamepad_macro.py`：手把 RB/LB 巨集與主流程整合。
+- `maple_star/controller.py`、`maple_star/experience.py`、`maple_star/gui.py`、`maple_star/settings.py`、`maple_star/win_input.py` 等舊路徑：相容 facade / module alias，不應再放新實作。
 - `build_release.bat`：PyInstaller 打包流程。
 
 ## 專案約束
 - `settings.json` 是使用者本機設定檔，應由程式自動建立或補齊。
 - `settings.json` 不應提交，也不應打包進 release。
-- `.venv*/`、`.paddleocr/`、`models/`、`build/`、`dist/`、`release/`、`*.spec` 都是本機或打包產物，不應提交。
+- `.venv*/`、`.paddleocr/`、根目錄 `/models/`、`build/`、`dist/`、`release/`、`*.spec` 都是本機或打包產物，不應提交。
+- `maple_star/models/` 是正式原始碼目錄，必須可追蹤，不可被視為模型 cache。
 - 未經使用者明確要求，不要執行打包。
 - 未經使用者明確要求，不要 commit；使用者要求 commit 時，先確認 staged 清單不含本機設定、venv、model cache 或打包產物。
 - 修改 `auto_potion.py` 時需保留向後相容匯出，避免破壞既有 import。
-- 新增或調整自動喝水功能時，優先放在 `maple_star/` 內合適模組。
+- 修改 `maple_gamepad_macro.py` 時需保留直接執行行為與既有 import API。
+- 新增或調整自動喝水功能時，優先放在 `maple_star/controllers/`、`maple_star/services/`、`maple_star/models/`、`maple_star/views/` 或 `maple_star/adapters/` 的合適模組。
 - 新增或調整共用常數時，優先放在 `maple_star/constants.py`，避免在 controller、GUI 或測試中散落 magic number。
+- 新增實作時不要把主要邏輯放回舊 facade；舊 facade 只負責 re-export 或 module alias。
+- 調整舊公開 import path 時需保留相容性，例如 `from maple_star.controller import AutoPotionController`、`from maple_star.gui import AutoPotionSettingsGui`、`from maple_star.experience import ExperienceEfficiencyTracker`、`from maple_star.settings import AutoPotionSettings`。
 - 快捷鍵設定目前設計為單鍵；設定快捷鍵時必須暫時攔截腳本功能，避免按鍵設定動作同時觸發暫停、停止或經驗統計切換。
 
 ## PaddleOCR 與經驗效率
@@ -63,6 +70,12 @@ python -m compileall -q maple_star
 ```
 
 若修改 settings 遷移、快捷鍵偵測、HP/MP 偵測、EXP OCR、經驗統計或 GUI pump，需補跑對應的最小回歸測試或 Python snippet。
+
+若修改 MVC 目錄結構、相容 facade、入口檔或 import path，需至少補跑：
+
+```powershell
+python -m unittest discover -s tests
+```
 
 涉及 PaddleOCR 或經驗效率時，另外執行：
 

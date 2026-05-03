@@ -23,8 +23,10 @@ from maple_star.experience import (
     _binarize_experience_text,
     _clean_experience_text_mask,
     _experience_text_structure_score,
+    _suppress_experience_green_bar_background,
     estimate_experience_bar_percent,
     extract_paddle_text_items,
+    format_duration,
     format_eta,
     format_exp_rate,
     format_ocr_success_rate,
@@ -304,6 +306,18 @@ class ExperienceTests(unittest.TestCase):
         assert binary is not None
         self.assertEqual(int(binary[12, 20, 0]), 0)
         self.assertEqual(int(binary[18, 43, 0]), 255)
+
+    def test_green_bar_suppression_removes_background_without_erasing_white_text(self):
+        image = np.zeros((20, 120, 4), dtype=np.uint8)
+        image[:, :, :3] = 28
+        image[:, :70, :3] = (40, 215, 95)
+        image[:, :, 3] = 255
+        image[7:14, 46:50, :3] = 245
+
+        suppressed = _suppress_experience_green_bar_background(image)
+
+        self.assertLess(int(suppressed[5, 20, 1]), 60)
+        self.assertGreater(int(suppressed[9, 48, 1]), 220)
 
     def test_binary_fallback_includes_bolder_text_variant(self):
         image = np.zeros((30, 180, 4), dtype=np.uint8)
@@ -708,6 +722,17 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(snapshot.current_percent, 90.93)
         self.assertIn("樣本拒絕", snapshot.status)
 
+    def test_experience_tracker_repairs_green_bar_three_read_as_eight(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 5294931, 76.83))
+
+        self.assertTrue(tracker.add_reading(5.0, 5805653, 76.98))
+        snapshot = tracker.snapshot(5.0)
+
+        self.assertEqual(snapshot.current_exp, 5305653)
+        self.assertEqual(tracker.total_gained_exp, 10722)
+        self.assertEqual(snapshot.current_percent, 76.98)
+
     def test_paddle_reader_uses_traditional_chinese_ppocrv5_models(self):
         captured_kwargs = {}
 
@@ -935,7 +960,7 @@ class ExperienceTests(unittest.TestCase):
         tracker = ExperienceEfficiencyTracker()
         self.assertTrue(tracker.add_reading(0.0, 2425901, 23.13))
 
-        snapshot = tracker.snapshot(0.0)
+        snapshot = tracker.snapshot(30.0)
 
         self.assertEqual(snapshot.current_exp, 2425901)
         self.assertEqual(snapshot.current_percent, 23.13)
@@ -943,6 +968,7 @@ class ExperienceTests(unittest.TestCase):
         self.assertIsNone(snapshot.xp_per_10m)
         self.assertIsNone(snapshot.xp_per_hour)
         self.assertIsNone(snapshot.eta_seconds)
+        self.assertEqual(snapshot.elapsed_seconds, 30.0)
         self.assertEqual(snapshot.sample_count, 1)
         self.assertEqual(snapshot.status, "校準 EXP 基準")
 
@@ -1048,6 +1074,21 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(after.xp_per_5m, before.xp_per_5m)
         self.assertEqual(after.current_exp, 7000)
 
+    def test_tracker_rates_and_eta_decay_without_new_reading(self):
+        tracker = ExperienceEfficiencyTracker()
+        tracker.add_reading(0.0, 1000, 10.0)
+        tracker.add_reading(60.0, 7000, 70.0)
+        before = tracker.snapshot(60.0)
+
+        after = tracker.snapshot(660.0)
+
+        self.assertLess(after.xp_per_5m or 0, 1000.0)
+        self.assertLess(after.xp_per_10m or 0, before.xp_per_10m or 0)
+        self.assertLess(after.xp_per_hour or 0, before.xp_per_hour or 0)
+        self.assertGreater(after.eta_seconds or 0, before.eta_seconds or 0)
+        self.assertEqual(after.current_exp, 7000)
+        self.assertEqual(after.elapsed_seconds, 660.0)
+
     def test_tracker_handles_level_wrap_when_percent_restarts(self):
         tracker = ExperienceEfficiencyTracker()
         tracker.add_reading(0.0, 9000, 90.0)
@@ -1068,7 +1109,7 @@ class ExperienceTests(unittest.TestCase):
         self.assertGreater(snapshot.xp_per_hour, 91000.0)
         self.assertLess(snapshot.xp_per_hour, 180000.0)
 
-    def test_tracker_does_not_resmooth_without_new_sample(self):
+    def test_tracker_does_not_resmooth_without_time_advancing(self):
         tracker = ExperienceEfficiencyTracker()
         tracker.add_reading(0.0, 1000, 0.10)
         tracker.add_reading(60.0, 7000, 0.70)
@@ -1076,7 +1117,7 @@ class ExperienceTests(unittest.TestCase):
         tracker.add_reading(120.0, 25000, 2.50)
         first = tracker.snapshot(120.0)
 
-        second = tracker.snapshot(121.0)
+        second = tracker.snapshot(120.0)
 
         self.assertEqual(second.xp_per_5m, first.xp_per_5m)
         self.assertEqual(second.xp_per_10m, first.xp_per_10m)
@@ -1107,6 +1148,7 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(format_eta(65), "00:01:05")
         self.assertEqual(format_eta(3599), "00:59:59")
         self.assertEqual(format_eta(3661), "1:01:01")
+        self.assertEqual(format_duration(3723), "1:02:03")
 
     def test_format_exp_rate(self):
         self.assertEqual(format_exp_rate(None), "--")

@@ -106,7 +106,7 @@ def main() -> int:
         show_already_running_message()
         return 0
 
-    from maple_gamepad_macro import main as run_all_features
+    from maple_star.controllers.gamepad_controller import main as run_all_features
 
     try:
         run_all_features()

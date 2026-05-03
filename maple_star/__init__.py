@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from .controller import AutoPotionController, loading_screen_metrics, normalize_bar_percent
-from .settings import AutoPotionSettings, SETTINGS_PATH, app_base_dir, load_settings, save_settings
-from .win_input import key_down, key_up, parse_vk_key, tap_hotkey
+from .adapters.win_input import key_down, key_up, parse_vk_key, tap_hotkey
+from .controllers.auto_potion_controller import AutoPotionController, loading_screen_metrics, normalize_bar_percent
+from .models.settings import AutoPotionSettings, SETTINGS_PATH, app_base_dir, load_settings, save_settings
 
 __all__ = [
     "AutoPotionController",
