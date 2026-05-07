@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .experience import ExperienceTextReading
+from .experience import ExperienceOcrImage, ExperienceTextReading
 
 
 @dataclass
@@ -25,6 +25,7 @@ class ExperienceOcrJob:
     submitted_at: float
     future: Future[ExperienceTextReading]
     image_signature: "ExperienceOcrImageSignature | None" = None
+    image_frames: list[list[np.ndarray | ExperienceOcrImage]] | None = None
 
 
 @dataclass

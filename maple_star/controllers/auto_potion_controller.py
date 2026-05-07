@@ -96,6 +96,7 @@ from ..models.experience import (
     ExperienceSnapshot,
     ExperienceTextReading,
     PaddleExperienceTextReader,
+    save_experience_ocr_learning_case,
 )
 from ..models.controller_state import (
     BarDetectionDebug,
@@ -925,6 +926,7 @@ class AutoPotionController:
             ExperienceOcrImage(
                 self._capture_experience_text_image(region),
                 self._experience_text_region_bar_crop_left_ratio(index),
+                "primary" if index == 0 else "wide",
             )
             for index, region in enumerate(regions)
         ]
@@ -962,6 +964,7 @@ class AutoPotionController:
                 [[self._copy_experience_ocr_image(image) for image in images] for images in image_frames],
             ),
             image_signature=image_signature,
+            image_frames=[[self._copy_experience_ocr_image(image) for image in images] for images in image_frames],
         )
         self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
         snapshot = self.experience_tracker.snapshot(effective_now)
@@ -970,7 +973,14 @@ class AutoPotionController:
 
     def _copy_experience_ocr_image(self, image: np.ndarray | ExperienceOcrImage) -> np.ndarray | ExperienceOcrImage:
         if isinstance(image, ExperienceOcrImage):
-            return ExperienceOcrImage(image.image.copy(), image.bar_crop_left_ratio)
+            return ExperienceOcrImage(
+                image.image.copy(),
+                image.bar_crop_left_ratio,
+                image.source_id,
+                image.roi_offset,
+                image.preprocess_variant,
+                image.attempt_id,
+            )
         return image.copy()
 
     def _experience_ocr_image_array(self, image: np.ndarray | ExperienceOcrImage) -> np.ndarray:
@@ -1086,6 +1096,7 @@ class AutoPotionController:
             reading = ExperienceTextReading(reason=f"OCR 背景工作失敗：{exc}")
 
         self._log_experience_ocr_reading(reading)
+        self._log_experience_learning_case(reading)
         if reading.success and reading.current_exp is not None:
             tracker_samples = getattr(self.experience_tracker, "samples", None)
             has_tracker_samples = not isinstance(tracker_samples, list) or bool(tracker_samples)
@@ -1163,6 +1174,10 @@ class AutoPotionController:
             "經驗效率 OCR 輸出："
             f"result={result} | {self._experience_reading_log_fields(reading)} | reason={reading.reason}"
         )
+
+    def _log_experience_learning_case(self, reading: ExperienceTextReading) -> None:
+        if reading.learning_case_id:
+            print(f"EXP OCR learning case: {reading.learning_case_id}")
 
     def _log_experience_sample_rejection(
         self,

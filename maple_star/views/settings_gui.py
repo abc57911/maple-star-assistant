@@ -9,7 +9,7 @@ import tkinter as tk
 from ctypes import wintypes
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
-from typing import Callable
+from typing import Any, Callable
 
 import customtkinter as ctk
 
@@ -35,6 +35,15 @@ from ..models.settings import (
     normalize_profile_name,
 )
 from ..services.settings_store import load_settings, save_settings
+from ..services.experience_ocr_learning import (
+    delete_experience_ocr_learning_case,
+    delete_experience_ocr_learning_cases_by_reading_key,
+    list_experience_ocr_learning_cases,
+    promote_experience_ocr_learning_case,
+    regen_experience_pixel_templates,
+    remove_experience_ocr_fixture_sample,
+    validate_promoted_experience_fixture,
+)
 from ..adapters.win_input import Point, parse_vk_key, user32
 
 ctk.set_appearance_mode("dark")
@@ -210,6 +219,15 @@ class AutoPotionSettingsGui:
         self.tooltip_anchor_widget: ctk.CTkBaseClass | None = None
         self.tooltip_after_id: str | None = None
         self.tooltip_hide_after_id: str | None = None
+        self.experience_learning_window: ctk.CTkToplevel | None = None
+        self.experience_learning_cases: list[dict[str, Any]] = []
+        self.experience_learning_index = 0
+        self.experience_learning_image: ctk.CTkImage | None = None
+        self.experience_learning_id = tk.StringVar(value="尚無 learning case")
+        self.experience_learning_detail = tk.StringVar(value="")
+        self.experience_learning_correct_text = tk.StringVar(value="")
+        self.experience_learning_status = tk.StringVar(value="")
+        self.experience_learning_image_label: ctk.CTkLabel | None = None
 
         self.active_profile = tk.StringVar(value=settings.active_profile)
         self.hp_enabled = tk.BooleanVar(value=settings.hp_enabled)
@@ -343,6 +361,7 @@ class AutoPotionSettingsGui:
         self._checkbox(exp_title, "", self.exp_efficiency_enabled, width=20).grid(row=0, column=0, sticky="w", padx=(8, 0), pady=4)
         self._title_label(exp_title, "經驗計算").grid(row=0, column=1, sticky="w", padx=(2, 0), pady=4)
         self._button(exp_title, "重置統計", self.reset_experience_statistics, width=82).grid(row=0, column=2, sticky="w", padx=(8, 0), pady=4)
+        self._button(exp_title, "OCR學習", self.open_experience_learning_window, width=76).grid(row=0, column=3, sticky="w", padx=(8, 0), pady=4)
         self.panel_mode_button = self._button(exp_title, "經驗模式", self.toggle_compact_experience_mode, width=82)
         self.panel_mode_button.grid(row=0, column=98, sticky="e", padx=(8, 4), pady=4)
         self.topmost_button = self._button(exp_title, "置頂", self.toggle_window_topmost, width=76)
@@ -1562,11 +1581,197 @@ class AutoPotionSettingsGui:
             self.bar_preview_labels[bar_type].configure(image=image, text="")
         self.bar_preview_has_snapshot = True
 
+    def open_experience_learning_window(self) -> None:
+        if self.experience_learning_window is not None:
+            try:
+                self.experience_learning_window.lift()
+                self._reload_experience_learning_cases()
+                return
+            except tk.TclError:
+                self.experience_learning_window = None
+
+        window = self._create_auxiliary_window(fg_color=PANEL_BG)
+        self.experience_learning_window = window
+        window.title("EXP OCR 學習")
+        window.protocol("WM_DELETE_WINDOW", self._close_experience_learning_window)
+        window.columnconfigure(0, weight=1)
+
+        body = ctk.CTkFrame(window, fg_color=PANEL_BG, corner_radius=0)
+        body.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        body.columnconfigure(0, weight=1)
+
+        self._title_label(body, "OCR learning case").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self._label(body, textvariable=self.experience_learning_id, color=ACCENT_GREEN, font=EXP_MONO_FONT).grid(row=1, column=0, sticky="w")
+        self._label(body, textvariable=self.experience_learning_detail, color=BODY_TEXT, font=SMALL_FONT).grid(row=2, column=0, sticky="ew", pady=(2, 8))
+
+        self.experience_learning_image_label = ctk.CTkLabel(
+            body,
+            text="尚無 ROI 圖",
+            text_color=MUTED_TEXT,
+            font=UI_FONT,
+            width=520,
+            height=120,
+            anchor="center",
+        )
+        self.experience_learning_image_label.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+
+        input_frame = ctk.CTkFrame(body, fg_color="transparent")
+        input_frame.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        input_frame.columnconfigure(1, weight=1)
+        self._label(input_frame, "正確值").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self._entry(input_frame, self.experience_learning_correct_text, width=220).grid(row=0, column=1, sticky="ew")
+
+        button_frame = ctk.CTkFrame(body, fg_color="transparent")
+        button_frame.grid(row=5, column=0, sticky="ew")
+        self._button(button_frame, "套用並重建", self._promote_current_experience_learning_case, width=104, primary=True).grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self._button(button_frame, "刪除", self._delete_current_experience_learning_case, width=64).grid(row=0, column=1, sticky="w", padx=(0, 6))
+        self._button(button_frame, "上一筆", self._previous_experience_learning_case, width=64).grid(row=0, column=2, sticky="w", padx=(0, 6))
+        self._button(button_frame, "下一筆", self._next_experience_learning_case, width=64).grid(row=0, column=3, sticky="w", padx=(0, 6))
+        self._button(button_frame, "刷新", self._reload_experience_learning_cases, width=64).grid(row=0, column=4, sticky="w")
+
+        self._label(body, textvariable=self.experience_learning_status, color=MUTED_TEXT, font=SMALL_FONT).grid(row=6, column=0, sticky="w", pady=(8, 0))
+
+        self._reload_experience_learning_cases()
+        self._prepare_auxiliary_window_for_show(window)
+        try:
+            window.geometry(f"560x360+{self.root.winfo_rootx() + 60}+{self.root.winfo_rooty() + 60}")
+            window.deiconify()
+        except tk.TclError:
+            pass
+
+    def _close_experience_learning_window(self) -> None:
+        if self.experience_learning_window is not None:
+            try:
+                self.experience_learning_window.destroy()
+            except tk.TclError:
+                pass
+        self.experience_learning_window = None
+        self.experience_learning_image = None
+
+    def _reload_experience_learning_cases(self) -> None:
+        self.experience_learning_cases = list_experience_ocr_learning_cases()
+        if self.experience_learning_index >= len(self.experience_learning_cases):
+            self.experience_learning_index = max(0, len(self.experience_learning_cases) - 1)
+        self._render_current_experience_learning_case()
+
+    def _render_current_experience_learning_case(self) -> None:
+        if not self.experience_learning_cases:
+            self.experience_learning_id.set("尚無 learning case")
+            self.experience_learning_detail.set("")
+            self.experience_learning_correct_text.set("")
+            self.experience_learning_status.set("沒有 pending case")
+            if self.experience_learning_image_label is not None:
+                self.experience_learning_image_label.configure(image=None, text="尚無 ROI 圖")
+            self.experience_learning_image = None
+            return
+
+        case = self.experience_learning_cases[self.experience_learning_index]
+        index_label = f"{self.experience_learning_index + 1}/{len(self.experience_learning_cases)}"
+        self.experience_learning_id.set(f"{case.get('id', '--')}    {index_label}")
+        self.experience_learning_detail.set(
+            f"trigger={case.get('trigger', '--')}\n"
+            f"Pixel: {case.get('pixel_text') or '--'} | {case.get('pixel_reason') or '--'}\n"
+            f"Paddle: {case.get('paddle_text') or '--'} | {case.get('paddle_reason') or '--'}\n"
+            f"Final: {case.get('final_text') or '--'} | {case.get('final_reason') or '--'}"
+        )
+        default_text = str(case.get("final_text") or case.get("reading_key") or "")
+        self.experience_learning_correct_text.set(default_text)
+        self.experience_learning_status.set("確認正確值後可套用")
+        preview_file = case.get("preview_file")
+        self._set_experience_learning_preview(Path(preview_file) if preview_file else None)
+
+    def _set_experience_learning_preview(self, path: Path | None) -> None:
+        if self.experience_learning_image_label is None:
+            return
+        if path is None or not path.exists():
+            self.experience_learning_image = None
+            self.experience_learning_image_label.configure(image=None, text="ROI 圖不存在")
+            return
+        try:
+            self.experience_learning_image = self._ctk_image_from_path(path, max_size=(520, 120))
+            self.experience_learning_image_label.configure(image=self.experience_learning_image, text="")
+        except Exception as exc:
+            self.experience_learning_image = None
+            self.experience_learning_image_label.configure(image=None, text=f"ROI 載入失敗：{exc}")
+
+    def _promote_current_experience_learning_case(self) -> None:
+        case = self._current_experience_learning_case()
+        if case is None:
+            self.experience_learning_status.set("沒有可套用的 case")
+            return
+        case_id = str(case.get("id", ""))
+        correct_text = self.experience_learning_correct_text.get().strip()
+        try:
+            result = promote_experience_ocr_learning_case(case_id, correct_text, force=True)
+            regen = regen_experience_pixel_templates()
+            validation = validate_promoted_experience_fixture(str(result["sample_id"]))
+        except Exception as exc:
+            self.experience_learning_status.set(f"套用失敗：{exc}")
+            return
+        if validation.get("success"):
+            deleted_ids = delete_experience_ocr_learning_cases_by_reading_key(str(result["text"]))
+            if delete_experience_ocr_learning_case(case_id):
+                deleted_ids.append(case_id)
+            status = f"已套用並重建模板，清除 {len(deleted_ids)} 筆同值 case"
+        else:
+            remove_experience_ocr_fixture_sample(str(result["sample_id"]))
+            regen = regen_experience_pixel_templates()
+            status = (
+                "未套用，Pixel 仍未通過，保留 case："
+                f"{validation.get('text') or '--'} | {validation.get('reason') or '--'}"
+            )
+        print(
+            "EXP OCR learning applied: "
+            f"{case_id} -> {result['sample_id']} | templates={regen['template_count']} | "
+            f"pixel_valid={bool(validation.get('success'))}"
+        )
+        self.experience_learning_status.set(status)
+        self._reload_experience_learning_cases()
+
+    def _delete_current_experience_learning_case(self) -> None:
+        case = self._current_experience_learning_case()
+        if case is None:
+            self.experience_learning_status.set("沒有可刪除的 case")
+            return
+        case_id = str(case.get("id", ""))
+        delete_experience_ocr_learning_case(case_id)
+        print(f"EXP OCR learning case deleted: {case_id}")
+        self._reload_experience_learning_cases()
+
+    def _previous_experience_learning_case(self) -> None:
+        if not self.experience_learning_cases:
+            return
+        self.experience_learning_index = (self.experience_learning_index - 1) % len(self.experience_learning_cases)
+        self._render_current_experience_learning_case()
+
+    def _next_experience_learning_case(self) -> None:
+        if not self.experience_learning_cases:
+            return
+        self.experience_learning_index = (self.experience_learning_index + 1) % len(self.experience_learning_cases)
+        self._render_current_experience_learning_case()
+
+    def _current_experience_learning_case(self) -> dict[str, Any] | None:
+        if not self.experience_learning_cases:
+            return None
+        return self.experience_learning_cases[self.experience_learning_index]
+
     def _ctk_preview_image_from_ppm(self, image_data: bytes) -> ctk.CTkImage:
         from PIL import Image
 
         with Image.open(io.BytesIO(image_data)) as pil_image:
             preview_image = pil_image.copy()
+        return ctk.CTkImage(
+            light_image=preview_image,
+            dark_image=preview_image,
+            size=preview_image.size,
+        )
+
+    def _ctk_image_from_path(self, path: Path, *, max_size: tuple[int, int]) -> ctk.CTkImage:
+        from PIL import Image
+
+        with Image.open(path) as pil_image:
+            preview_image = pil_image.convert("RGB")
+        preview_image.thumbnail(max_size)
         return ctk.CTkImage(
             light_image=preview_image,
             dark_image=preview_image,

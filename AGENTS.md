@@ -30,8 +30,17 @@
 - 調整舊公開 import path 時需保留相容性，例如 `from maple_star.controller import AutoPotionController`、`from maple_star.gui import AutoPotionSettingsGui`、`from maple_star.experience import ExperienceEfficiencyTracker`、`from maple_star.settings import AutoPotionSettings`。
 - 快捷鍵設定目前設計為單鍵；設定快捷鍵時必須暫時攔截腳本功能，避免按鍵設定動作同時觸發暫停、停止或經驗統計切換。
 
-## PaddleOCR 與經驗效率
-- 經驗效率功能使用 PaddleOCR，主要語言為繁體中文，模型設定預設使用 `chinese_cht` 與 PP-OCRv5 mobile det/rec。
+## Pixel OCR / PaddleOCR 與經驗效率
+- 經驗效率功能以 Maple EXP 固定像素字型辨識為 primary；只有 Pixel OCR 失敗、低信心或候選衝突時才走 PaddleOCR fallback。
+- `PaddleExperienceTextReader` 是相容名稱，內部應保留 Pixel primary + PaddleOCR fallback 的順序，不要再導入其他 OCR runtime 或依賴。
+- Pixel OCR 不應以 EXP 位數作為可信條件；可信度應來自 glyph confidence、候選衝突、括號內百分比文字與 bar hint guard。
+- EXP 百分比以 UI 括號內文字為主，綠條估算只做 guard，不用來改寫百分比。
+- Pixel OCR learning pending bundle 預設寫入 `%LOCALAPPDATA%\MapleStar\experience_ocr_pending\`，不得直接污染 repo；只有使用 `tools/experience_ocr_learning.py promote` 後的 fixture/template 才可提交。
+- GUI 的 `OCR學習` 視窗可即時檢視 pending case、輸入正確 `EXP[percent%]`、套用並重建 Pixel template；套用前仍需人工確認畫面文字正確。
+- 建立 pending case 時需做去重：完全相同 ROI hash、或同 trigger / 同 EXP 文字 / 同 Pixel failure reason 的 pending case 不應重複新增。
+- `tools/experience_ocr_learning.py dedupe` 可清理既有重複 pending case；`delete` 可刪單筆 pending case。
+- Pixel OCR runtime template 需放在 package 內可打包資料或 module，不得依賴 `tests/fixtures` 才能辨識。
+- PaddleOCR fallback 主要語言為繁體中文，模型設定預設使用 `chinese_cht` 與 PP-OCRv5 mobile det/rec。
 - 本機開發優先使用 `.venv-paddleocr`；不要把 venv、模型 cache 或下載模型提交。
 - 發行打包也必須使用 `.venv-paddleocr` 內的 Python 3.11-3.13；不要用系統 Python 3.14 打包，因為 PaddleOCR / PaddlePaddle 依賴不支援該環境。
 - PaddleOCR 初始化、辨識錯誤與低信心樣本應輸出到 GUI console 或狀態欄的短訊息，不應造成主 GUI 卡住。

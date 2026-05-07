@@ -1950,10 +1950,14 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.experience_tracker.last_status = "樣本拒絕：EXP 跳動與百分比不一致"
         controller.experience_tracker.snapshot.return_value = ExperienceSnapshot(sample_count=2, status="統計中")
 
-        with patch("builtins.print") as print_mock:
+        with (
+            patch("builtins.print") as print_mock,
+            patch("maple_star.controllers.auto_potion_controller.save_experience_ocr_learning_case") as save_case,
+        ):
             self.assertTrue(controller._process_experience_ocr_job(8.0))
 
         controller.experience_tracker.record_ocr_result.assert_called_once_with(True)
+        save_case.assert_not_called()
         printed = "\n".join(call.args[0] for call in print_mock.call_args_list)
         self.assertIn("經驗效率 異常樣本拒絕", printed)
         self.assertIn("288900[27.08%]", printed)
