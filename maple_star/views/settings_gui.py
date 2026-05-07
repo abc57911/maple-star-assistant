@@ -13,7 +13,7 @@ from typing import Callable
 
 import customtkinter as ctk
 
-from ..constants import MAX_CONSOLE_LINES
+from ..constants import MAX_CONSOLE_CHARS, MAX_CONSOLE_LINES
 from ..adapters.debug_logging import install_tk_exception_logging, write_debug_text
 from ..models.experience import (
     ExperienceSnapshot,
@@ -22,8 +22,10 @@ from ..models.experience import (
     format_exp,
     format_exp_rate,
     format_ocr_success_rate,
+    format_rate_confidence,
 )
 from ..adapters.key_capture import DETECTABLE_KEY_VKS, event_to_hotkey, pressed_detectable_vks, vk_to_key_name
+from ..adapters.window_style import apply_background_toolwindow_style
 from ..models.settings import (
     SETTINGS_PATH,
     AutoPotionSettings,
@@ -85,7 +87,7 @@ CONSOLE_HEADER_BODY_RESERVED_HEIGHT = 54
 WINDOW_CONTENT_VERTICAL_PADDING = 24
 EXP_PANEL_WIDTH = 420
 DETECTION_PANEL_WIDTH = 292
-MONITOR_PANEL_HEIGHT = 180
+MONITOR_PANEL_HEIGHT = 204
 WINDOW_EXPANDED_MIN_WIDTH = LEFT_PANEL_MAX_WIDTH + CONSOLE_MIN_WIDTH + 40
 WINDOW_COLLAPSED_MIN_WIDTH = LEFT_PANEL_MAX_WIDTH + 32
 WINDOW_MIN_WIDTH = WINDOW_EXPANDED_MIN_WIDTH
@@ -94,7 +96,7 @@ WINDOW_DEFAULT_WIDTH = 1240
 WINDOW_DEFAULT_HEIGHT = 835
 WINDOW_COLLAPSED_WIDTH = WINDOW_COLLAPSED_MIN_WIDTH
 COMPACT_WINDOW_MIN_WIDTH = COMPACT_PANEL_WIDTH + 24
-COMPACT_WINDOW_MIN_HEIGHT = 190
+COMPACT_WINDOW_MIN_HEIGHT = 228
 COMPACT_WINDOW_WIDTH = COMPACT_WINDOW_MIN_WIDTH
 COMPACT_WINDOW_HEIGHT = COMPACT_WINDOW_MIN_HEIGHT
 MINIMIZED_WINDOW_POSITION_SENTINEL = -30000
@@ -107,14 +109,14 @@ SECTION_RADIUS = 10
 CONTROL_RADIUS = 7
 SECTION_PAD_X = 12
 SECTION_PAD_Y = 10
-UI_FONT = (FONT_FAMILY, 13)
-SMALL_FONT = (FONT_FAMILY, 12)
-BUTTON_FONT = (FONT_FAMILY, 14, "bold")
-TITLE_FONT = (FONT_FAMILY, 13, "bold")
-MONO_FONT = (MONO_FONT_FAMILY, 12)
-EXP_FONT = (FONT_FAMILY, 14)
-EXP_MONO_FONT = (MONO_FONT_FAMILY, 13)
-CONSOLE_FONT = (CONSOLE_FONT_FAMILY, 14)
+UI_FONT = (FONT_FAMILY, 14)
+SMALL_FONT = (FONT_FAMILY, 13)
+BUTTON_FONT = (FONT_FAMILY, 15, "bold")
+TITLE_FONT = (FONT_FAMILY, 14, "bold")
+MONO_FONT = (MONO_FONT_FAMILY, 13)
+EXP_FONT = (FONT_FAMILY, 15)
+EXP_MONO_FONT = (MONO_FONT_FAMILY, 14)
+CONSOLE_FONT = (CONSOLE_FONT_FAMILY, 15)
 WINDOW_INTERACTION_GRACE_SECONDS = 0.12
 RESIZE_SETTLE_DELAY_MS = 140
 TOGGLE_NOTICE_VERTICAL_RATIO = 0.45
@@ -186,6 +188,7 @@ class AutoPotionSettingsGui:
         self.topmost_button: ctk.CTkButton | None = None
         self.console_section: ctk.CTkFrame | None = None
         self.console_title_label: ctk.CTkLabel | None = None
+        self.console_clear_button: ctk.CTkButton | None = None
         self.console_toggle_button: ctk.CTkButton | None = None
         self.console_restore_button: ctk.CTkButton | None = None
         self.console_frame: ctk.CTkFrame | None = None
@@ -234,6 +237,7 @@ class AutoPotionSettingsGui:
         self.toggle_hotkey = tk.StringVar(value=settings.toggle_hotkey)
         self.emergency_stop_hotkey = tk.StringVar(value=settings.emergency_stop_hotkey)
         self.experience_toggle_hotkey = tk.StringVar(value=settings.experience_toggle_hotkey)
+        self.experience_reset_hotkey = tk.StringVar(value=settings.experience_reset_hotkey)
         self.hp_current = tk.StringVar(value="HP: --%")
         self.mp_current = tk.StringVar(value="MP: --%")
         self.status = tk.StringVar(value="只在楓星為前景視窗時生效")
@@ -247,6 +251,7 @@ class AutoPotionSettingsGui:
         self.exp_rate_10m_status = tk.StringVar(value="10m：--")
         self.exp_rate_1h_status = tk.StringVar(value="1h：--")
         self.exp_eta_status = tk.StringVar(value="升級預估：--    時間：--")
+        self.exp_quality_status = tk.StringVar(value="樣本：--    信賴度：--")
         self.exp_reader_status = tk.StringVar(value="狀態：尚未開始")
 
         frame = ctk.CTkFrame(self.root, fg_color=APP_BG, corner_radius=0)
@@ -290,6 +295,13 @@ class AutoPotionSettingsGui:
         exp_toggle_entry.bind(
             "<Button-1>",
             lambda event: self._start_key_detection_from_entry(event, self.experience_toggle_hotkey, "經驗統計熱鍵"),
+        )
+        self._label(control_hotkey_frame, "重置統計").grid(row=1, column=7, sticky="w", padx=(16, 4), pady=(0, 6))
+        exp_reset_entry = self._entry(control_hotkey_frame, self.experience_reset_hotkey, width=HOTKEY_ENTRY_WIDTH, justify="center")
+        exp_reset_entry.grid(row=1, column=8, sticky="w", padx=(0, 8), pady=(0, 6))
+        exp_reset_entry.bind(
+            "<Button-1>",
+            lambda event: self._start_key_detection_from_entry(event, self.experience_reset_hotkey, "重置統計熱鍵"),
         )
 
         profile_section, _header, profile_frame = self._build_section(controls_frame, "設定檔", row=1)
@@ -345,7 +357,9 @@ class AutoPotionSettingsGui:
         self._label(exp_rate_frame, textvariable=self.exp_rate_5m_status, font=EXP_MONO_FONT).grid(row=0, column=0, sticky="w")
         self._label(exp_rate_frame, textvariable=self.exp_rate_10m_status, font=EXP_MONO_FONT).grid(row=0, column=1, sticky="w")
         self._label(exp_rate_frame, textvariable=self.exp_rate_1h_status, font=EXP_MONO_FONT).grid(row=0, column=2, sticky="w")
-        self._label(exp_frame, textvariable=self.exp_reader_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=3, column=0, sticky="w", padx=(0, 8), pady=(0, 0))
+        self._label(exp_frame, textvariable=self.exp_quality_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=3, column=0, sticky="w", padx=(0, 8), pady=(0, 0))
+        exp_frame.rowconfigure(4, weight=1, minsize=12)
+        self._label(exp_frame, textvariable=self.exp_reader_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=5, column=0, sticky="sw", padx=(0, 8), pady=(0, 0))
 
         detection_section, detection_title, detection_frame = self._build_section(monitor_frame, "", row=0, column=1, sticky="nsew", pady=0)
         self.detection_section = detection_section
@@ -448,6 +462,13 @@ class AutoPotionSettingsGui:
         console_section.grid_propagate(False)
         self.console_title_label = self._title_label(console_header, "Console")
         self.console_title_label.grid(row=0, column=0, sticky="w", padx=8, pady=4)
+        self.console_clear_button = self._button(
+            console_header,
+            "清除",
+            self.clear_console,
+            width=58,
+        )
+        self.console_clear_button.grid(row=0, column=98, sticky="e", padx=(8, 0), pady=4)
         self.console_toggle_button = self._button(
             console_header,
             "‹",
@@ -1197,7 +1218,7 @@ class AutoPotionSettingsGui:
             border_width=1,
             border_color=SECTION_HEADER_BORDER,
             text_color=HEADER_TEXT,
-            font=(FONT_FAMILY, 14, "bold"),
+            font=(FONT_FAMILY, 15, "bold"),
         )
         button.bind("<Enter>", lambda _event, widget=button: self._handle_tooltip_enter(widget, text_provider))
         button.bind("<Leave>", lambda _event, widget=button: self._schedule_tooltip_hide(widget))
@@ -1229,13 +1250,10 @@ class AutoPotionSettingsGui:
         self._hide_tooltip()
         if self.closed:
             return
-        tooltip = ctk.CTkToplevel(self.root, fg_color=TOOLTIP_BG)
+        tooltip = self._create_auxiliary_window(fg_color=TOOLTIP_BG, overrideredirect=True)
         self.tooltip_window = tooltip
         self.tooltip_windows.append(tooltip)
         self.tooltip_anchor_widget = widget
-        tooltip.withdraw()
-        tooltip.overrideredirect(True)
-        tooltip.attributes("-topmost", True)
         bubble = ctk.CTkFrame(
             tooltip,
             fg_color=TOOLTIP_BG,
@@ -1256,6 +1274,7 @@ class AutoPotionSettingsGui:
         )
         tooltip_label.grid(row=0, column=0, sticky="nsew", padx=12, pady=8)
         tooltip.update_idletasks()
+        self._prepare_auxiliary_window_for_show(tooltip)
         x = widget.winfo_rootx() + widget.winfo_width() + 8
         y = widget.winfo_rooty() - 2
         tooltip.geometry(f"+{x}+{y}")
@@ -1585,6 +1604,7 @@ class AutoPotionSettingsGui:
         self.toggle_hotkey.set(self.settings.toggle_hotkey)
         self.emergency_stop_hotkey.set(self.settings.emergency_stop_hotkey)
         self.experience_toggle_hotkey.set(self.settings.experience_toggle_hotkey)
+        self.experience_reset_hotkey.set(self.settings.experience_reset_hotkey)
         self.set_window_topmost(self.settings.window_topmost)
         self.set_console_collapsed(self.settings.console_collapsed)
         self.set_compact_experience_mode(self.settings.compact_experience_mode)
@@ -1688,11 +1708,9 @@ class AutoPotionSettingsGui:
         self.detecting_key_label = label
         self.detecting_vk_down = pressed_detectable_vks()
         self.set_status(f"請按下要設定為 {label} 的按鍵")
-        self.key_detection_window = ctk.CTkToplevel(self.root, fg_color=PANEL_BG)
+        self.key_detection_window = self._create_auxiliary_window(fg_color=PANEL_BG)
         self.key_detection_window.title("快捷鍵偵測")
         self.key_detection_window.resizable(False, False)
-        self.key_detection_window.transient(self.root)
-        self.key_detection_window.attributes("-topmost", True)
         self.key_detection_window.protocol("WM_DELETE_WINDOW", self.cancel_key_detection)
         self._label(
             self.key_detection_window,
@@ -1701,9 +1719,11 @@ class AutoPotionSettingsGui:
             font=TITLE_FONT,
         ).grid(row=0, column=0, sticky="nsew", padx=18, pady=16)
         self.key_detection_window.update_idletasks()
+        self._prepare_auxiliary_window_for_show(self.key_detection_window)
         x = self.root.winfo_rootx() + 80
         y = self.root.winfo_rooty() + 80
         self.key_detection_window.geometry(f"+{x}+{y}")
+        self.key_detection_window.deiconify()
         self.key_detection_window.bind("<KeyPress>", self._capture_keypress)
         try:
             self.key_detection_window.grab_set()
@@ -1894,6 +1914,9 @@ class AutoPotionSettingsGui:
         self.settings.experience_toggle_hotkey = (
             self.experience_toggle_hotkey.get().strip() or self.settings.experience_toggle_hotkey
         )
+        self.settings.experience_reset_hotkey = (
+            self.experience_reset_hotkey.get().strip() or self.settings.experience_reset_hotkey
+        )
         self.settings.console_collapsed = self.console_collapsed
         self.settings.combo_group_collapsed = self.combo_group_collapsed
         self.settings.compact_experience_mode = self.compact_experience_mode
@@ -1941,6 +1964,9 @@ class AutoPotionSettingsGui:
         self.exp_eta_status.set(
             f"升級預估：{format_eta(snapshot.eta_seconds)}    時間：{format_duration(snapshot.elapsed_seconds)}"
         )
+        sample_accept = format_ocr_success_rate(snapshot.sample_accept_count, snapshot.sample_attempt_count)
+        confidence = format_rate_confidence(snapshot.rate_confidence)
+        self.exp_quality_status.set(f"樣本：{sample_accept}    信賴度：{confidence}")
         self.exp_reader_status.set(f"狀態：{snapshot.status}")
 
     def set_status(self, message: str) -> None:
@@ -1963,6 +1989,34 @@ class AutoPotionSettingsGui:
             foreground_label = foreground_label[:23] + "..."
         self.runtime_foreground_status.set(f"前景：{foreground_label}")
 
+    def _create_auxiliary_window(
+        self,
+        *,
+        fg_color: str,
+        overrideredirect: bool = False,
+    ) -> ctk.CTkToplevel:
+        window = ctk.CTkToplevel(self.root, fg_color=fg_color)
+        window.withdraw()
+        try:
+            window.transient(self.root)
+        except tk.TclError:
+            pass
+        try:
+            window.attributes("-toolwindow", True)
+        except tk.TclError:
+            pass
+        if overrideredirect:
+            window.overrideredirect(True)
+        window.attributes("-topmost", True)
+        return window
+
+    def _prepare_auxiliary_window_for_show(self, window: ctk.CTkToplevel) -> None:
+        try:
+            window.update_idletasks()
+        except tk.TclError:
+            return
+        apply_background_toolwindow_style(window)
+
     def show_toggle_notice(self, message: str) -> None:
         if self.closed:
             return
@@ -1970,11 +2024,8 @@ class AutoPotionSettingsGui:
         self._destroy_toggle_notice()
         target_rect = self._foreground_client_rect()
         try:
-            notice = ctk.CTkToplevel(self.root, fg_color=NOTICE_BG)
+            notice = self._create_auxiliary_window(fg_color=NOTICE_BG, overrideredirect=True)
             self.toggle_notice_window = notice
-            notice.withdraw()
-            notice.overrideredirect(True)
-            notice.attributes("-topmost", True)
             try:
                 notice.attributes("-alpha", 0.92)
             except tk.TclError:
@@ -1990,6 +2041,7 @@ class AutoPotionSettingsGui:
             ).grid(row=0, column=0, sticky="nsew", padx=24, pady=10)
 
             notice.update_idletasks()
+            self._prepare_auxiliary_window_for_show(notice)
             x, y = self._toggle_notice_position(notice.winfo_width(), notice.winfo_height(), target_rect)
             notice.geometry(f"+{x}+{y}")
             notice.deiconify()
@@ -2095,9 +2147,7 @@ class AutoPotionSettingsGui:
         try:
             self.console.configure(state="normal")
             self.console.insert("end", text)
-            line_count = int(self.console.index("end-1c").split(".")[0])
-            if line_count > MAX_CONSOLE_LINES:
-                self.console.delete("1.0", f"{line_count - MAX_CONSOLE_LINES}.0")
+            self._trim_console()
             self.console.see("end")
             self.console.configure(state="disabled")
         except tk.TclError as exc:
@@ -2107,3 +2157,26 @@ class AutoPotionSettingsGui:
             if now - self.last_gui_error_at >= 2.0:
                 print(f"GUI console 更新暫時失敗，已略過：{exc}", file=self.original if hasattr(self, "original") else sys.__stdout__)
                 self.last_gui_error_at = now
+
+    def clear_console(self) -> None:
+        if self.closed:
+            return
+        try:
+            self.console.configure(state="normal")
+            self.console.delete("1.0", "end")
+            self.console.configure(state="disabled")
+        except tk.TclError as exc:
+            if self.closed:
+                return
+            now = time.monotonic()
+            if now - self.last_gui_error_at >= 2.0:
+                print(f"GUI console 清除暫時失敗，已略過：{exc}", file=sys.__stdout__)
+                self.last_gui_error_at = now
+
+    def _trim_console(self) -> None:
+        line_count = int(self.console.index("end-1c").split(".")[0])
+        if line_count > MAX_CONSOLE_LINES:
+            self.console.delete("1.0", f"{line_count - MAX_CONSOLE_LINES + 1}.0")
+        overflow_start = self.console.index(f"end-{MAX_CONSOLE_CHARS + 1}c")
+        if overflow_start != "1.0":
+            self.console.delete("1.0", overflow_start)

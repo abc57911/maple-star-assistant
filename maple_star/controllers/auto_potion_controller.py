@@ -59,11 +59,9 @@ from ..constants import (
     PM_REMOVE,
     POTION_EFFECT_AUTO_HOLD_BAR_TYPES,
     POTION_EFFECT_DAMAGE_GRACE_SECONDS,
-    POTION_EFFECT_HP_NO_EFFECT_NEAR_THRESHOLD_MARGIN_PERCENT,
     POTION_EFFECT_HP_STABILITY_CONFIRMATION_MIN_SAMPLES,
     POTION_EFFECT_HP_STABILITY_CONFIRMATION_SECONDS,
     POTION_EFFECT_HP_STABILITY_CONFIRMATION_VOLATILITY_TOLERANCE_PERCENT,
-    POTION_EFFECT_NO_EFFECT_NEAR_THRESHOLD_MARGIN_PERCENT,
     POTION_EFFECT_NO_EFFECT_LIMIT,
     POTION_EFFECT_OBSERVATION_SECONDS,
     POTION_EFFECT_PRE_OBSERVATION_MIN_SAMPLES,
@@ -87,12 +85,15 @@ from ..constants import (
 from ..adapters.debug_logging import log_exception
 from ..services.control_hotkey_worker import (
     CONTROL_HOTKEY_EMERGENCY_STOP,
+    CONTROL_HOTKEY_EXPERIENCE_RESET,
     CONTROL_HOTKEY_EXPERIENCE_TOGGLE,
     CONTROL_HOTKEY_TOGGLE,
     ControlHotkeyWorker,
 )
 from ..models.experience import (
     ExperienceEfficiencyTracker,
+    ExperienceOcrImage,
+    ExperienceSnapshot,
     ExperienceTextReading,
     PaddleExperienceTextReader,
 )
@@ -168,6 +169,8 @@ class AutoPotionController:
         self.sct = mss.mss()
         self.next_capture_at = 0.0
         self.next_experience_capture_at = 0.0
+        self.experience_pause_started_at: float | None = None
+        self.experience_total_paused_seconds = 0.0
         self.last_hp_drink_at = -999.0
         self.last_mp_drink_at = -999.0
         self.hp_potion_effect_attempts: list[PotionEffectAttempt] = []
@@ -191,17 +194,21 @@ class AutoPotionController:
         self.hotkey_registered = False
         self.emergency_hotkey_registered = False
         self.experience_toggle_hotkey_registered = False
+        self.experience_reset_hotkey_registered = False
         self.control_hotkey_worker = ControlHotkeyWorker()
         self.control_hotkey_worker.start()
         self.toggle_hotkey_was_down = False
         self.emergency_stop_hotkey_was_down = False
         self.experience_toggle_hotkey_was_down = False
+        self.experience_reset_hotkey_was_down = False
         self.registered_toggle_hotkey_vk = 0
         self.registered_emergency_stop_hotkey_vk = 0
         self.registered_experience_toggle_hotkey_vk = 0
+        self.registered_experience_reset_hotkey_vk = 0
         self.control_hotkeys_suppressed_until_release = False
         self.last_toggle_hotkey_at = -999.0
         self.last_experience_toggle_hotkey_at = -999.0
+        self.last_experience_reset_hotkey_at = -999.0
         self.emergency_stop_requested = False
         self.last_action = "啟動"
         self.last_bar_debug: dict[str, BarDetectionDebug] = {
@@ -256,16 +263,24 @@ class AutoPotionController:
         toggle_vk = self._control_hotkey_vk(self.settings.toggle_hotkey, "F11")
         emergency_vk = self._control_hotkey_vk(self.settings.emergency_stop_hotkey, "Pause")
         experience_vk = self._control_hotkey_vk(self.settings.experience_toggle_hotkey, "F10")
+        experience_reset_vk = self._control_hotkey_vk(self.settings.experience_reset_hotkey, "F9")
         if (
             toggle_vk == self.registered_toggle_hotkey_vk
             and emergency_vk == self.registered_emergency_stop_hotkey_vk
             and experience_vk == self.registered_experience_toggle_hotkey_vk
+            and experience_reset_vk == self.registered_experience_reset_hotkey_vk
         ):
             return
         self._unregister_toggle_hotkey()
-        self._register_toggle_hotkey(toggle_vk, emergency_vk, experience_vk)
+        self._register_toggle_hotkey(toggle_vk, emergency_vk, experience_vk, experience_reset_vk)
 
-    def _register_toggle_hotkey(self, toggle_vk: int, emergency_vk: int, experience_vk: int) -> None:
+    def _register_toggle_hotkey(
+        self,
+        toggle_vk: int,
+        emergency_vk: int,
+        experience_vk: int,
+        experience_reset_vk: int = 0,
+    ) -> None:
         self.registered_toggle_hotkey_vk = toggle_vk
         self.hotkey_registered = bool(toggle_vk)
 
@@ -274,6 +289,9 @@ class AutoPotionController:
 
         self.registered_experience_toggle_hotkey_vk = experience_vk
         self.experience_toggle_hotkey_registered = bool(experience_vk)
+
+        self.registered_experience_reset_hotkey_vk = experience_reset_vk
+        self.experience_reset_hotkey_registered = bool(experience_reset_vk)
         worker = getattr(self, "control_hotkey_worker", None)
         if worker is not None:
             worker.update_hotkeys(
@@ -281,6 +299,7 @@ class AutoPotionController:
                     CONTROL_HOTKEY_TOGGLE: toggle_vk,
                     CONTROL_HOTKEY_EMERGENCY_STOP: emergency_vk,
                     CONTROL_HOTKEY_EXPERIENCE_TOGGLE: experience_vk,
+                    CONTROL_HOTKEY_EXPERIENCE_RESET: experience_reset_vk,
                 }
             )
 
@@ -291,6 +310,8 @@ class AutoPotionController:
         self.registered_emergency_stop_hotkey_vk = 0
         self.experience_toggle_hotkey_registered = False
         self.registered_experience_toggle_hotkey_vk = 0
+        self.experience_reset_hotkey_registered = False
+        self.registered_experience_reset_hotkey_vk = 0
         worker = getattr(self, "control_hotkey_worker", None)
         if worker is not None:
             worker.update_hotkeys({})
@@ -300,6 +321,7 @@ class AutoPotionController:
             self.toggle_hotkey_was_down = False
             self.emergency_stop_hotkey_was_down = False
             self.experience_toggle_hotkey_was_down = False
+            self.experience_reset_hotkey_was_down = False
             self.control_hotkeys_suppressed_until_release = False
             self._discard_control_hotkey_messages()
             return
@@ -315,16 +337,27 @@ class AutoPotionController:
                 self.control_hotkeys_suppressed_until_release = False
             return
 
-        worker_events = self._drain_control_hotkey_worker_events()
-        if worker_events:
-            now = time.monotonic()
-            for event in worker_events:
-                self._dispatch_control_hotkey_event(event, now)
-            return
+        worker = getattr(self, "control_hotkey_worker", None)
+        if worker is not None:
+            worker_events = self._drain_control_hotkey_worker_events()
+            cached_down = self._cached_control_hotkey_worker_down_states()
+            if cached_down is not None:
+                self._apply_control_hotkey_down_states(cached_down)
+                if worker_events:
+                    now = time.monotonic()
+                    for event in worker_events:
+                        self._dispatch_control_hotkey_event(event, now)
+                return
+            if worker_events:
+                now = time.monotonic()
+                for event in worker_events:
+                    self._dispatch_control_hotkey_event(event, now)
+                return
 
         toggle_triggered = False
         emergency_stop_triggered = False
         experience_toggle_triggered = False
+        experience_reset_triggered = False
         message = Msg()
         while user32.PeekMessageW(
             ctypes.byref(message),
@@ -364,18 +397,38 @@ class AutoPotionController:
             experience_toggle_triggered = True
         self.experience_toggle_hotkey_was_down = experience_is_down
 
+        experience_reset_is_down = bool(
+            self.registered_experience_reset_hotkey_vk
+            and user32.GetAsyncKeyState(self.registered_experience_reset_hotkey_vk) & ASYNC_KEY_DOWN_MASK
+        )
+        if experience_reset_is_down and not self.experience_reset_hotkey_was_down:
+            experience_reset_triggered = True
+        self.experience_reset_hotkey_was_down = experience_reset_is_down
+
         if emergency_stop_triggered:
             self.emergency_stop()
         elif toggle_triggered:
             self._try_toggle_scripts_enabled(time.monotonic())
         elif experience_toggle_triggered:
             self._try_toggle_experience_efficiency(time.monotonic())
+        elif experience_reset_triggered:
+            self._try_reset_experience_statistics(time.monotonic())
 
     def _drain_control_hotkey_worker_events(self) -> list[str]:
         worker = getattr(self, "control_hotkey_worker", None)
         if worker is None:
             return []
         return worker.drain_events()
+
+    def _cached_control_hotkey_worker_down_states(self) -> dict[str, bool] | None:
+        worker = getattr(self, "control_hotkey_worker", None)
+        if worker is None:
+            return None
+        cached_down_states = getattr(worker, "cached_down_states", None)
+        if not callable(cached_down_states):
+            return None
+        down = cached_down_states()
+        return down if isinstance(down, dict) else None
 
     def _dispatch_control_hotkey_event(self, event: str, now: float) -> None:
         if event == CONTROL_HOTKEY_EMERGENCY_STOP:
@@ -384,6 +437,8 @@ class AutoPotionController:
             self._try_toggle_scripts_enabled(now)
         elif event == CONTROL_HOTKEY_EXPERIENCE_TOGGLE:
             self._try_toggle_experience_efficiency(now)
+        elif event == CONTROL_HOTKEY_EXPERIENCE_RESET:
+            self._try_reset_experience_statistics(now)
 
     def is_key_capture_blocking_actions(self) -> bool:
         return self.gui.is_detecting_key() or self.gui.is_key_detection_release_pending()
@@ -391,10 +446,7 @@ class AutoPotionController:
     def _sync_control_hotkey_down_states(self) -> None:
         worker = getattr(self, "control_hotkey_worker", None)
         if worker is not None:
-            down = worker.sync_down_states()
-            self.toggle_hotkey_was_down = down.get(CONTROL_HOTKEY_TOGGLE, False)
-            self.emergency_stop_hotkey_was_down = down.get(CONTROL_HOTKEY_EMERGENCY_STOP, False)
-            self.experience_toggle_hotkey_was_down = down.get(CONTROL_HOTKEY_EXPERIENCE_TOGGLE, False)
+            self._apply_control_hotkey_down_states(worker.sync_down_states())
             return
         self.toggle_hotkey_was_down = bool(
             self.registered_toggle_hotkey_vk
@@ -408,12 +460,23 @@ class AutoPotionController:
             self.registered_experience_toggle_hotkey_vk
             and user32.GetAsyncKeyState(self.registered_experience_toggle_hotkey_vk) & ASYNC_KEY_DOWN_MASK
         )
+        self.experience_reset_hotkey_was_down = bool(
+            self.registered_experience_reset_hotkey_vk
+            and user32.GetAsyncKeyState(self.registered_experience_reset_hotkey_vk) & ASYNC_KEY_DOWN_MASK
+        )
+
+    def _apply_control_hotkey_down_states(self, down: dict[str, bool]) -> None:
+        self.toggle_hotkey_was_down = down.get(CONTROL_HOTKEY_TOGGLE, False)
+        self.emergency_stop_hotkey_was_down = down.get(CONTROL_HOTKEY_EMERGENCY_STOP, False)
+        self.experience_toggle_hotkey_was_down = down.get(CONTROL_HOTKEY_EXPERIENCE_TOGGLE, False)
+        self.experience_reset_hotkey_was_down = down.get(CONTROL_HOTKEY_EXPERIENCE_RESET, False)
 
     def _any_control_hotkey_is_down(self) -> bool:
         return (
             self.toggle_hotkey_was_down
             or self.emergency_stop_hotkey_was_down
             or self.experience_toggle_hotkey_was_down
+            or self.experience_reset_hotkey_was_down
         )
 
     def _discard_control_hotkey_messages(self) -> None:
@@ -447,6 +510,17 @@ class AutoPotionController:
             return
         self.last_experience_toggle_hotkey_at = now
         self.toggle_experience_efficiency()
+
+    def _try_reset_experience_statistics(self, now: float) -> None:
+        if now - self.last_experience_reset_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
+            return
+        self.last_experience_reset_hotkey_at = now
+        self.reset_experience_statistics()
+        self.gui.set_experience_snapshot(ExperienceSnapshot(status="已重置"))
+        self.gui.set_status("經驗統計已重置")
+        self.gui.show_toggle_notice("經驗統計已重置")
+        self.last_action = f"{self.settings.experience_reset_hotkey} 經驗統計重置"
+        print(f"{self.settings.experience_reset_hotkey}：經驗統計已重置")
 
     def toggle_auto_drink_enabled(self) -> None:
         if self.auto_drink_enabled and self._has_out_of_potion_hold():
@@ -482,14 +556,15 @@ class AutoPotionController:
         self.toggle_auto_drink_enabled()
 
     def toggle_experience_efficiency(self) -> None:
+        now = time.monotonic()
         enabled = not self.settings.exp_efficiency_enabled
         self.gui.set_exp_efficiency_enabled(enabled)
         if enabled:
-            now = time.monotonic()
             self._stop_experience_ocr_job()
+            effective_now = self._resume_experience_clock(now)
             self.next_experience_capture_at = 0.0
             self.experience_tracker.clear_transient_rejection()
-            snapshot = self.experience_tracker.snapshot(now)
+            snapshot = self.experience_tracker.snapshot(effective_now)
             snapshot.status = "等待下一次 EXP 樣本" if snapshot.sample_count else "等待有效 EXP 樣本"
             self.gui.set_experience_snapshot(snapshot)
             self._play_toggle_beep(RESUME_BEEP_PATTERN)
@@ -500,7 +575,8 @@ class AutoPotionController:
             return
 
         self._stop_experience_ocr_job()
-        snapshot = self.experience_tracker.snapshot(time.monotonic())
+        effective_now = self._pause_experience_clock(now)
+        snapshot = self.experience_tracker.snapshot(effective_now)
         snapshot.status = "已停用，保留統計" if snapshot.sample_count else "已停用"
         self.gui.set_experience_snapshot(snapshot)
         self._play_toggle_beep(PAUSE_BEEP_PATTERN)
@@ -529,6 +605,7 @@ class AutoPotionController:
         self.last_mp_drink_at = now
         self._clear_potion_effect_state()
         self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
+        self._pause_experience_for_inactive_state(now, "總開關已暫停，保留統計")
         self.gui.set_status(f"{self.settings.emergency_stop_hotkey} 總開關：所有功能已暫停")
         self.gui.show_toggle_notice(f"{self.settings.emergency_stop_hotkey} 總開關")
         self.gui.set_current_percentages(None, None)
@@ -579,6 +656,7 @@ class AutoPotionController:
 
         if self.is_key_capture_blocking_actions():
             self._set_gameplay_hud_active(False, now)
+            self._pause_experience_for_inactive_state(now, "設定快捷鍵中，保留統計")
             self.gui.set_current_percentages(None, None)
             return
 
@@ -588,12 +666,14 @@ class AutoPotionController:
 
         if not self.scripts_enabled:
             self._set_gameplay_hud_active(False, now)
+            self._pause_experience_for_inactive_state(now, "總開關已暫停，保留統計")
             self.gui.set_status(f"總開關已關閉，按 {self.settings.emergency_stop_hotkey} 開啟")
             self.gui.set_current_percentages(None, None)
             return
 
         if not self.is_target_window_active():
             self._set_gameplay_hud_active(False, now)
+            self._pause_experience_for_inactive_state(now, "等待楓星前景，保留統計")
             self.gui.set_status("等待楓星成為前景視窗")
             self.gui.set_current_percentages(None, None)
             return
@@ -639,7 +719,8 @@ class AutoPotionController:
                 self._update_experience_efficiency(now)
             else:
                 self._stop_experience_ocr_job()
-                snapshot = self.experience_tracker.snapshot(now)
+                effective_now = self._pause_experience_clock(now)
+                snapshot = self.experience_tracker.snapshot(effective_now)
                 snapshot.status = "已停用，保留統計" if snapshot.sample_count else "已停用"
                 self.gui.set_experience_snapshot(snapshot)
             if self.auto_drink_enabled and hp_percent is not None and mp_percent is not None:
@@ -666,6 +747,28 @@ class AutoPotionController:
         self._stop_experience_ocr_job()
         self.experience_tracker.reset()
         self.next_experience_capture_at = 0.0
+
+    def _experience_effective_time(self, now: float) -> float:
+        paused_total = float(getattr(self, "experience_total_paused_seconds", 0.0))
+        paused_since = getattr(self, "experience_pause_started_at", None)
+        raw_reference = paused_since if paused_since is not None else now
+        return max(0.0, raw_reference - paused_total)
+
+    def _pause_experience_clock(self, now: float) -> float:
+        if getattr(self, "experience_pause_started_at", None) is None:
+            self.experience_pause_started_at = now
+        return self._experience_effective_time(now)
+
+    def _resume_experience_clock(self, now: float) -> float:
+        paused_since = getattr(self, "experience_pause_started_at", None)
+        if paused_since is not None:
+            paused_total = float(getattr(self, "experience_total_paused_seconds", 0.0))
+            self.experience_total_paused_seconds = paused_total + max(0.0, now - paused_since)
+            self.experience_pause_started_at = None
+        return self._experience_effective_time(now)
+
+    def _experience_clock_is_paused(self) -> bool:
+        return getattr(self, "experience_pause_started_at", None) is not None
 
     def _set_gameplay_hud_active(self, active: bool, now: float) -> None:
         self.gameplay_hud_active = active
@@ -737,21 +840,26 @@ class AutoPotionController:
         return False
 
     def _pause_experience_for_missing_hud(self, now: float) -> None:
+        self._pause_experience_for_inactive_state(now, "HUD 未出現，保留統計")
+
+    def _pause_experience_for_inactive_state(self, now: float, status: str) -> None:
         if not self.settings.exp_efficiency_enabled:
             return
+        effective_now = self._pause_experience_clock(now)
         self._stop_experience_ocr_job()
         if now < self.next_experience_capture_at:
             return
         self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
-        snapshot = self.experience_tracker.snapshot(now)
-        snapshot.status = "HUD 未出現，保留統計"
+        snapshot = self.experience_tracker.snapshot(effective_now)
+        snapshot.status = status
         self.gui.set_experience_snapshot(snapshot)
 
     def _update_experience_efficiency(self, now: float) -> None:
-        if self._process_experience_ocr_job(now):
+        effective_now = self._resume_experience_clock(now)
+        if self._process_experience_ocr_job(now, effective_now=effective_now):
             return
 
-        if self._continue_experience_ocr_burst(now):
+        if self._continue_experience_ocr_burst(now, effective_now=effective_now):
             return
 
         if now < self.next_experience_capture_at:
@@ -762,14 +870,14 @@ class AutoPotionController:
             self._clear_failed_experience_ocr_signature()
             self._clear_completed_experience_ocr_signature()
             self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
-            snapshot = self.experience_tracker.snapshot(now)
+            snapshot = self.experience_tracker.snapshot(effective_now)
             snapshot.status = "找不到 EXP 區域，保留統計" if snapshot.sample_count else "找不到 EXP 區域"
             self.gui.set_experience_snapshot(snapshot)
             return
 
         images = self._capture_experience_text_images(regions)
         if EXPERIENCE_BURST_CAPTURE_ATTEMPTS <= 1:
-            self._submit_experience_ocr_burst(now, [images])
+            self._submit_experience_ocr_burst(now, [images], effective_now=effective_now)
             return
 
         self.experience_ocr_burst = ExperienceOcrBurst(
@@ -779,14 +887,19 @@ class AutoPotionController:
             image_frames=[images],
             capture_count=1,
         )
-        snapshot = self.experience_tracker.snapshot(now)
+        snapshot = self.experience_tracker.snapshot(effective_now)
         snapshot.status = f"擷取經驗樣本中 1/{EXPERIENCE_BURST_CAPTURE_ATTEMPTS}"
         self.gui.set_experience_snapshot(snapshot)
 
-    def _continue_experience_ocr_burst(self, now: float) -> bool:
+    def _continue_experience_ocr_burst(self, now: float, *, effective_now: float | None = None) -> bool:
         burst = getattr(self, "experience_ocr_burst", None)
         if burst is None:
             return False
+        if self._experience_clock_is_paused():
+            self._stop_experience_ocr_job()
+            return True
+        if effective_now is None:
+            effective_now = self._experience_effective_time(now)
         if now < burst.next_capture_at:
             return True
 
@@ -794,33 +907,50 @@ class AutoPotionController:
         burst.capture_count += 1
         if burst.capture_count < EXPERIENCE_BURST_CAPTURE_ATTEMPTS:
             burst.next_capture_at = now + EXPERIENCE_BURST_CAPTURE_INTERVAL_SECONDS
-            snapshot = self.experience_tracker.snapshot(now)
+            snapshot = self.experience_tracker.snapshot(effective_now)
             snapshot.status = f"擷取經驗樣本中 {burst.capture_count}/{EXPERIENCE_BURST_CAPTURE_ATTEMPTS}"
             self.gui.set_experience_snapshot(snapshot)
             return True
 
         self.experience_ocr_burst = None
-        self._submit_experience_ocr_burst(now, burst.image_frames)
+        self._submit_experience_ocr_burst(now, burst.image_frames, effective_now=effective_now)
         return True
 
     def _capture_experience_text_image(self, region: tuple[int, int, int, int]) -> np.ndarray:
         left, top, width, height = region
         return np.asarray(self.sct.grab({"left": left, "top": top, "width": width, "height": height})).copy()
 
-    def _capture_experience_text_images(self, regions: list[tuple[int, int, int, int]]) -> list[np.ndarray]:
-        return [self._capture_experience_text_image(region) for region in regions]
+    def _capture_experience_text_images(self, regions: list[tuple[int, int, int, int]]) -> list[ExperienceOcrImage]:
+        return [
+            ExperienceOcrImage(
+                self._capture_experience_text_image(region),
+                self._experience_text_region_bar_crop_left_ratio(index),
+            )
+            for index, region in enumerate(regions)
+        ]
 
-    def _submit_experience_ocr_burst(self, now: float, image_frames: list[list[np.ndarray]]) -> None:
+    def _submit_experience_ocr_burst(
+        self,
+        now: float,
+        image_frames: list[list[np.ndarray]],
+        *,
+        effective_now: float | None = None,
+    ) -> None:
+        if self._experience_clock_is_paused():
+            self._stop_experience_ocr_job()
+            return
+        if effective_now is None:
+            effective_now = self._experience_effective_time(now)
         image_signature = self._experience_ocr_image_signature(image_frames)
         if self._is_repeated_completed_experience_ocr_signature(image_signature):
             self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
-            snapshot = self.experience_tracker.snapshot(now)
+            snapshot = self.experience_tracker.snapshot(effective_now)
             snapshot.status = "EXP ROI 未變化，保留統計"
             self.gui.set_experience_snapshot(snapshot)
             return
         if self._is_repeated_failed_experience_ocr_signature(image_signature):
             self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
-            snapshot = self.experience_tracker.snapshot(now)
+            snapshot = self.experience_tracker.snapshot(effective_now)
             snapshot.status = "OCR ROI 未變化，保留統計" if snapshot.sample_count else "OCR ROI 未變化，等待畫面更新"
             self.gui.set_experience_snapshot(snapshot)
             return
@@ -829,24 +959,35 @@ class AutoPotionController:
             submitted_at=now,
             future=self.experience_ocr_executor.submit(
                 self.experience_reader.read_burst_frames,
-                [[image.copy() for image in images] for images in image_frames],
+                [[self._copy_experience_ocr_image(image) for image in images] for images in image_frames],
             ),
             image_signature=image_signature,
         )
         self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
-        snapshot = self.experience_tracker.snapshot(now)
+        snapshot = self.experience_tracker.snapshot(effective_now)
         snapshot.status = "讀取經驗樣本中"
         self.gui.set_experience_snapshot(snapshot)
 
-    def _experience_ocr_image_signature(self, image_frames: list[list[np.ndarray]]) -> ExperienceOcrImageSignature:
+    def _copy_experience_ocr_image(self, image: np.ndarray | ExperienceOcrImage) -> np.ndarray | ExperienceOcrImage:
+        if isinstance(image, ExperienceOcrImage):
+            return ExperienceOcrImage(image.image.copy(), image.bar_crop_left_ratio)
+        return image.copy()
+
+    def _experience_ocr_image_array(self, image: np.ndarray | ExperienceOcrImage) -> np.ndarray:
+        if isinstance(image, ExperienceOcrImage):
+            return image.image
+        return image
+
+    def _experience_ocr_image_signature(self, image_frames: list[list[np.ndarray | ExperienceOcrImage]]) -> ExperienceOcrImageSignature:
         shapes: list[tuple[int, ...]] = []
         image_hashes: list[bytes] = []
         thumbnails: list[bytes] = []
         for images in image_frames:
             for image in images:
-                shapes.append(tuple(int(part) for part in image.shape))
-                image_hashes.append(hashlib.blake2b(image.tobytes(), digest_size=16).digest())
-                thumbnails.append(self._experience_ocr_image_thumbnail(image))
+                image_array = self._experience_ocr_image_array(image)
+                shapes.append(tuple(int(part) for part in image_array.shape))
+                image_hashes.append(hashlib.blake2b(image_array.tobytes(), digest_size=16).digest())
+                thumbnails.append(self._experience_ocr_image_thumbnail(image_array))
         return ExperienceOcrImageSignature(tuple(shapes), tuple(image_hashes), tuple(thumbnails))
 
     def _experience_ocr_image_thumbnail(self, image: np.ndarray) -> bytes:
@@ -874,7 +1015,7 @@ class AutoPotionController:
         if not getattr(self.experience_tracker, "samples", []):
             return False
         previous = getattr(self, "last_completed_experience_ocr_signature", None)
-        return self._experience_ocr_signatures_are_identical(previous, signature)
+        return self._experience_ocr_signatures_are_similar(previous, signature)
 
     def _remember_failed_experience_ocr_signature(self, job: ExperienceOcrJob) -> None:
         self.last_failed_experience_ocr_signature = job.image_signature
@@ -924,9 +1065,14 @@ class AutoPotionController:
                 return False
         return True
 
-    def _process_experience_ocr_job(self, now: float) -> bool:
+    def _process_experience_ocr_job(self, now: float, *, effective_now: float | None = None) -> bool:
         if self.experience_ocr_job is None:
             return False
+        if self._experience_clock_is_paused():
+            self._stop_experience_ocr_job()
+            return True
+        if effective_now is None:
+            effective_now = self._experience_effective_time(now)
         job = self.experience_ocr_job
         if not job.future.done():
             return True
@@ -945,31 +1091,45 @@ class AutoPotionController:
             has_tracker_samples = not isinstance(tracker_samples, list) or bool(tracker_samples)
             if reading.needs_bar_percent_guard and not has_tracker_samples:
                 self._remember_failed_experience_ocr_signature(job)
-                self.experience_tracker.record_ocr_result(False)
+                self.experience_tracker.record_ocr_result(True)
                 self._log_experience_ocr_error(now, "EXP 合併格式需既有基準確認", reading.text)
-                snapshot = self.experience_tracker.snapshot(now)
+                snapshot = self.experience_tracker.snapshot(effective_now)
                 if snapshot.sample_count == 0:
                     snapshot.status = "等待明確 EXP 樣本"
                 self.gui.set_experience_snapshot(snapshot)
                 return True
-            if not self.experience_tracker.add_reading(now, reading.current_exp, reading.percent):
+            add_reading_kwargs = {"confidence": reading.confidence}
+            if not has_tracker_samples:
+                add_reading_kwargs["require_initial_confirmation"] = True
+            if not self.experience_tracker.add_reading(
+                effective_now,
+                reading.current_exp,
+                reading.percent,
+                **add_reading_kwargs,
+            ):
+                self.experience_tracker.record_ocr_result(True)
+                if self.experience_tracker.last_status == "等待基準二次確認":
+                    self._clear_failed_experience_ocr_signature()
+                    snapshot = self.experience_tracker.snapshot(effective_now)
+                    snapshot.status = "等待下一次 EXP 基準確認"
+                    self.gui.set_experience_snapshot(snapshot)
+                    return True
                 self._remember_failed_experience_ocr_signature(job)
-                self.experience_tracker.record_ocr_result(False)
                 self._log_experience_sample_rejection(now, self.experience_tracker.last_status, reading)
-                snapshot = self.experience_tracker.snapshot(now)
+                snapshot = self.experience_tracker.snapshot(effective_now)
                 snapshot.status = "樣本已拒絕，詳見 Console"
                 self.gui.set_experience_snapshot(snapshot)
                 return True
             self._clear_failed_experience_ocr_signature()
             self.experience_tracker.record_ocr_result(True)
             self._remember_completed_experience_ocr_signature(job)
-            self.gui.set_experience_snapshot(self.experience_tracker.snapshot(now))
+            self.gui.set_experience_snapshot(self.experience_tracker.snapshot(effective_now))
             return True
 
         self._remember_failed_experience_ocr_signature(job)
         self.experience_tracker.record_ocr_result(False)
         self._log_experience_ocr_error(now, reading.reason, reading.text)
-        snapshot = self.experience_tracker.snapshot(now)
+        snapshot = self.experience_tracker.snapshot(effective_now)
         if snapshot.sample_count == 0:
             snapshot.status = "等待有效 EXP 樣本"
         self.gui.set_experience_snapshot(snapshot)
@@ -1039,6 +1199,9 @@ class AutoPotionController:
         if wide is not None and wide not in regions:
             regions.append(wide)
         return regions
+
+    def _experience_text_region_bar_crop_left_ratio(self, region_index: int) -> float:
+        return EXPERIENCE_WIDE_TEXT_LEFT_RATIO if region_index == 1 else EXPERIENCE_TEXT_LEFT_RATIO
 
     def _experience_text_region(self) -> tuple[int, int, int, int] | None:
         hp_region = self.bottom_bar_regions.get("hp")
@@ -1207,11 +1370,13 @@ class AutoPotionController:
         if not should_drink_for_threshold(percent, threshold_percent):
             self._clear_potion_attempt_state(bar_type)
             return True
-        bar_is_stable = self._potion_bar_is_stable_for_confirmation(bar_type, now)
-        if not bar_is_stable:
+        if self._potion_recent_damage_blocks_stable_confirmation(bar_type, now):
             self._set_potion_no_effect_count(bar_type, 0)
+        bar_is_stable = self._potion_bar_is_stable_for_confirmation(bar_type, now)
 
         attempts = self._potion_effect_attempts(bar_type)
+        if not bar_is_stable and not attempts:
+            self._set_potion_no_effect_count(bar_type, 0)
         if not attempts:
             return True
         attempts = [attempt.with_observed_percent(percent) for attempt in attempts]
@@ -1252,12 +1417,8 @@ class AutoPotionController:
             self._set_potion_no_effect_count(bar_type, 0)
             return True
         if not bar_is_stable:
-            self._set_potion_no_effect_count(bar_type, 0)
             return True
         if self._potion_recent_damage_is_active(bar_type, now):
-            return True
-        if not self._potion_no_effect_count_is_safe(bar_type, percent, threshold_percent):
-            self._set_potion_no_effect_count(bar_type, 0)
             return True
         if not self._potion_auto_hold_is_allowed(bar_type):
             self._set_potion_no_effect_count(bar_type, 0)
@@ -1343,14 +1504,8 @@ class AutoPotionController:
         self._set_potion_damage_pressure_active(bar_type, False)
         return False
 
-    def _potion_no_effect_count_is_safe(self, bar_type: str, percent: float, threshold_percent: float) -> bool:
-        margin = (
-            POTION_EFFECT_HP_NO_EFFECT_NEAR_THRESHOLD_MARGIN_PERCENT
-            if bar_type == "hp"
-            else POTION_EFFECT_NO_EFFECT_NEAR_THRESHOLD_MARGIN_PERCENT
-        )
-        safe_floor = max(0.0, threshold_percent - margin)
-        return percent >= safe_floor
+    def _potion_recent_damage_blocks_stable_confirmation(self, bar_type: str, now: float) -> bool:
+        return now - self._potion_recent_damage_at(bar_type) <= self._potion_stability_confirmation_seconds(bar_type)
 
     def _potion_auto_hold_is_allowed(self, bar_type: str) -> bool:
         return bar_type in POTION_EFFECT_AUTO_HOLD_BAR_TYPES

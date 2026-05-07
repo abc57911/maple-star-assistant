@@ -1,6 +1,7 @@
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+from maple_star.constants import MAX_CONSOLE_LINES
 from maple_star.gui import AutoPotionSettingsGui
 
 
@@ -56,6 +57,54 @@ class ToggleNoticePositionTests(unittest.TestCase):
         position = gui._toggle_notice_position(240, 80, (0, 0, 200, 120))
 
         self.assertEqual(position, (16, 16))
+
+    def test_auxiliary_window_is_hidden_from_shell_before_show(self):
+        gui = self.make_gui()
+        window = Mock()
+
+        with patch("maple_star.views.settings_gui.ctk.CTkToplevel", return_value=window):
+            created = gui._create_auxiliary_window(fg_color="#123456", overrideredirect=True)
+
+        self.assertIs(created, window)
+        window.withdraw.assert_called_once()
+        window.transient.assert_called_once_with(gui.root)
+        window.overrideredirect.assert_called_once_with(True)
+        window.attributes.assert_any_call("-toolwindow", True)
+        window.attributes.assert_any_call("-topmost", True)
+
+    def test_show_toggle_notice_applies_background_style_before_deiconify(self):
+        gui = self.make_gui()
+        gui.closed = False
+        gui.last_gui_error_at = -999.0
+        gui.toggle_notice_window = None
+        gui.toggle_notice_after_id = None
+        gui._foreground_client_rect = Mock(return_value=None)
+        gui._destroy_toggle_notice = Mock()
+        notice = Mock()
+        notice.winfo_width.return_value = 240
+        notice.winfo_height.return_value = 60
+        events = []
+        notice.withdraw.side_effect = lambda: events.append("withdraw")
+        notice.update_idletasks.side_effect = lambda: events.append("update")
+        notice.deiconify.side_effect = lambda: events.append("deiconify")
+
+        with (
+            patch("maple_star.views.settings_gui.ctk.CTkToplevel", return_value=notice),
+            patch("maple_star.views.settings_gui.ctk.CTkLabel") as label_cls,
+            patch("maple_star.views.settings_gui.apply_background_toolwindow_style") as apply_style,
+        ):
+            label_cls.return_value.grid = Mock()
+            apply_style.side_effect = lambda _window: events.append("style")
+            gui.show_toggle_notice("測試")
+
+        notice.withdraw.assert_called_once()
+        apply_style.assert_called_once_with(notice)
+        notice.deiconify.assert_called_once()
+        self.assertLess(events.index("withdraw"), events.index("style"))
+        self.assertLess(events.index("style"), events.index("deiconify"))
+        notice.geometry.assert_called_once()
+        notice.lift.assert_called_once()
+        gui.root.after.assert_called_once_with(1300, gui._destroy_toggle_notice)
 
     def test_combo_group_collapse_toggles_body_and_title_text(self):
         gui = self.make_gui()
@@ -206,6 +255,44 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.console_container.configure.assert_called_once_with(width=416, height=766)
         gui.root.minsize.assert_called_with(1176, 844)
         gui.root.geometry.assert_called_with("1240x844")
+
+    def test_append_console_trims_old_lines_and_disables_text(self):
+        gui = self.make_gui()
+        gui.closed = False
+        gui.last_gui_error_at = -999.0
+        gui.console = Mock()
+        gui.console.index.side_effect = [f"{MAX_CONSOLE_LINES + 5}.0", "1.0"]
+
+        gui.append_console("sample\n")
+
+        gui.console.insert.assert_called_once_with("end", "sample\n")
+        gui.console.delete.assert_called_once_with("1.0", "6.0")
+        gui.console.see.assert_called_once_with("end")
+        self.assertEqual(gui.console.configure.call_args_list[-1].kwargs, {"state": "disabled"})
+
+    def test_append_console_trims_old_characters_when_line_count_is_low(self):
+        gui = self.make_gui()
+        gui.closed = False
+        gui.last_gui_error_at = -999.0
+        gui.console = Mock()
+        gui.console.index.side_effect = ["1.0", "1.25"]
+
+        gui.append_console("sample")
+
+        gui.console.delete.assert_called_once_with("1.0", "1.25")
+        self.assertEqual(gui.console.configure.call_args_list[-1].kwargs, {"state": "disabled"})
+
+    def test_clear_console_removes_text_and_disables_text(self):
+        gui = self.make_gui()
+        gui.closed = False
+        gui.last_gui_error_at = -999.0
+        gui.console = Mock()
+
+        gui.clear_console()
+
+        gui.console.delete.assert_called_once_with("1.0", "end")
+        self.assertEqual(gui.console.configure.call_args_list[0].kwargs, {"state": "normal"})
+        self.assertEqual(gui.console.configure.call_args_list[-1].kwargs, {"state": "disabled"})
 
 
 if __name__ == "__main__":

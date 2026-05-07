@@ -11,6 +11,7 @@ from ..adapters.win_input import user32
 CONTROL_HOTKEY_TOGGLE = "toggle"
 CONTROL_HOTKEY_EMERGENCY_STOP = "emergency_stop"
 CONTROL_HOTKEY_EXPERIENCE_TOGGLE = "experience_toggle"
+CONTROL_HOTKEY_EXPERIENCE_RESET = "experience_reset"
 CONTROL_HOTKEY_POLL_INTERVAL_SECONDS = 0.01
 
 
@@ -72,6 +73,10 @@ class ControlHotkeyWorker:
         with self._lock:
             self._down = down
         return down
+
+    def cached_down_states(self) -> dict[str, bool]:
+        with self._lock:
+            return dict(self._down)
 
     def _run(self) -> None:
         while not self._stop_event.is_set():

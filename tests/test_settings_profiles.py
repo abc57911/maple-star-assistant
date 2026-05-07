@@ -27,6 +27,7 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(settings.toggle_hotkey, "F11")
         self.assertEqual(settings.emergency_stop_hotkey, "Pause")
         self.assertEqual(settings.experience_toggle_hotkey, "F10")
+        self.assertEqual(settings.experience_reset_hotkey, "F9")
         self.assertFalse(settings.console_collapsed)
         self.assertFalse(settings.combo_group_collapsed)
         self.assertFalse(settings.compact_experience_mode)
@@ -41,6 +42,7 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(saved["toggle_hotkey"], "F11")
         self.assertEqual(saved["emergency_stop_hotkey"], "Pause")
         self.assertEqual(saved["experience_toggle_hotkey"], "F10")
+        self.assertEqual(saved["experience_reset_hotkey"], "F9")
         self.assertFalse(saved["console_collapsed"])
         self.assertFalse(saved["combo_group_collapsed"])
         self.assertFalse(saved["compact_experience_mode"])
@@ -148,6 +150,7 @@ class SettingsProfileTests(unittest.TestCase):
             toggle_hotkey="F9",
             emergency_stop_hotkey="Pause",
             experience_toggle_hotkey="F10",
+            experience_reset_hotkey="F8",
             console_collapsed=True,
             combo_group_collapsed=True,
             compact_experience_mode=True,
@@ -162,6 +165,7 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(payload["toggle_hotkey"], "F9")
         self.assertEqual(payload["emergency_stop_hotkey"], "Pause")
         self.assertEqual(payload["experience_toggle_hotkey"], "F10")
+        self.assertEqual(payload["experience_reset_hotkey"], "F8")
         self.assertTrue(payload["console_collapsed"])
         self.assertTrue(payload["combo_group_collapsed"])
         self.assertTrue(payload["compact_experience_mode"])
@@ -173,6 +177,7 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertNotIn("toggle_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("emergency_stop_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("experience_toggle_hotkey", payload["profiles"]["Default"])
+        self.assertNotIn("experience_reset_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("console_collapsed", payload["profiles"]["Default"])
         self.assertNotIn("combo_group_collapsed", payload["profiles"]["Default"])
         self.assertNotIn("compact_experience_mode", payload["profiles"]["Default"])

@@ -16,6 +16,7 @@ DEFAULT_PROFILE_NAME = "Default"
 DEFAULT_TOGGLE_HOTKEY = "F11"
 DEFAULT_EMERGENCY_STOP_HOTKEY = "Pause"
 DEFAULT_EXPERIENCE_TOGGLE_HOTKEY = "F10"
+DEFAULT_EXPERIENCE_RESET_HOTKEY = "F9"
 CONTROLLER_BUTTON_CHOICES = (
     "A",
     "B",
@@ -83,6 +84,7 @@ class AutoPotionSettings:
     toggle_hotkey: str = DEFAULT_TOGGLE_HOTKEY
     emergency_stop_hotkey: str = DEFAULT_EMERGENCY_STOP_HOTKEY
     experience_toggle_hotkey: str = DEFAULT_EXPERIENCE_TOGGLE_HOTKEY
+    experience_reset_hotkey: str = DEFAULT_EXPERIENCE_RESET_HOTKEY
     console_collapsed: bool = False
     combo_group_collapsed: bool = False
     compact_experience_mode: bool = False
@@ -119,6 +121,7 @@ class AutoPotionSettings:
             self.toggle_hotkey,
             self.emergency_stop_hotkey,
             self.experience_toggle_hotkey,
+            self.experience_reset_hotkey,
             self.console_collapsed,
             self.combo_group_collapsed,
             self.compact_experience_mode,
@@ -163,6 +166,7 @@ class AutoPotionSettings:
             "toggle_hotkey": self.toggle_hotkey,
             "emergency_stop_hotkey": self.emergency_stop_hotkey,
             "experience_toggle_hotkey": self.experience_toggle_hotkey,
+            "experience_reset_hotkey": self.experience_reset_hotkey,
             "console_collapsed": self.console_collapsed,
             "combo_group_collapsed": self.combo_group_collapsed,
             "compact_experience_mode": self.compact_experience_mode,
@@ -248,6 +252,7 @@ GLOBAL_SETTING_KEYS = (
     "toggle_hotkey",
     "emergency_stop_hotkey",
     "experience_toggle_hotkey",
+    "experience_reset_hotkey",
     "console_collapsed",
     "combo_group_collapsed",
     "compact_experience_mode",
@@ -351,6 +356,7 @@ def settings_from_profile_payload(
         toggle_hotkey=fallback.toggle_hotkey,
         emergency_stop_hotkey=fallback.emergency_stop_hotkey,
         experience_toggle_hotkey=fallback.experience_toggle_hotkey,
+        experience_reset_hotkey=fallback.experience_reset_hotkey,
         console_collapsed=fallback.console_collapsed,
         combo_group_collapsed=fallback.combo_group_collapsed,
         compact_experience_mode=fallback.compact_experience_mode,
@@ -413,6 +419,11 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
             raw,
             "experience_toggle_hotkey",
             settings.experience_toggle_hotkey,
+        ),
+        experience_reset_hotkey=_read_string(
+            raw,
+            "experience_reset_hotkey",
+            settings.experience_reset_hotkey,
         ),
         console_collapsed=_read_bool(raw, "console_collapsed", settings.console_collapsed),
         combo_group_collapsed=_read_bool(raw, "combo_group_collapsed", settings.combo_group_collapsed),
