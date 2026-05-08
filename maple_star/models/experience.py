@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import unicodedata
 import warnings
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from typing import Any, Iterable
 import cv2
 import numpy as np
 
+from ..adapters.debug_logging import log_debug
 from ..constants import EXPERIENCE_BURST_CONSENSUS_MIN_COUNT
 
 
@@ -30,7 +32,7 @@ EXP_RATE_10M_SECONDS = 600.0
 EXP_RATE_1H_SECONDS = 3600.0
 EXP_RATE_5M_HALF_LIFE_SECONDS = 45.0
 EXP_RATE_10M_HALF_LIFE_SECONDS = 180.0
-EXP_RATE_1H_HALF_LIFE_SECONDS = 900.0
+EXP_RATE_1H_HALF_LIFE_SECONDS = 600.0
 EXP_RATE_5M_SMOOTHING_ALPHA = 0.95
 EXP_RATE_10M_SMOOTHING_ALPHA = 0.90
 EXP_RATE_1H_SMOOTHING_ALPHA = 0.85
@@ -91,7 +93,6 @@ EXP_PIXEL_FONT_FULL_BAR_PERCENT_MIN = 98.0
 EXP_PIXEL_FONT_FULL_BAR_MIN_CONFIDENCE = 0.97
 EXP_PIXEL_FONT_NO_BAR_LOW_PERCENT_MAX = 2.0
 EXP_PIXEL_FONT_NO_BAR_LOW_PERCENT_MIN_CONFIDENCE = 0.84
-EXP_PIXEL_FONT_AMBIGUOUS_EXP_CONFLICT_MARGIN = 0.04
 EXP_PIXEL_FONT_ZERO_THREE_TOPOLOGY_MARGIN = 0.10
 EXP_PIXEL_FONT_ZERO_THREE_TOPOLOGY_BONUS = 0.12
 EXP_PIXEL_LEARNING_MAX_ATTEMPTS_SAVED = 8
@@ -122,10 +123,6 @@ EXP_LONG_RATE_BLEND_FULL_SECONDS = 3600.0
 PADDLEOCR_LANGUAGE = "chinese_cht"
 PADDLEOCR_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 PADDLEOCR_RECOGNITION_MODEL_NAME = "PP-OCRv5_mobile_rec"
-PADDLEOCR_MODEL_SIZE_MB = {
-    PADDLEOCR_DETECTION_MODEL_NAME: 4.7,
-    PADDLEOCR_RECOGNITION_MODEL_NAME: 16.0,
-}
 PADDLEOCR_ENV_DEFAULTS = {
     "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
     "GLOG_minloglevel": "2",
@@ -1298,6 +1295,26 @@ class ExperienceEfficiencyTracker:
         return eta_seconds
 
 
+def _elapsed_ms(started_at: float) -> float:
+    return (time.perf_counter() - started_at) * 1000.0
+
+
+def _experience_timing_shape(image: np.ndarray) -> str:
+    height, width = image.shape[:2]
+    return f"{width}x{height}"
+
+
+def _experience_timing_result(reading: ExperienceTextReading) -> str:
+    result = "success" if reading.success else "failure"
+    current_exp = "--" if reading.current_exp is None else str(reading.current_exp)
+    percent = "--" if reading.percent is None else f"{reading.percent:.2f}"
+    text = reading.text if reading.text else "--"
+    return (
+        f"{result} exp={current_exp} percent={percent} "
+        f"conf={reading.confidence:.2f} text={text!r} reason={reading.reason}"
+    )
+
+
 class PaddleExperienceTextReader:
     def __init__(self) -> None:
         self.ocr: Any | None = None
@@ -1310,6 +1327,7 @@ class PaddleExperienceTextReader:
         self,
         image_frames: Iterable[Iterable[np.ndarray | ExperienceOcrImage]],
     ) -> ExperienceTextReading:
+        started_at = time.perf_counter()
         materialized_frames = [
             [_coerce_experience_ocr_image(image) for image in images]
             for images in image_frames
@@ -1320,6 +1338,11 @@ class PaddleExperienceTextReader:
         ]
         reading = self._select_burst_reading(frame_readings)
         self._attach_burst_learning_case(materialized_frames, reading)
+        log_debug(
+            "EXP OCR timing burst "
+            f"frames={len(materialized_frames)} rois={sum(len(images) for images in materialized_frames)} "
+            f"total_ms={_elapsed_ms(started_at):.1f} result={_experience_timing_result(reading)}"
+        )
         return reading
 
     def _read_burst_frame(
@@ -1328,13 +1351,25 @@ class PaddleExperienceTextReader:
         *,
         record_learning: bool = True,
     ) -> ExperienceTextReading:
+        started_at = time.perf_counter()
         materialized_images = list(images)
         if not materialized_images:
-            return ExperienceTextReading(reason="EXP burst frame 未取得影像")
+            reading = ExperienceTextReading(reason="EXP burst frame 未取得影像")
+            log_debug(
+                "EXP OCR timing frame "
+                f"rois=0 used_rois=0 total_ms={_elapsed_ms(started_at):.1f} "
+                f"result={_experience_timing_result(reading)}"
+            )
+            return reading
 
         readings = [self.read(materialized_images[0], record_learning=record_learning)]
         primary = readings[0]
         if primary.success and primary.current_exp is not None and primary.percent is not None:
+            log_debug(
+                "EXP OCR timing frame "
+                f"rois={len(materialized_images)} used_rois=1 total_ms={_elapsed_ms(started_at):.1f} "
+                f"result={_experience_timing_result(primary)}"
+            )
             return primary
 
         readings.extend(
@@ -1350,7 +1385,13 @@ class PaddleExperienceTextReader:
             if reading.success and reading.current_exp is not None and reading.percent is not None
         ]
         if not successes:
-            return max(readings, key=lambda reading: reading.confidence)
+            selected = max(readings, key=lambda reading: reading.confidence)
+            log_debug(
+                "EXP OCR timing frame "
+                f"rois={len(materialized_images)} used_rois={len(readings)} total_ms={_elapsed_ms(started_at):.1f} "
+                f"result={_experience_timing_result(selected)}"
+            )
+            return selected
 
         groups: dict[tuple[int, float], list[ExperienceTextReading]] = {}
         for reading in successes:
@@ -1361,6 +1402,11 @@ class PaddleExperienceTextReader:
         if len(groups) > 1:
             primary = readings[0]
             if primary.success and primary.current_exp is not None and primary.percent is not None:
+                log_debug(
+                    "EXP OCR timing frame "
+                    f"rois={len(materialized_images)} used_rois={len(readings)} total_ms={_elapsed_ms(started_at):.1f} "
+                    f"result={_experience_timing_result(primary)} conflict=1"
+                )
                 return primary
 
         consensus_groups = [
@@ -1385,17 +1431,35 @@ class PaddleExperienceTextReader:
                     confidence=best_reading.confidence,
                     reason="EXP burst 結果不一致",
                 )
-            return _select_best_success_reading(best_group)
+            selected = _select_best_success_reading(best_group)
+            log_debug(
+                "EXP OCR timing frame "
+                f"rois={len(materialized_images)} used_rois={len(readings)} total_ms={_elapsed_ms(started_at):.1f} "
+                f"result={_experience_timing_result(selected)}"
+            )
+            return selected
 
         if len(groups) == 1:
-            return _select_best_success_reading(successes)
+            selected = _select_best_success_reading(successes)
+            log_debug(
+                "EXP OCR timing frame "
+                f"rois={len(materialized_images)} used_rois={len(readings)} total_ms={_elapsed_ms(started_at):.1f} "
+                f"result={_experience_timing_result(selected)}"
+            )
+            return selected
 
         best_reading = _select_best_success_reading(successes)
-        return ExperienceTextReading(
+        result = ExperienceTextReading(
             text=best_reading.text,
             confidence=best_reading.confidence,
             reason="EXP burst 結果不一致",
         )
+        log_debug(
+            "EXP OCR timing frame "
+            f"rois={len(materialized_images)} used_rois={len(readings)} total_ms={_elapsed_ms(started_at):.1f} "
+            f"result={_experience_timing_result(result)}"
+        )
+        return result
 
     def _select_burst_reading(self, readings: list[ExperienceTextReading]) -> ExperienceTextReading:
         if not readings:
@@ -1480,18 +1544,37 @@ class PaddleExperienceTextReader:
         *,
         record_learning: bool = True,
     ) -> ExperienceTextReading:
+        started_at = time.perf_counter()
         ocr_image = _coerce_experience_ocr_image(image)
         image_array = ocr_image.image
+        bar_started_at = time.perf_counter()
         bar_percent = estimate_experience_bar_percent(
             image_array,
             bar_crop_left_ratio=ocr_image.bar_crop_left_ratio,
         )
+        bar_ms = _elapsed_ms(bar_started_at)
+        pixel_started_at = time.perf_counter()
         pixel_reading = _read_experience_pixel_font_adaptive(ocr_image, bar_percent=bar_percent)
+        pixel_ms = _elapsed_ms(pixel_started_at)
         if pixel_reading.success:
+            log_debug(
+                "EXP OCR timing read "
+                f"source={ocr_image.source_id or 'roi'} shape={_experience_timing_shape(image_array)} "
+                f"bar_ms={bar_ms:.1f} pixel_ms={pixel_ms:.1f} paddle_ms=0.0 total_ms={_elapsed_ms(started_at):.1f} "
+                f"result={_experience_timing_result(pixel_reading)}"
+            )
             return pixel_reading
 
+        paddle_started_at = time.perf_counter()
         paddle_reading = self._read_with_paddle(ocr_image, bar_percent=bar_percent)
+        paddle_ms = _elapsed_ms(paddle_started_at)
         if paddle_reading.success:
+            log_debug(
+                "EXP OCR timing read "
+                f"source={ocr_image.source_id or 'roi'} shape={_experience_timing_shape(image_array)} "
+                f"bar_ms={bar_ms:.1f} pixel_ms={pixel_ms:.1f} paddle_ms={paddle_ms:.1f} total_ms={_elapsed_ms(started_at):.1f} "
+                f"result={_experience_timing_result(paddle_reading)} pixel_reason={pixel_reading.reason}"
+            )
             return paddle_reading
 
         final_reading = paddle_reading if paddle_reading.confidence >= pixel_reading.confidence else pixel_reading
@@ -1505,6 +1588,12 @@ class PaddleExperienceTextReader:
                 bar_percent=bar_percent,
             )
             final_reading.learning_case_id = case_id
+        log_debug(
+            "EXP OCR timing read "
+            f"source={ocr_image.source_id or 'roi'} shape={_experience_timing_shape(image_array)} "
+            f"bar_ms={bar_ms:.1f} pixel_ms={pixel_ms:.1f} paddle_ms={paddle_ms:.1f} total_ms={_elapsed_ms(started_at):.1f} "
+            f"result={_experience_timing_result(final_reading)} pixel_reason={pixel_reading.reason}"
+        )
         return final_reading
 
     def _attach_burst_learning_case(
@@ -1534,18 +1623,31 @@ class PaddleExperienceTextReader:
         *,
         bar_percent: float | None,
     ) -> ExperienceTextReading:
+        started_at = time.perf_counter()
+        ensure_started_at = time.perf_counter()
         if not self._ensure_ocr():
+            log_debug(
+                "EXP OCR timing paddle "
+                f"source={ocr_image.source_id or 'roi'} ensure_ms={_elapsed_ms(ensure_started_at):.1f} "
+                f"total_ms={_elapsed_ms(started_at):.1f} result=unavailable reason={self.unavailable_reason or '--'}"
+            )
             return ExperienceTextReading(reason=self.unavailable_reason or "PaddleOCR 尚未初始化")
+        ensure_ms = _elapsed_ms(ensure_started_at)
 
         image_array = ocr_image.image
         fallback_reading: ExperienceTextReading | None = None
         successes: list[tuple[tuple[float, float, float, float, int], int, ExperienceTextReading]] = []
+        predict_count = 0
+        predict_ms = 0.0
 
-        def read_variants(variants: Iterable[tuple[np.ndarray, int]]) -> None:
-            nonlocal fallback_reading
+        def read_variants(variants: Iterable[tuple[int, np.ndarray]]) -> None:
+            nonlocal fallback_reading, predict_count, predict_ms
             for variant_index, prepared in variants:
                 try:
+                    predict_started_at = time.perf_counter()
                     result = self._predict(prepared)
+                    predict_ms += _elapsed_ms(predict_started_at)
+                    predict_count += 1
                 except Exception as exc:
                     fallback_reading = ExperienceTextReading(reason=f"PaddleOCR 辨識失敗：{exc}")
                     return
@@ -1560,17 +1662,45 @@ class PaddleExperienceTextReader:
                 if fallback_reading is None or reading.confidence > fallback_reading.confidence:
                     fallback_reading = reading
 
-        read_variants(_indexed_experience_ocr_images(image_array))
+        base_prepare_started_at = time.perf_counter()
+        base_variants = _indexed_experience_ocr_images(image_array)
+        base_prepare_ms = _elapsed_ms(base_prepare_started_at)
+        read_variants(base_variants)
         base_reading = _selected_experience_reading_or_failure(successes, bar_percent=bar_percent)
         if base_reading is not None and base_reading.success:
+            log_debug(
+                "EXP OCR timing paddle "
+                f"source={ocr_image.source_id or 'roi'} variants={len(base_variants)} retry_variants=0 "
+                f"ensure_ms={ensure_ms:.1f} prepare_ms={base_prepare_ms:.1f} predict_ms={predict_ms:.1f} "
+                f"predict_count={predict_count} total_ms={_elapsed_ms(started_at):.1f} result={_experience_timing_result(base_reading)}"
+            )
             return base_reading
         if _should_retry_experience_ocr(base_reading or fallback_reading):
-            read_variants(_indexed_retry_experience_ocr_images(image_array))
+            retry_prepare_started_at = time.perf_counter()
+            retry_variants = _indexed_retry_experience_ocr_images(image_array)
+            retry_prepare_ms = _elapsed_ms(retry_prepare_started_at)
+            read_variants(retry_variants)
+        else:
+            retry_variants = []
+            retry_prepare_ms = 0.0
         if successes:
             selected = _selected_experience_reading_or_failure(successes, bar_percent=bar_percent)
             if selected is not None:
+                log_debug(
+                    "EXP OCR timing paddle "
+                    f"source={ocr_image.source_id or 'roi'} variants={len(base_variants)} retry_variants={len(retry_variants)} "
+                    f"ensure_ms={ensure_ms:.1f} prepare_ms={(base_prepare_ms + retry_prepare_ms):.1f} predict_ms={predict_ms:.1f} "
+                    f"predict_count={predict_count} total_ms={_elapsed_ms(started_at):.1f} result={_experience_timing_result(selected)}"
+                )
                 return selected
-        return fallback_reading or ExperienceTextReading(reason="EXP 數字解析失敗")
+        final = fallback_reading or ExperienceTextReading(reason="EXP 數字解析失敗")
+        log_debug(
+            "EXP OCR timing paddle "
+            f"source={ocr_image.source_id or 'roi'} variants={len(base_variants)} retry_variants={len(retry_variants)} "
+            f"ensure_ms={ensure_ms:.1f} prepare_ms={(base_prepare_ms + retry_prepare_ms):.1f} predict_ms={predict_ms:.1f} "
+            f"predict_count={predict_count} total_ms={_elapsed_ms(started_at):.1f} result={_experience_timing_result(final)}"
+        )
+        return final
 
     def _ensure_ocr(self) -> bool:
         if self.ocr is not None:
@@ -1830,10 +1960,22 @@ def _read_experience_pixel_font_adaptive(
     *,
     bar_percent: float | None,
 ) -> ExperienceTextReading:
+    started_at = time.perf_counter()
     successes: list[tuple[tuple[float, float, float, int], ExperienceTextReading]] = []
     best_failure = ExperienceTextReading(reason="EXP 像素字型解析失敗")
+    attempt_count = 0
+    candidate_count = 0
+
+    def finish(reading: ExperienceTextReading) -> ExperienceTextReading:
+        log_debug(
+            "EXP OCR timing pixel "
+            f"source={ocr_image.source_id or 'roi'} attempts={attempt_count} candidates={candidate_count} "
+            f"total_ms={_elapsed_ms(started_at):.1f} result={_experience_timing_result(reading)}"
+        )
+        return reading
 
     for attempt_index, attempt in enumerate(_experience_pixel_font_attempts(ocr_image)):
+        attempt_count += 1
         attempt_bar_percent = estimate_experience_bar_percent(
             attempt.image,
             bar_crop_left_ratio=attempt.bar_crop_left_ratio,
@@ -1843,6 +1985,7 @@ def _read_experience_pixel_font_adaptive(
             attempt.image,
             bar_percent=effective_bar_percent,
         )
+        candidate_count += len(candidates)
         if not candidates:
             continue
         for text, confidence in candidates:
@@ -1859,10 +2002,10 @@ def _read_experience_pixel_font_adaptive(
 
         selected = _select_pixel_font_success(successes, effective_bar_percent)
         if selected is not None and selected.success:
-            return selected
+            return finish(selected)
 
     selected = _select_pixel_font_success(successes, bar_percent)
-    return selected if selected is not None else best_failure
+    return finish(selected if selected is not None else best_failure)
 
 
 def _experience_pixel_font_attempts(ocr_image: ExperienceOcrImage) -> list[ExperiencePixelFontAttempt]:
@@ -2065,11 +2208,6 @@ def _select_pixel_font_success(
 
     selected_group = max(groups.values(), key=lambda group: max(item[0] for item in group))
     return max(selected_group, key=lambda item: item[0])[1]
-
-
-def _decode_experience_pixel_font_text(image: np.ndarray) -> tuple[str, float] | None:
-    candidates = _decode_experience_pixel_font_text_candidates(image, bar_percent=None)
-    return candidates[0] if candidates else None
 
 
 def _decode_experience_pixel_font_text_candidates(
@@ -3309,6 +3447,8 @@ def _best_experience_text_candidate(text: str) -> ExperienceTextCandidate | None
 
 def _experience_text_candidates(text: str) -> list[ExperienceTextCandidate]:
     compact = normalize_exp_ocr_text(text)
+    if _has_spaced_experience_number_prefix(text):
+        return []
     candidates: list[ExperienceTextCandidate] = []
     match = re.fullmatch(
         r"(?:EXP[:：]?)?([0-9][0-9,.]*)\[((?:[0-9]{1,2}|100)[\.,][0-9]{2})([%Xx3*147Il|JjTt;:>]*)([\]\)]*)[;:>]*",
@@ -3340,6 +3480,11 @@ def _experience_text_candidates(text: str) -> list[ExperienceTextCandidate]:
     candidates.extend(_missing_open_bracket_experience_text_candidates(compact))
     candidates.extend(_merged_exp_percent_text_candidates(compact))
     return candidates
+
+
+def _has_spaced_experience_number_prefix(text: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", text)
+    return re.search(r"\d\s+\d[0-9\s,.]*[\[\(]", normalized) is not None
 
 
 def _missing_open_bracket_experience_text_candidates(compact: str) -> list[ExperienceTextCandidate]:
@@ -3436,31 +3581,6 @@ def _strict_experience_parse_failure_reason(text: str) -> str:
     if re.search(r"\[(?:[0-9]{1,2}|100)[\.,][0-9]{2}[%Xx3*147Il|JjTt;:>]{0,3}[\]\)]*[;:>]*", text) is None:
         return "EXP 百分比解析失敗"
     return "EXP 數字解析失敗"
-
-
-def _experience_text_structure_score_for_match(
-    compact: str,
-    percent_span: tuple[int, int],
-    exp_digits: str,
-    repaired_percent: bool,
-) -> float:
-    start, end = percent_span
-    score = 0.0
-    if compact[start : start + 1] in "[(" or (start > 0 and compact[start - 1] in "[("):
-        score += 3.0
-    elif start > 0 and compact[start - 1].isdigit():
-        score -= 2.0
-
-    tail = compact[end : end + 3]
-    if any(char in tail for char in "%Xx)]"):
-        score += 1.0
-    if any(char.isdigit() for char in tail):
-        score -= 1.0
-
-    score += min(len(exp_digits), 8) / 10.0
-    if repaired_percent:
-        score -= 0.25
-    return score
 
 
 def resize_experience_text_crop(image: np.ndarray) -> np.ndarray:

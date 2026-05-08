@@ -20,6 +20,7 @@ from maple_star.experience import (
     ExperienceOcrImage,
     ExperiencePixelFontAttempt,
     ExperienceTextReading,
+    EXP_RATE_1H_HALF_LIFE_SECONDS,
     PADDLEOCR_DETECTION_MODEL_NAME,
     PADDLEOCR_LANGUAGE,
     PADDLEOCR_RECOGNITION_MODEL_NAME,
@@ -55,6 +56,9 @@ class ExperienceTests(unittest.TestCase):
         self._localappdata_patch = patch.dict(os.environ, {"LOCALAPPDATA": self._localappdata_dir.name}, clear=False)
         self._localappdata_patch.start()
         self.addCleanup(self._localappdata_patch.stop)
+
+    def test_one_hour_rate_uses_responsive_half_life(self):
+        self.assertEqual(EXP_RATE_1H_HALF_LIFE_SECONDS, 600.0)
 
     def test_paddle_reader_burst_uses_consensus_result(self):
         reader = PaddleExperienceTextReader()
@@ -773,6 +777,12 @@ class ExperienceTests(unittest.TestCase):
         self.assertTrue(reading.success)
         self.assertEqual(reading.current_exp, 283744)
         self.assertEqual(reading.percent, 27.06)
+
+    def test_reading_from_paddle_result_rejects_spaced_exp_prefix(self):
+        reading = reading_from_paddle_result([{"res": {"rec_texts": ["1504952 28[78.24X]"], "rec_scores": [0.94]}}])
+
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.reason, "EXP 數字解析失敗")
 
     def test_reading_from_paddle_result_repairs_missing_percent_marker(self):
         reading = reading_from_paddle_result([{"res": {"rec_texts": ["3704316[96.66]"], "rec_scores": [0.91]}}])
@@ -1737,7 +1747,7 @@ class ExperienceTests(unittest.TestCase):
 
         self.assertEqual(snapshot.xp_per_5m, 30000.0)
         self.assertEqual(snapshot.xp_per_10m, 60000.0)
-        self.assertEqual(snapshot.xp_per_hour, 360000.0)
+        self.assertAlmostEqual(snapshot.xp_per_hour, 360000.0)
         self.assertIsNotNone(snapshot.eta_seconds)
 
     def test_tracker_rejects_outlier_exp_and_keeps_last_statistics(self):

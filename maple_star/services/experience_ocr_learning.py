@@ -357,10 +357,6 @@ def _metadata_reading_key(metadata: dict[str, Any]) -> str:
     return ""
 
 
-def _metadata_pixel_reason(metadata: dict[str, Any]) -> str:
-    return str((metadata.get("pixel_reading") or {}).get("reason") or "")
-
-
 def _write_manifest(manifest: dict[str, Any]) -> None:
     MANIFEST_PATH.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 

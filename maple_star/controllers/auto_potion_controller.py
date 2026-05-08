@@ -55,7 +55,6 @@ from ..constants import (
     LOADING_GUARD_BRIGHT_PIXEL_RATIO,
     LOADING_GUARD_LOW_SATURATION_RATIO,
     LOADING_GUARD_MEAN_LUMINANCE,
-    MOD_NOREPEAT,
     PM_REMOVE,
     POTION_EFFECT_AUTO_HOLD_BAR_TYPES,
     POTION_EFFECT_DAMAGE_GRACE_SECONDS,
@@ -82,7 +81,7 @@ from ..constants import (
     TOGGLE_HOTKEY_DEBOUNCE_SECONDS,
     WM_HOTKEY,
 )
-from ..adapters.debug_logging import log_exception
+from ..adapters.debug_logging import log_debug, log_exception
 from ..services.control_hotkey_worker import (
     CONTROL_HOTKEY_EMERGENCY_STOP,
     CONTROL_HOTKEY_EXPERIENCE_RESET,
@@ -922,19 +921,34 @@ class AutoPotionController:
         return np.asarray(self.sct.grab({"left": left, "top": top, "width": width, "height": height})).copy()
 
     def _capture_experience_text_images(self, regions: list[tuple[int, int, int, int]]) -> list[ExperienceOcrImage]:
-        return [
-            ExperienceOcrImage(
-                self._capture_experience_text_image(region),
-                self._experience_text_region_bar_crop_left_ratio(index),
-                "primary" if index == 0 else "wide",
+        started_at = time.perf_counter()
+        images: list[ExperienceOcrImage] = []
+        details: list[str] = []
+        for index, region in enumerate(regions):
+            source_id = "primary" if index == 0 else "wide"
+            capture_started_at = time.perf_counter()
+            image = self._capture_experience_text_image(region)
+            capture_ms = (time.perf_counter() - capture_started_at) * 1000.0
+            images.append(
+                ExperienceOcrImage(
+                    image,
+                    self._experience_text_region_bar_crop_left_ratio(index),
+                    source_id,
+                )
             )
-            for index, region in enumerate(regions)
-        ]
+            height, width = image.shape[:2]
+            details.append(f"{source_id}:{width}x{height}:{capture_ms:.1f}ms")
+        log_debug(
+            "EXP OCR timing capture "
+            f"regions={len(regions)} total_ms={(time.perf_counter() - started_at) * 1000.0:.1f} "
+            f"details={','.join(details) if details else '--'}"
+        )
+        return images
 
     def _submit_experience_ocr_burst(
         self,
         now: float,
-        image_frames: list[list[np.ndarray]],
+        image_frames: list[list[np.ndarray | ExperienceOcrImage]],
         *,
         effective_now: float | None = None,
     ) -> None:
@@ -943,20 +957,35 @@ class AutoPotionController:
             return
         if effective_now is None:
             effective_now = self._experience_effective_time(now)
+        signature_started_at = time.perf_counter()
         image_signature = self._experience_ocr_image_signature(image_frames)
+        signature_ms = (time.perf_counter() - signature_started_at) * 1000.0
+        frame_count = len(image_frames)
+        roi_count = sum(len(images) for images in image_frames)
         if self._is_repeated_completed_experience_ocr_signature(image_signature):
+            log_debug(
+                "EXP OCR timing submit "
+                f"skipped=repeated_completed frames={frame_count} rois={roi_count} "
+                f"signature_ms={signature_ms:.1f}"
+            )
             self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
             snapshot = self.experience_tracker.snapshot(effective_now)
             snapshot.status = "EXP ROI 未變化，保留統計"
             self.gui.set_experience_snapshot(snapshot)
             return
         if self._is_repeated_failed_experience_ocr_signature(image_signature):
+            log_debug(
+                "EXP OCR timing submit "
+                f"skipped=repeated_failed frames={frame_count} rois={roi_count} "
+                f"signature_ms={signature_ms:.1f}"
+            )
             self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
             snapshot = self.experience_tracker.snapshot(effective_now)
             snapshot.status = "OCR ROI 未變化，保留統計" if snapshot.sample_count else "OCR ROI 未變化，等待畫面更新"
             self.gui.set_experience_snapshot(snapshot)
             return
 
+        submit_started_at = time.perf_counter()
         self.experience_ocr_job = ExperienceOcrJob(
             submitted_at=now,
             future=self.experience_ocr_executor.submit(
@@ -965,6 +994,11 @@ class AutoPotionController:
             ),
             image_signature=image_signature,
             image_frames=[[self._copy_experience_ocr_image(image) for image in images] for images in image_frames],
+        )
+        log_debug(
+            "EXP OCR timing submit "
+            f"frames={frame_count} rois={roi_count} signature_ms={signature_ms:.1f} "
+            f"submit_ms={(time.perf_counter() - submit_started_at) * 1000.0:.1f}"
         )
         self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
         snapshot = self.experience_tracker.snapshot(effective_now)
@@ -1094,6 +1128,12 @@ class AutoPotionController:
         except Exception as exc:
             log_exception("OCR 背景工作失敗")
             reading = ExperienceTextReading(reason=f"OCR 背景工作失敗：{exc}")
+        log_debug(
+            "EXP OCR timing job "
+            f"elapsed_ms={max(0.0, now - job.submitted_at) * 1000.0:.1f} "
+            f"result={'success' if reading.success else 'failure'} "
+            f"{self._experience_reading_log_fields(reading)} | reason={reading.reason}"
+        )
 
         self._log_experience_ocr_reading(reading)
         self._log_experience_learning_case(reading)

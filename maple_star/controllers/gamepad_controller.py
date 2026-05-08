@@ -1,25 +1,27 @@
 from __future__ import annotations
 
-import ctypes
 import queue
 import sys
 import time
-from ctypes import wintypes
 from typing import Callable
 
 from .auto_potion_controller import AutoPotionController
-from ..adapters.win_input import parse_vk_key
+from ..adapters.win_input import (
+    key_display_name,
+    key_down as send_key_down,
+    key_up as send_key_up,
+    parse_vk_key,
+    tap_key,
+)
 from ..models.settings import AutoPotionSettings
 from ..services.gamepad_bindings import (
     ControllerButtonBinding,
     build_controller_button_bindings,
-    configured_controller_button,
     first_enabled_controller_binding,
     is_controller_binding_enabled,
 )
 
 from ..adapters.controller_worker import (
-    CONTROLLER_BUTTONS_BY_NAME,
     EVENT_BUTTON_DOWN,
     EVENT_BUTTON_UP,
     EVENT_DEVICE_ADDED,
@@ -43,113 +45,17 @@ POLL_INTERVAL_SECONDS = 0.01
 MACRO_TIMING_GUARD_SECONDS = 0.12
 WINDOW_INTERACTION_LOOP_DELAY_MS = 120
 
-INPUT_KEYBOARD = 1
-KEYEVENTF_KEYUP = 0x0002
-VK_DISPLAY_NAMES = {
-    0x2E: "Delete",
-    0x23: "End",
-}
-for code in range(0x30, 0x3A):
-    VK_DISPLAY_NAMES[code] = chr(code)
-for code in range(0x41, 0x5B):
-    VK_DISPLAY_NAMES[code] = chr(code)
-for index in range(1, 25):
-    VK_DISPLAY_NAMES[0x70 + index - 1] = f"F{index}"
 TRACKED_HELD_KEYS: set[int] = set()
 
 
-class KeyBdInput(ctypes.Structure):
-    _fields_ = [
-        ("wVk", wintypes.WORD),
-        ("wScan", wintypes.WORD),
-        ("dwFlags", wintypes.DWORD),
-        ("time", wintypes.DWORD),
-        ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
-    ]
-
-
-class HardwareInput(ctypes.Structure):
-    _fields_ = [
-        ("uMsg", wintypes.DWORD),
-        ("wParamL", wintypes.WORD),
-        ("wParamH", wintypes.WORD),
-    ]
-
-
-class MouseInput(ctypes.Structure):
-    _fields_ = [
-        ("dx", wintypes.LONG),
-        ("dy", wintypes.LONG),
-        ("mouseData", wintypes.DWORD),
-        ("dwFlags", wintypes.DWORD),
-        ("time", wintypes.DWORD),
-        ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
-    ]
-
-
-class InputUnion(ctypes.Union):
-    _fields_ = [
-        ("ki", KeyBdInput),
-        ("mi", MouseInput),
-        ("hi", HardwareInput),
-    ]
-
-
-class Input(ctypes.Structure):
-    _fields_ = [
-        ("type", wintypes.DWORD),
-        ("union", InputUnion),
-    ]
-
-
-user32 = ctypes.WinDLL("user32", use_last_error=True)
-user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(Input), ctypes.c_int]
-user32.SendInput.restype = wintypes.UINT
-
-
-def keyboard_input(vk_code: int, flags: int = 0) -> Input:
-    return Input(
-        type=INPUT_KEYBOARD,
-        union=InputUnion(
-            ki=KeyBdInput(
-                wVk=vk_code,
-                wScan=0,
-                dwFlags=flags,
-                time=0,
-                dwExtraInfo=None,
-            )
-        ),
-    )
-
-
-def tap_key(vk_code: int) -> None:
-    events = (Input * 2)(
-        keyboard_input(vk_code),
-        keyboard_input(vk_code, KEYEVENTF_KEYUP),
-    )
-    sent = user32.SendInput(2, events, ctypes.sizeof(Input))
-    if sent != 2:
-        raise ctypes.WinError(ctypes.get_last_error())
-
-
 def key_down(vk_code: int) -> None:
-    event = keyboard_input(vk_code)
-    sent = user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(Input))
-    if sent != 1:
-        raise ctypes.WinError(ctypes.get_last_error())
+    send_key_down(vk_code)
     TRACKED_HELD_KEYS.add(vk_code)
 
 
 def key_up(vk_code: int) -> None:
-    event = keyboard_input(vk_code, KEYEVENTF_KEYUP)
-    sent = user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(Input))
-    if sent != 1:
-        raise ctypes.WinError(ctypes.get_last_error())
+    send_key_up(vk_code)
     TRACKED_HELD_KEYS.discard(vk_code)
-
-
-def key_display_name(vk_code: int) -> str:
-    return VK_DISPLAY_NAMES.get(vk_code, f"VK{vk_code}")
 
 
 def tracked_held_keys_text() -> str:

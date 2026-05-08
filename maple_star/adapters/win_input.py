@@ -54,6 +54,19 @@ VK_NAMED_KEYS = {
 
 for index in range(1, 25):
     VK_NAMED_KEYS[f"f{index}"] = 0x70 + index - 1
+
+VK_DISPLAY_NAMES = {
+    0x2E: "Delete",
+    0x23: "End",
+}
+for code in range(0x30, 0x3A):
+    VK_DISPLAY_NAMES[code] = chr(code)
+for code in range(0x41, 0x5B):
+    VK_DISPLAY_NAMES[code] = chr(code)
+for index in range(1, 25):
+    VK_DISPLAY_NAMES[0x70 + index - 1] = f"F{index}"
+
+
 class KeyBdInput(ctypes.Structure):
     _fields_ = [
         ("wVk", wintypes.WORD),
@@ -246,6 +259,20 @@ def key_up(vk_code: int) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+def tap_key(vk_code: int) -> None:
+    events = (Input * 2)(
+        keyboard_input(vk_code),
+        keyboard_input(vk_code, KEYEVENTF_KEYUP),
+    )
+    sent = user32.SendInput(2, events, ctypes.sizeof(Input))
+    if sent != 2:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def key_display_name(vk_code: int) -> str:
+    return VK_DISPLAY_NAMES.get(vk_code, f"VK{vk_code}")
+
+
 def is_valid_window(hwnd: int) -> bool:
     return bool(hwnd and user32.IsWindow(hwnd))
 
@@ -263,10 +290,6 @@ def window_title(hwnd: int) -> str:
     buffer = ctypes.create_unicode_buffer(length + 1)
     user32.GetWindowTextW(hwnd, buffer, length + 1)
     return buffer.value
-
-
-def is_window_visible(hwnd: int) -> bool:
-    return bool(is_valid_window(hwnd) and user32.IsWindowVisible(hwnd))
 
 
 def is_window_minimized(hwnd: int) -> bool:

@@ -4,7 +4,6 @@ import ctypes
 import multiprocessing as mp
 import msvcrt
 import os
-import sys
 from ctypes import wintypes
 from pathlib import Path
 from tempfile import gettempdir
