@@ -86,6 +86,7 @@ from ..services.control_hotkey_worker import (
     CONTROL_HOTKEY_EMERGENCY_STOP,
     CONTROL_HOTKEY_EXPERIENCE_RESET,
     CONTROL_HOTKEY_EXPERIENCE_TOGGLE,
+    CONTROL_HOTKEY_PICKUP_TOGGLE,
     CONTROL_HOTKEY_TOGGLE,
     ControlHotkeyWorker,
 )
@@ -120,6 +121,8 @@ from ..adapters.win_input import (
     Point,
     is_valid_window,
     is_window_minimized,
+    key_down,
+    key_up,
     parse_vk_key,
     tap_hotkey,
     temporarily_make_window_topmost,
@@ -151,6 +154,8 @@ MCI_MAX_VOLUME = 1000
 MCI_MEDIA_VOLUME = round(MCI_MAX_VOLUME * MEDIA_VOLUME_PERCENT / 100)
 AUTO_DRINK_START_SOUND_PATH = PROJECT_ROOT / "media" / "auto-drink-start.mp3"
 AUTO_DRINK_STOP_SOUND_PATH = PROJECT_ROOT / "media" / "auto-drink-stop.mp3"
+AUTO_PICKUP_START_SOUND_PATH = PROJECT_ROOT / "media" / "auto-pickup-start.mp3"
+AUTO_PICKUP_STOP_SOUND_PATH = PROJECT_ROOT / "media" / "auto-pickup-stop.mp3"
 
 
 class AutoPotionController:
@@ -195,20 +200,26 @@ class AutoPotionController:
         self.emergency_hotkey_registered = False
         self.experience_toggle_hotkey_registered = False
         self.experience_reset_hotkey_registered = False
+        self.pickup_toggle_hotkey_registered = False
         self.control_hotkey_worker = ControlHotkeyWorker()
         self.control_hotkey_worker.start()
         self.toggle_hotkey_was_down = False
         self.emergency_stop_hotkey_was_down = False
         self.experience_toggle_hotkey_was_down = False
         self.experience_reset_hotkey_was_down = False
+        self.pickup_toggle_hotkey_was_down = False
         self.registered_toggle_hotkey_vk = 0
         self.registered_emergency_stop_hotkey_vk = 0
         self.registered_experience_toggle_hotkey_vk = 0
         self.registered_experience_reset_hotkey_vk = 0
+        self.registered_pickup_toggle_hotkey_vk = 0
         self.control_hotkeys_suppressed_until_release = False
         self.last_toggle_hotkey_at = -999.0
         self.last_experience_toggle_hotkey_at = -999.0
         self.last_experience_reset_hotkey_at = -999.0
+        self.last_pickup_toggle_hotkey_at = -999.0
+        self.pickup_enabled = False
+        self.pickup_held_vk = 0
         self.emergency_stop_requested = False
         self.last_action = "啟動"
         self.last_bar_debug: dict[str, BarDetectionDebug] = {
@@ -259,20 +270,30 @@ class AutoPotionController:
         except ValueError:
             return parse_vk_key(fallback)
 
+    def _optional_control_hotkey_vk(self, hotkey: str | None) -> int:
+        if not hotkey:
+            return 0
+        try:
+            return parse_vk_key(hotkey)
+        except ValueError:
+            return 0
+
     def _sync_registered_control_hotkeys(self) -> None:
         toggle_vk = self._control_hotkey_vk(self.settings.toggle_hotkey, "F11")
         emergency_vk = self._control_hotkey_vk(self.settings.emergency_stop_hotkey, "Pause")
         experience_vk = self._control_hotkey_vk(self.settings.experience_toggle_hotkey, "F10")
         experience_reset_vk = self._control_hotkey_vk(self.settings.experience_reset_hotkey, "F9")
+        pickup_toggle_vk = self._optional_control_hotkey_vk(self.settings.pickup_toggle_hotkey)
         if (
             toggle_vk == self.registered_toggle_hotkey_vk
             and emergency_vk == self.registered_emergency_stop_hotkey_vk
             and experience_vk == self.registered_experience_toggle_hotkey_vk
             and experience_reset_vk == self.registered_experience_reset_hotkey_vk
+            and pickup_toggle_vk == self.registered_pickup_toggle_hotkey_vk
         ):
             return
         self._unregister_toggle_hotkey()
-        self._register_toggle_hotkey(toggle_vk, emergency_vk, experience_vk, experience_reset_vk)
+        self._register_toggle_hotkey(toggle_vk, emergency_vk, experience_vk, experience_reset_vk, pickup_toggle_vk)
 
     def _register_toggle_hotkey(
         self,
@@ -280,6 +301,7 @@ class AutoPotionController:
         emergency_vk: int,
         experience_vk: int,
         experience_reset_vk: int = 0,
+        pickup_toggle_vk: int = 0,
     ) -> None:
         self.registered_toggle_hotkey_vk = toggle_vk
         self.hotkey_registered = bool(toggle_vk)
@@ -292,6 +314,9 @@ class AutoPotionController:
 
         self.registered_experience_reset_hotkey_vk = experience_reset_vk
         self.experience_reset_hotkey_registered = bool(experience_reset_vk)
+
+        self.registered_pickup_toggle_hotkey_vk = pickup_toggle_vk
+        self.pickup_toggle_hotkey_registered = bool(pickup_toggle_vk)
         worker = getattr(self, "control_hotkey_worker", None)
         if worker is not None:
             worker.update_hotkeys(
@@ -300,6 +325,7 @@ class AutoPotionController:
                     CONTROL_HOTKEY_EMERGENCY_STOP: emergency_vk,
                     CONTROL_HOTKEY_EXPERIENCE_TOGGLE: experience_vk,
                     CONTROL_HOTKEY_EXPERIENCE_RESET: experience_reset_vk,
+                    CONTROL_HOTKEY_PICKUP_TOGGLE: pickup_toggle_vk,
                 }
             )
 
@@ -312,6 +338,8 @@ class AutoPotionController:
         self.registered_experience_toggle_hotkey_vk = 0
         self.experience_reset_hotkey_registered = False
         self.registered_experience_reset_hotkey_vk = 0
+        self.pickup_toggle_hotkey_registered = False
+        self.registered_pickup_toggle_hotkey_vk = 0
         worker = getattr(self, "control_hotkey_worker", None)
         if worker is not None:
             worker.update_hotkeys({})
@@ -322,15 +350,19 @@ class AutoPotionController:
             self.emergency_stop_hotkey_was_down = False
             self.experience_toggle_hotkey_was_down = False
             self.experience_reset_hotkey_was_down = False
+            self.pickup_toggle_hotkey_was_down = False
+            self._release_pickup_key()
             self.control_hotkeys_suppressed_until_release = False
             self._discard_control_hotkey_messages()
             return
         if self.gui.consume_key_detection_finished():
             self.control_hotkeys_suppressed_until_release = True
+            self._release_pickup_key()
             self._discard_control_hotkey_messages()
             self._sync_control_hotkey_down_states()
             return
         if self.control_hotkeys_suppressed_until_release:
+            self._release_pickup_key()
             self._discard_control_hotkey_messages()
             self._sync_control_hotkey_down_states()
             if not self._any_control_hotkey_is_down():
@@ -358,6 +390,7 @@ class AutoPotionController:
         emergency_stop_triggered = False
         experience_toggle_triggered = False
         experience_reset_triggered = False
+        pickup_toggle_triggered = False
         message = Msg()
         while user32.PeekMessageW(
             ctypes.byref(message),
@@ -405,6 +438,14 @@ class AutoPotionController:
             experience_reset_triggered = True
         self.experience_reset_hotkey_was_down = experience_reset_is_down
 
+        pickup_toggle_is_down = bool(
+            self.registered_pickup_toggle_hotkey_vk
+            and user32.GetAsyncKeyState(self.registered_pickup_toggle_hotkey_vk) & ASYNC_KEY_DOWN_MASK
+        )
+        if pickup_toggle_is_down and not self.pickup_toggle_hotkey_was_down:
+            pickup_toggle_triggered = True
+        self.pickup_toggle_hotkey_was_down = pickup_toggle_is_down
+
         if emergency_stop_triggered:
             self.emergency_stop()
         elif toggle_triggered:
@@ -413,6 +454,8 @@ class AutoPotionController:
             self._try_toggle_experience_efficiency(time.monotonic())
         elif experience_reset_triggered:
             self._try_reset_experience_statistics(time.monotonic())
+        elif pickup_toggle_triggered:
+            self._try_toggle_pickup(time.monotonic())
 
     def _drain_control_hotkey_worker_events(self) -> list[str]:
         worker = getattr(self, "control_hotkey_worker", None)
@@ -439,6 +482,8 @@ class AutoPotionController:
             self._try_toggle_experience_efficiency(now)
         elif event == CONTROL_HOTKEY_EXPERIENCE_RESET:
             self._try_reset_experience_statistics(now)
+        elif event == CONTROL_HOTKEY_PICKUP_TOGGLE:
+            self._try_toggle_pickup(now)
 
     def is_key_capture_blocking_actions(self) -> bool:
         return self.gui.is_detecting_key() or self.gui.is_key_detection_release_pending()
@@ -464,12 +509,17 @@ class AutoPotionController:
             self.registered_experience_reset_hotkey_vk
             and user32.GetAsyncKeyState(self.registered_experience_reset_hotkey_vk) & ASYNC_KEY_DOWN_MASK
         )
+        self.pickup_toggle_hotkey_was_down = bool(
+            self.registered_pickup_toggle_hotkey_vk
+            and user32.GetAsyncKeyState(self.registered_pickup_toggle_hotkey_vk) & ASYNC_KEY_DOWN_MASK
+        )
 
     def _apply_control_hotkey_down_states(self, down: dict[str, bool]) -> None:
         self.toggle_hotkey_was_down = down.get(CONTROL_HOTKEY_TOGGLE, False)
         self.emergency_stop_hotkey_was_down = down.get(CONTROL_HOTKEY_EMERGENCY_STOP, False)
         self.experience_toggle_hotkey_was_down = down.get(CONTROL_HOTKEY_EXPERIENCE_TOGGLE, False)
         self.experience_reset_hotkey_was_down = down.get(CONTROL_HOTKEY_EXPERIENCE_RESET, False)
+        self.pickup_toggle_hotkey_was_down = down.get(CONTROL_HOTKEY_PICKUP_TOGGLE, False)
 
     def _any_control_hotkey_is_down(self) -> bool:
         return (
@@ -477,6 +527,7 @@ class AutoPotionController:
             or self.emergency_stop_hotkey_was_down
             or self.experience_toggle_hotkey_was_down
             or self.experience_reset_hotkey_was_down
+            or self.pickup_toggle_hotkey_was_down
         )
 
     def _discard_control_hotkey_messages(self) -> None:
@@ -521,6 +572,85 @@ class AutoPotionController:
         self.gui.show_toggle_notice("經驗統計已重置")
         self.last_action = f"{self.settings.experience_reset_hotkey} 經驗統計重置"
         print(f"{self.settings.experience_reset_hotkey}：經驗統計已重置")
+
+    def _try_toggle_pickup(self, now: float) -> None:
+        if now - self.last_pickup_toggle_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
+            return
+        self.last_pickup_toggle_hotkey_at = now
+        self.toggle_pickup_enabled()
+
+    def toggle_pickup_enabled(self) -> None:
+        if self.pickup_enabled:
+            self.pickup_enabled = False
+            self._release_pickup_key()
+            self._play_media_file(AUTO_PICKUP_STOP_SOUND_PATH, "pickup_stop")
+            self.gui.set_status("拾取已停用")
+            self.gui.show_toggle_notice("拾取已停用")
+            self.last_action = "拾取停用"
+            print("拾取：已停用")
+            return
+
+        pickup_key = self.settings.pickup_key
+        if not pickup_key:
+            self.pickup_enabled = False
+            self._release_pickup_key()
+            self.gui.set_status("拾取鍵未設定")
+            self.gui.show_toggle_notice("拾取鍵未設定")
+            self.last_action = "拾取鍵未設定"
+            print("拾取：拾取鍵未設定")
+            return
+
+        try:
+            parse_vk_key(pickup_key)
+        except ValueError:
+            self.pickup_enabled = False
+            self._release_pickup_key()
+            self.gui.set_status("拾取鍵設定無效")
+            self.gui.show_toggle_notice("拾取鍵設定無效")
+            self.last_action = "拾取鍵設定無效"
+            print(f"拾取：拾取鍵設定無效：{pickup_key}")
+            return
+
+        self.pickup_enabled = True
+        self._sync_pickup_key_state()
+        self._play_media_file(AUTO_PICKUP_START_SOUND_PATH, "pickup_start")
+        self.gui.set_status("拾取已啟用")
+        self.gui.show_toggle_notice("拾取已啟用")
+        self.last_action = "拾取啟用"
+        print("拾取：已啟用")
+
+    def _sync_pickup_key_state(self) -> None:
+        if not self.pickup_enabled or not self.scripts_enabled or self.is_key_capture_blocking_actions():
+            self._release_pickup_key()
+            return
+
+        pickup_key = self.settings.pickup_key
+        if not pickup_key:
+            self.pickup_enabled = False
+            self._release_pickup_key()
+            return
+
+        try:
+            pickup_vk = parse_vk_key(pickup_key)
+        except ValueError:
+            self.pickup_enabled = False
+            self._release_pickup_key()
+            self.gui.set_status("拾取鍵設定無效")
+            self.gui.show_toggle_notice("拾取鍵設定無效")
+            return
+
+        if self.pickup_held_vk == pickup_vk:
+            return
+        self._release_pickup_key()
+        key_down(pickup_vk)
+        self.pickup_held_vk = pickup_vk
+
+    def _release_pickup_key(self) -> None:
+        held_vk = getattr(self, "pickup_held_vk", 0)
+        if not held_vk:
+            return
+        self.pickup_held_vk = 0
+        key_up(held_vk)
 
     def toggle_auto_drink_enabled(self) -> None:
         if self.auto_drink_enabled and self._has_out_of_potion_hold():
@@ -591,6 +721,7 @@ class AutoPotionController:
             self.scripts_enabled = True
             self.auto_drink_enabled = True
             self._clear_potion_effect_state()
+            self._sync_pickup_key_state()
             self._play_toggle_beep(RESUME_BEEP_PATTERN)
             self.gui.set_status("總開關已啟用")
             self.gui.show_toggle_notice("總開關已啟用")
@@ -600,6 +731,7 @@ class AutoPotionController:
 
         self.scripts_enabled = False
         self.auto_drink_enabled = False
+        self._release_pickup_key()
         self.emergency_stop_requested = True
         self.last_hp_drink_at = now
         self.last_mp_drink_at = now
@@ -655,23 +787,31 @@ class AutoPotionController:
         self._save_settings_when_idle(now)
 
         if self.is_key_capture_blocking_actions():
+            self._release_pickup_key()
             self._set_gameplay_hud_active(False, now)
             self._pause_experience_for_inactive_state(now, "設定快捷鍵中，保留統計")
             self.gui.set_current_percentages(None, None)
             return
 
-        if now < self.next_capture_at:
-            return
-        self.next_capture_at = now + DEFAULT_CAPTURE_INTERVAL_SECONDS
-
         if not self.scripts_enabled:
+            self._release_pickup_key()
             self._set_gameplay_hud_active(False, now)
             self._pause_experience_for_inactive_state(now, "總開關已暫停，保留統計")
             self.gui.set_status(f"總開關已關閉，按 {self.settings.emergency_stop_hotkey} 開啟")
             self.gui.set_current_percentages(None, None)
             return
 
-        if not self.is_target_window_active():
+        target_window_active = self.is_target_window_active()
+        if target_window_active:
+            self._sync_pickup_key_state()
+        else:
+            self._release_pickup_key()
+
+        if now < self.next_capture_at:
+            return
+        self.next_capture_at = now + DEFAULT_CAPTURE_INTERVAL_SECONDS
+
+        if not target_window_active:
             self._set_gameplay_hud_active(False, now)
             self._pause_experience_for_inactive_state(now, "等待楓星前景，保留統計")
             self.gui.set_status("等待楓星成為前景視窗")
@@ -2541,6 +2681,7 @@ class AutoPotionController:
         return origin.x, origin.y, client_width, client_height
 
     def cleanup(self) -> None:
+        self._release_pickup_key()
         self._unregister_toggle_hotkey()
         worker = getattr(self, "control_hotkey_worker", None)
         if worker is not None:

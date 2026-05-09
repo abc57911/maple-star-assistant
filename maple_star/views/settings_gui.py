@@ -256,6 +256,8 @@ class AutoPotionSettingsGui:
         self.emergency_stop_hotkey = tk.StringVar(value=settings.emergency_stop_hotkey)
         self.experience_toggle_hotkey = tk.StringVar(value=settings.experience_toggle_hotkey)
         self.experience_reset_hotkey = tk.StringVar(value=settings.experience_reset_hotkey)
+        self.pickup_toggle_hotkey = tk.StringVar(value=settings.pickup_toggle_hotkey or "")
+        self.pickup_key = tk.StringVar(value=settings.pickup_key or "")
         self.hp_current = tk.StringVar(value="HP: --%")
         self.mp_current = tk.StringVar(value="MP: --%")
         self.status = tk.StringVar(value="只在楓星為前景視窗時生效")
@@ -320,6 +322,32 @@ class AutoPotionSettingsGui:
         exp_reset_entry.bind(
             "<Button-1>",
             lambda event: self._start_key_detection_from_entry(event, self.experience_reset_hotkey, "重置統計熱鍵"),
+        )
+        self._label(control_hotkey_frame, "拾取").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(0, 6))
+        pickup_toggle_entry = self._entry(
+            control_hotkey_frame,
+            self.pickup_toggle_hotkey,
+            width=HOTKEY_ENTRY_WIDTH,
+            justify="center",
+            placeholder_text="自訂",
+        )
+        pickup_toggle_entry.grid(row=1, column=1, sticky="w", padx=(0, 8), pady=(0, 6))
+        pickup_toggle_entry.bind(
+            "<Button-1>",
+            lambda event: self._start_key_detection_from_entry(event, self.pickup_toggle_hotkey, "拾取熱鍵"),
+        )
+        self._label(control_hotkey_frame, "拾取鍵").grid(row=1, column=4, sticky="w", padx=(0, 4), pady=(0, 6))
+        pickup_key_entry = self._entry(
+            control_hotkey_frame,
+            self.pickup_key,
+            width=HOTKEY_ENTRY_WIDTH,
+            justify="center",
+            placeholder_text="自訂",
+        )
+        pickup_key_entry.grid(row=1, column=5, sticky="w", padx=(0, 8), pady=(0, 6))
+        pickup_key_entry.bind(
+            "<Button-1>",
+            lambda event: self._start_key_detection_from_entry(event, self.pickup_key, "拾取鍵"),
         )
 
         profile_section, _header, profile_frame = self._build_section(controls_frame, "設定檔", row=1)
@@ -1155,6 +1183,7 @@ class AutoPotionSettingsGui:
         *,
         width: int = 82,
         justify: str = "left",
+        placeholder_text: str = "",
     ) -> ctk.CTkEntry:
         return ctk.CTkEntry(
             parent,
@@ -1165,6 +1194,7 @@ class AutoPotionSettingsGui:
             fg_color=ENTRY_BG,
             border_color=PANEL_BORDER,
             text_color=BODY_TEXT,
+            placeholder_text=placeholder_text,
             placeholder_text_color=MUTED_TEXT,
             font=UI_FONT,
             justify=justify,
@@ -1676,9 +1706,10 @@ class AutoPotionSettingsGui:
             f"Paddle: {case.get('paddle_text') or '--'} | {case.get('paddle_reason') or '--'}\n"
             f"Final: {case.get('final_text') or '--'} | {case.get('final_reason') or '--'}"
         )
-        default_text = str(case.get("final_text") or case.get("reading_key") or "")
+        default_text = str(case.get("default_correct_text") or "")
         self.experience_learning_correct_text.set(default_text)
-        self.experience_learning_status.set("確認正確值後可套用")
+        source_warning = str(case.get("source_warning") or "")
+        self.experience_learning_status.set(source_warning or "確認正確值後可套用")
         preview_file = case.get("preview_file")
         self._set_experience_learning_preview(Path(preview_file) if preview_file else None)
 
@@ -1812,6 +1843,8 @@ class AutoPotionSettingsGui:
         self.emergency_stop_hotkey.set(self.settings.emergency_stop_hotkey)
         self.experience_toggle_hotkey.set(self.settings.experience_toggle_hotkey)
         self.experience_reset_hotkey.set(self.settings.experience_reset_hotkey)
+        self.pickup_toggle_hotkey.set(self.settings.pickup_toggle_hotkey or "")
+        self.pickup_key.set(self.settings.pickup_key or "")
         self.set_window_topmost(self.settings.window_topmost)
         self.set_console_collapsed(self.settings.console_collapsed)
         self.set_compact_experience_mode(self.settings.compact_experience_mode)
@@ -2124,6 +2157,8 @@ class AutoPotionSettingsGui:
         self.settings.experience_reset_hotkey = (
             self.experience_reset_hotkey.get().strip() or self.settings.experience_reset_hotkey
         )
+        self.settings.pickup_toggle_hotkey = self.pickup_toggle_hotkey.get().strip() or None
+        self.settings.pickup_key = self.pickup_key.get().strip() or None
         self.settings.console_collapsed = self.console_collapsed
         self.settings.combo_group_collapsed = self.combo_group_collapsed
         self.settings.compact_experience_mode = self.compact_experience_mode

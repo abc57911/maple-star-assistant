@@ -85,6 +85,8 @@ class AutoPotionSettings:
     emergency_stop_hotkey: str = DEFAULT_EMERGENCY_STOP_HOTKEY
     experience_toggle_hotkey: str = DEFAULT_EXPERIENCE_TOGGLE_HOTKEY
     experience_reset_hotkey: str = DEFAULT_EXPERIENCE_RESET_HOTKEY
+    pickup_toggle_hotkey: str | None = None
+    pickup_key: str | None = None
     console_collapsed: bool = False
     combo_group_collapsed: bool = False
     compact_experience_mode: bool = False
@@ -122,6 +124,8 @@ class AutoPotionSettings:
             self.emergency_stop_hotkey,
             self.experience_toggle_hotkey,
             self.experience_reset_hotkey,
+            self.pickup_toggle_hotkey,
+            self.pickup_key,
             self.console_collapsed,
             self.combo_group_collapsed,
             self.compact_experience_mode,
@@ -167,6 +171,8 @@ class AutoPotionSettings:
             "emergency_stop_hotkey": self.emergency_stop_hotkey,
             "experience_toggle_hotkey": self.experience_toggle_hotkey,
             "experience_reset_hotkey": self.experience_reset_hotkey,
+            "pickup_toggle_hotkey": self.pickup_toggle_hotkey,
+            "pickup_key": self.pickup_key,
             "console_collapsed": self.console_collapsed,
             "combo_group_collapsed": self.combo_group_collapsed,
             "compact_experience_mode": self.compact_experience_mode,
@@ -253,6 +259,8 @@ GLOBAL_SETTING_KEYS = (
     "emergency_stop_hotkey",
     "experience_toggle_hotkey",
     "experience_reset_hotkey",
+    "pickup_toggle_hotkey",
+    "pickup_key",
     "console_collapsed",
     "combo_group_collapsed",
     "compact_experience_mode",
@@ -292,6 +300,16 @@ def _read_string(data: dict[str, object], key: str, fallback: str) -> str:
         return fallback
     value = value.strip()
     return value or fallback
+
+
+def _read_optional_string(data: dict[str, object], key: str, fallback: str | None) -> str | None:
+    value = data.get(key, fallback)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return fallback
+    value = value.strip()
+    return value or None
 
 
 def _read_optional_int(data: dict[str, object], key: str, fallback: int | None) -> int | None:
@@ -357,6 +375,8 @@ def settings_from_profile_payload(
         emergency_stop_hotkey=fallback.emergency_stop_hotkey,
         experience_toggle_hotkey=fallback.experience_toggle_hotkey,
         experience_reset_hotkey=fallback.experience_reset_hotkey,
+        pickup_toggle_hotkey=fallback.pickup_toggle_hotkey,
+        pickup_key=fallback.pickup_key,
         console_collapsed=fallback.console_collapsed,
         combo_group_collapsed=fallback.combo_group_collapsed,
         compact_experience_mode=fallback.compact_experience_mode,
@@ -425,6 +445,8 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
             "experience_reset_hotkey",
             settings.experience_reset_hotkey,
         ),
+        pickup_toggle_hotkey=_read_optional_string(raw, "pickup_toggle_hotkey", settings.pickup_toggle_hotkey),
+        pickup_key=_read_optional_string(raw, "pickup_key", settings.pickup_key),
         console_collapsed=_read_bool(raw, "console_collapsed", settings.console_collapsed),
         combo_group_collapsed=_read_bool(raw, "combo_group_collapsed", settings.combo_group_collapsed),
         compact_experience_mode=_read_bool(raw, "compact_experience_mode", settings.compact_experience_mode),

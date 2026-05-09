@@ -9,6 +9,8 @@ import numpy as np
 from maple_star.controller import (
     AUTO_DRINK_START_SOUND_PATH,
     AUTO_DRINK_STOP_SOUND_PATH,
+    AUTO_PICKUP_START_SOUND_PATH,
+    AUTO_PICKUP_STOP_SOUND_PATH,
     AutoPotionController,
     ExperienceOcrJob,
 )
@@ -24,7 +26,7 @@ from maple_star.constants import (
 )
 from maple_star.experience import ExperienceEfficiencyTracker, ExperienceOcrImage, ExperienceSnapshot, ExperienceTextReading
 from maple_star.models.controller_state import OutOfPotionHold, PotionEffectAttempt
-from maple_star.services.control_hotkey_worker import CONTROL_HOTKEY_EXPERIENCE_TOGGLE
+from maple_star.services.control_hotkey_worker import CONTROL_HOTKEY_EXPERIENCE_TOGGLE, CONTROL_HOTKEY_PICKUP_TOGGLE
 from maple_star.settings import AutoPotionSettings
 
 
@@ -74,11 +76,16 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.registered_emergency_stop_hotkey_vk = 0
         controller.registered_experience_toggle_hotkey_vk = 0
         controller.registered_experience_reset_hotkey_vk = 0
+        controller.registered_pickup_toggle_hotkey_vk = 0
         controller.toggle_hotkey_was_down = False
         controller.emergency_stop_hotkey_was_down = False
         controller.experience_toggle_hotkey_was_down = False
         controller.experience_reset_hotkey_was_down = False
+        controller.pickup_toggle_hotkey_was_down = False
         controller.last_experience_reset_hotkey_at = -999.0
+        controller.last_pickup_toggle_hotkey_at = -999.0
+        controller.pickup_enabled = False
+        controller.pickup_held_vk = 0
         controller.gameplay_hud_active = False
         controller.control_hotkeys_suppressed_until_release = False
         controller.last_action = "啟動"
@@ -1336,12 +1343,13 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.emergency_stop_hotkey_was_down = True
         controller.experience_toggle_hotkey_was_down = True
         controller.experience_reset_hotkey_was_down = True
+        controller.pickup_toggle_hotkey_was_down = True
         controller._discard_control_hotkey_messages = Mock()
         controller.emergency_stop = Mock()
         controller._try_toggle_scripts_enabled = Mock()
         controller._try_toggle_experience_efficiency = Mock()
         controller._try_reset_experience_statistics = Mock()
-        controller._try_reset_experience_statistics = Mock()
+        controller._try_toggle_pickup = Mock()
 
         controller.poll_control_hotkeys()
 
@@ -1350,11 +1358,12 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._try_toggle_scripts_enabled.assert_not_called()
         controller._try_toggle_experience_efficiency.assert_not_called()
         controller._try_reset_experience_statistics.assert_not_called()
-        controller._try_reset_experience_statistics.assert_not_called()
+        controller._try_toggle_pickup.assert_not_called()
         self.assertFalse(controller.toggle_hotkey_was_down)
         self.assertFalse(controller.emergency_stop_hotkey_was_down)
         self.assertFalse(controller.experience_toggle_hotkey_was_down)
         self.assertFalse(controller.experience_reset_hotkey_was_down)
+        self.assertFalse(controller.pickup_toggle_hotkey_was_down)
 
     def test_control_hotkeys_are_ignored_once_after_key_capture_finishes(self):
         controller = self.make_controller([])
@@ -1384,15 +1393,18 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.registered_emergency_stop_hotkey_vk = 0x13
         controller.registered_experience_toggle_hotkey_vk = 0x79
         controller.registered_experience_reset_hotkey_vk = 0x78
+        controller.registered_pickup_toggle_hotkey_vk = 0x77
         controller.toggle_hotkey_was_down = False
         controller.emergency_stop_hotkey_was_down = False
         controller.experience_toggle_hotkey_was_down = False
         controller.experience_reset_hotkey_was_down = False
+        controller.pickup_toggle_hotkey_was_down = False
         controller._discard_control_hotkey_messages = Mock()
         controller.emergency_stop = Mock()
         controller._try_toggle_scripts_enabled = Mock()
         controller._try_toggle_experience_efficiency = Mock()
         controller._try_reset_experience_statistics = Mock()
+        controller._try_toggle_pickup = Mock()
 
         with patch("maple_star.controller.user32.GetAsyncKeyState", return_value=ASYNC_KEY_DOWN_MASK):
             controller.poll_control_hotkeys()
@@ -1402,9 +1414,11 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertTrue(controller.toggle_hotkey_was_down)
         self.assertTrue(controller.experience_toggle_hotkey_was_down)
         self.assertTrue(controller.experience_reset_hotkey_was_down)
+        self.assertTrue(controller.pickup_toggle_hotkey_was_down)
         controller.emergency_stop.assert_not_called()
         controller._try_toggle_scripts_enabled.assert_not_called()
         controller._try_toggle_experience_efficiency.assert_not_called()
+        controller._try_toggle_pickup.assert_not_called()
         controller._try_reset_experience_statistics.assert_not_called()
 
         with patch("maple_star.controller.user32.GetAsyncKeyState", return_value=0):
@@ -1415,6 +1429,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._try_toggle_scripts_enabled.assert_not_called()
         controller._try_toggle_experience_efficiency.assert_not_called()
         controller._try_reset_experience_statistics.assert_not_called()
+        controller._try_toggle_pickup.assert_not_called()
 
     def test_control_hotkey_worker_events_are_dispatched_without_main_thread_key_polling(self):
         controller = self.make_controller([])
@@ -1425,11 +1440,13 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             "toggle",
             "experience_toggle",
             "experience_reset",
+            CONTROL_HOTKEY_PICKUP_TOGGLE,
             "emergency_stop",
         ]
         controller._try_toggle_scripts_enabled = Mock()
         controller._try_toggle_experience_efficiency = Mock()
         controller._try_reset_experience_statistics = Mock()
+        controller._try_toggle_pickup = Mock()
         controller.emergency_stop = Mock()
 
         with patch("maple_star.controller.user32.GetAsyncKeyState") as key_state:
@@ -1439,6 +1456,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._try_toggle_scripts_enabled.assert_called_once()
         controller._try_toggle_experience_efficiency.assert_called_once()
         controller._try_reset_experience_statistics.assert_called_once()
+        controller._try_toggle_pickup.assert_called_once()
         controller.emergency_stop.assert_called_once()
 
     def test_control_hotkey_worker_event_does_not_fall_back_to_second_key_edge(self):
@@ -1485,6 +1503,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
                 "emergency_stop": 0x13,
                 "experience_toggle": 0x79,
                 "experience_reset": 0x78,
+                "pickup_toggle": 0,
             }
         )
 
@@ -1558,6 +1577,130 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.gui.show_toggle_notice.assert_called_once_with("經驗統計已重置")
         self.assertEqual(controller.last_action, "F9 經驗統計重置")
         print_mock.assert_called_once_with("F9：經驗統計已重置")
+
+    def test_pickup_toggle_holds_and_releases_configured_key_with_sounds(self):
+        controller = self.make_controller([])
+        controller.settings.pickup_key = "Z"
+
+        with (
+            patch("maple_star.controller.key_down") as key_down,
+            patch("maple_star.controller.key_up") as key_up,
+            patch.object(controller, "_play_media_file") as play_media,
+            patch("builtins.print"),
+        ):
+            controller.toggle_pickup_enabled()
+            controller.toggle_pickup_enabled()
+
+        key_down.assert_called_once_with(0x5A)
+        key_up.assert_called_once_with(0x5A)
+        self.assertEqual(play_media.call_args_list[0].args, (AUTO_PICKUP_START_SOUND_PATH, "pickup_start"))
+        self.assertEqual(play_media.call_args_list[1].args, (AUTO_PICKUP_STOP_SOUND_PATH, "pickup_stop"))
+        self.assertFalse(controller.pickup_enabled)
+        self.assertEqual(controller.pickup_held_vk, 0)
+
+    def test_pickup_toggle_without_key_stays_disabled(self):
+        controller = self.make_controller([])
+        controller.settings.pickup_key = None
+
+        with (
+            patch("maple_star.controller.key_down") as key_down,
+            patch.object(controller, "_play_media_file") as play_media,
+            patch("builtins.print"),
+        ):
+            controller.toggle_pickup_enabled()
+
+        key_down.assert_not_called()
+        play_media.assert_not_called()
+        self.assertFalse(controller.pickup_enabled)
+        controller.gui.set_status.assert_called_with("拾取鍵未設定")
+        controller.gui.show_toggle_notice.assert_called_with("拾取鍵未設定")
+
+    def test_pickup_toggle_with_invalid_key_stays_disabled(self):
+        controller = self.make_controller([])
+        controller.settings.pickup_key = "InvalidKey"
+
+        with (
+            patch("maple_star.controller.key_down") as key_down,
+            patch.object(controller, "_play_media_file") as play_media,
+            patch("builtins.print"),
+        ):
+            controller.toggle_pickup_enabled()
+
+        key_down.assert_not_called()
+        play_media.assert_not_called()
+        self.assertFalse(controller.pickup_enabled)
+        controller.gui.set_status.assert_called_with("拾取鍵設定無效")
+        controller.gui.show_toggle_notice.assert_called_with("拾取鍵設定無效")
+
+    def test_emergency_stop_releases_pickup_key(self):
+        controller = self.make_controller([])
+        controller.pickup_enabled = True
+        controller.pickup_held_vk = 0x5A
+
+        with (
+            patch("maple_star.controller.key_up") as key_up,
+            patch("builtins.print"),
+        ):
+            controller.emergency_stop()
+
+        key_up.assert_called_once_with(0x5A)
+        self.assertEqual(controller.pickup_held_vk, 0)
+
+    def test_key_capture_releases_pickup_key(self):
+        controller = self.make_controller([])
+        controller.gui.is_detecting_key.return_value = True
+        controller.pickup_enabled = True
+        controller.pickup_held_vk = 0x5A
+
+        with patch("maple_star.controller.key_up") as key_up:
+            controller.poll_control_hotkeys()
+
+        key_up.assert_called_once_with(0x5A)
+        self.assertEqual(controller.pickup_held_vk, 0)
+
+    def test_pickup_releases_when_target_loses_foreground_and_reholds_on_return(self):
+        controller = self.make_controller([True, False, True])
+        controller.settings.pickup_key = "Z"
+        controller.pickup_enabled = True
+        controller.control_hotkey_worker = None
+        controller.next_capture_at = 999.0
+        controller.pending_settings_snapshot = controller.settings.snapshot()
+        controller.next_settings_save_at = None
+        controller.gui.pump.return_value = True
+        controller._sync_registered_control_hotkeys = Mock()
+
+        with (
+            patch("maple_star.controller.key_down") as key_down,
+            patch("maple_star.controller.key_up") as key_up,
+        ):
+            controller.update(10.0)
+            controller.update(11.0)
+            controller.update(12.0)
+
+        self.assertEqual(key_down.call_args_list[0].args, (0x5A,))
+        self.assertEqual(key_down.call_args_list[1].args, (0x5A,))
+        key_up.assert_called_once_with(0x5A)
+        self.assertEqual(controller.pickup_held_vk, 0x5A)
+
+    def test_cleanup_releases_pickup_key(self):
+        controller = self.make_controller([])
+        controller.pickup_held_vk = 0x5A
+        controller._unregister_toggle_hotkey = Mock()
+        controller.control_hotkey_worker = None
+        controller.experience_ocr_executor = Mock()
+        controller.sct = Mock()
+        controller.gui.closed = True
+        controller.original_stdout = None
+        controller.original_stderr = None
+
+        with (
+            patch("maple_star.controller.key_up") as key_up,
+            patch("maple_star.controller.save_settings"),
+        ):
+            controller.cleanup()
+
+        key_up.assert_called_once_with(0x5A)
+        controller._unregister_toggle_hotkey.assert_called_once()
 
     def test_toggle_experience_efficiency_preserves_statistics_when_disabling(self):
         controller = self.make_controller([])

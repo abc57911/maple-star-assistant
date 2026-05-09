@@ -44,7 +44,12 @@ def list_experience_ocr_learning_cases() -> list[dict[str, Any]]:
         paddle = metadata.get("paddle_reading") or {}
         if _is_resolved_non_actionable_learning_case(metadata):
             continue
+        reading_key = str(metadata.get("reading_key") or _metadata_reading_key(metadata) or "")
+        reading_source = _find_candidate_source(metadata, reading_key) if reading_key else None
         preview_file = _first_existing_preview(metadata_path.parent, metadata)
+        source_warning = ""
+        if reading_key and reading_source is None:
+            source_warning = "預設 OCR 文字未綁定到此 case 的任何候選影像，請依預覽圖手動輸入正確值"
         cases.append(
             {
                 "id": metadata_path.parent.name,
@@ -59,7 +64,9 @@ def list_experience_ocr_learning_cases() -> list[dict[str, Any]]:
                 "pixel_reason": pixel.get("reason", "--"),
                 "paddle_text": paddle.get("text", ""),
                 "paddle_reason": paddle.get("reason", "--"),
-                "reading_key": metadata.get("reading_key", ""),
+                "reading_key": reading_key,
+                "default_correct_text": reading_key if reading_source is not None else "",
+                "source_warning": source_warning,
                 "preview_file": preview_file,
                 "metadata": metadata,
             }
@@ -421,6 +428,13 @@ def _pending_case_dir(case_id: str) -> Path:
 
 
 def _first_existing_preview(case_dir: Path, metadata: dict[str, Any]) -> Path | None:
+    reading_key = str(metadata.get("reading_key") or _metadata_reading_key(metadata) or "")
+    source = _find_candidate_source(metadata, reading_key) if reading_key else None
+    if source is not None:
+        _source_name, preview_name = source
+        if isinstance(preview_name, str) and (case_dir / preview_name).exists():
+            return case_dir / preview_name
+
     frames = metadata.get("frames") or []
     for frame in frames:
         for roi in frame:
@@ -434,17 +448,33 @@ def _promotion_source_file(case_dir: Path, metadata: dict[str, Any], compact_tex
     frames = metadata.get("frames") or []
     if not frames or not frames[0]:
         raise ValueError("pending case has no ROI frame")
+    source = _find_candidate_source(metadata, compact_text)
+    if source is not None:
+        source_name, _preview_name = source
+        return case_dir / source_name
+
+    metadata_key = str(metadata.get("reading_key") or _metadata_reading_key(metadata) or "")
+    if metadata_key and compact_text == metadata_key:
+        raise ValueError(
+            "default OCR text is not tied to a saved OCR candidate; "
+            "enter the correct value shown in the preview image instead"
+        )
+
     source_name = frames[0][0]["file"]
+    return case_dir / source_name
+
+
+def _find_candidate_source(metadata: dict[str, Any], compact_text: str) -> tuple[str, str] | None:
+    if not compact_text:
+        return None
+    frames = metadata.get("frames") or []
     for frame in frames:
         for roi in frame:
+            preview_name = roi.get("file")
             for attempt in roi.get("attempts") or []:
-                if any(candidate.get("text") == compact_text for candidate in attempt.get("candidates") or []):
-                    source_name = attempt.get("file") or source_name
-                    break
-            else:
-                continue
-            break
-        else:
-            continue
-        break
-    return case_dir / source_name
+                candidates = attempt.get("candidates") or []
+                if any(str(candidate.get("text") or "") == compact_text for candidate in candidates):
+                    source_name = attempt.get("file") or preview_name
+                    if isinstance(source_name, str) and isinstance(preview_name, str):
+                        return source_name, preview_name
+    return None

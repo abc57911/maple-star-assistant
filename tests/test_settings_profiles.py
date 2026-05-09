@@ -28,6 +28,8 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(settings.emergency_stop_hotkey, "Pause")
         self.assertEqual(settings.experience_toggle_hotkey, "F10")
         self.assertEqual(settings.experience_reset_hotkey, "F9")
+        self.assertIsNone(settings.pickup_toggle_hotkey)
+        self.assertIsNone(settings.pickup_key)
         self.assertFalse(settings.console_collapsed)
         self.assertFalse(settings.combo_group_collapsed)
         self.assertFalse(settings.compact_experience_mode)
@@ -43,6 +45,8 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(saved["emergency_stop_hotkey"], "Pause")
         self.assertEqual(saved["experience_toggle_hotkey"], "F10")
         self.assertEqual(saved["experience_reset_hotkey"], "F9")
+        self.assertIsNone(saved["pickup_toggle_hotkey"])
+        self.assertIsNone(saved["pickup_key"])
         self.assertFalse(saved["console_collapsed"])
         self.assertFalse(saved["combo_group_collapsed"])
         self.assertFalse(saved["compact_experience_mode"])
@@ -151,6 +155,8 @@ class SettingsProfileTests(unittest.TestCase):
             emergency_stop_hotkey="Pause",
             experience_toggle_hotkey="F10",
             experience_reset_hotkey="F8",
+            pickup_toggle_hotkey="F7",
+            pickup_key="Z",
             console_collapsed=True,
             combo_group_collapsed=True,
             compact_experience_mode=True,
@@ -166,6 +172,8 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(payload["emergency_stop_hotkey"], "Pause")
         self.assertEqual(payload["experience_toggle_hotkey"], "F10")
         self.assertEqual(payload["experience_reset_hotkey"], "F8")
+        self.assertEqual(payload["pickup_toggle_hotkey"], "F7")
+        self.assertEqual(payload["pickup_key"], "Z")
         self.assertTrue(payload["console_collapsed"])
         self.assertTrue(payload["combo_group_collapsed"])
         self.assertTrue(payload["compact_experience_mode"])
@@ -178,6 +186,8 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertNotIn("emergency_stop_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("experience_toggle_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("experience_reset_hotkey", payload["profiles"]["Default"])
+        self.assertNotIn("pickup_toggle_hotkey", payload["profiles"]["Default"])
+        self.assertNotIn("pickup_key", payload["profiles"]["Default"])
         self.assertNotIn("console_collapsed", payload["profiles"]["Default"])
         self.assertNotIn("combo_group_collapsed", payload["profiles"]["Default"])
         self.assertNotIn("compact_experience_mode", payload["profiles"]["Default"])

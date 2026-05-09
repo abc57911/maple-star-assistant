@@ -1301,6 +1301,7 @@ class ExperienceTests(unittest.TestCase):
             case_dir = pending_root / "exp-unit"
             case_dir.mkdir(parents=True)
             cv2.imwrite(str(case_dir / "roi.png"), image)
+            cv2.imwrite(str(case_dir / "attempt.png"), np.full((12, 80, 3), 128, dtype=np.uint8))
             (case_dir / "metadata.json").write_text(
                 json.dumps(
                     {
@@ -1366,6 +1367,123 @@ class ExperienceTests(unittest.TestCase):
         self.assertIsNotNone(promoted_image)
         self.assertEqual(int(promoted_image[0, 0, 0]), 128)
         self.assertFalse(old_fixture.exists())
+
+    def test_learning_service_rejects_unbound_default_ocr_text(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        image = np.full((12, 80, 3), 255, dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pending_root = root / "pending"
+            case_dir = pending_root / "exp-unit"
+            case_dir.mkdir(parents=True)
+            cv2.imwrite(str(case_dir / "frame0_roi0_primary.png"), image)
+            cv2.imwrite(str(case_dir / "frame1_roi0_primary.png"), np.full((12, 80, 3), 128, dtype=np.uint8))
+            (case_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "reading_key": "8911037[44.48%]",
+                        "final_reading": {
+                            "text": "8911037[44.48%]",
+                            "reason": "EXP burst 結果不一致",
+                        },
+                        "frames": [
+                            [
+                                {
+                                    "file": "frame0_roi0_primary.png",
+                                    "attempts": [
+                                        {
+                                            "file": "frame0_roi0_primary.png",
+                                            "candidates": [{"text": "8908583[44.47%]"}],
+                                        }
+                                    ],
+                                }
+                            ],
+                            [
+                                {
+                                    "file": "frame1_roi0_primary.png",
+                                    "attempts": [
+                                        {
+                                            "file": "frame1_roi0_primary.png",
+                                            "candidates": [{"text": "8911837[44.40%]"}],
+                                        }
+                                    ],
+                                }
+                            ],
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fixture_dir = root / "fixtures"
+            fixture_dir.mkdir()
+            manifest_path = fixture_dir / "manifest.json"
+            manifest_path.write_text('{"samples": []}\n', encoding="utf-8")
+
+            with (
+                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
+                patch.object(learning_service, "MANIFEST_PATH", manifest_path),
+                patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root),
+            ):
+                with self.assertRaisesRegex(ValueError, "not tied to a saved OCR candidate"):
+                    learning_service.promote_experience_ocr_learning_case("exp-unit", "8911037[44.48%]")
+                cases = learning_service.list_experience_ocr_learning_cases()
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["samples"], [])
+        self.assertEqual(cases[0]["default_correct_text"], "")
+        self.assertIn("未綁定", cases[0]["source_warning"])
+        self.assertTrue(str(cases[0]["preview_file"]).endswith("frame0_roi0_primary.png"))
+
+    def test_learning_service_allows_manual_text_from_visible_preview(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        image = np.full((12, 80, 3), 255, dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pending_root = root / "pending"
+            case_dir = pending_root / "exp-unit"
+            case_dir.mkdir(parents=True)
+            cv2.imwrite(str(case_dir / "roi.png"), image)
+            cv2.imwrite(str(case_dir / "attempt.png"), np.full((12, 80, 3), 128, dtype=np.uint8))
+            (case_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "reading_key": "8911037[44.48%]",
+                        "frames": [
+                            [
+                                {
+                                    "file": "roi.png",
+                                    "attempts": [
+                                        {
+                                            "file": "attempt.png",
+                                            "candidates": [{"text": "8908583[44.47%]"}],
+                                        }
+                                    ],
+                                }
+                            ]
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fixture_dir = root / "fixtures"
+            fixture_dir.mkdir()
+            manifest_path = fixture_dir / "manifest.json"
+            manifest_path.write_text('{"samples": []}\n', encoding="utf-8")
+
+            with (
+                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
+                patch.object(learning_service, "MANIFEST_PATH", manifest_path),
+                patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root),
+            ):
+                result = learning_service.promote_experience_ocr_learning_case("exp-unit", "8908583[44.47%]")
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["sample_id"], "exp-unit_ocr_8908583_4447")
+        self.assertEqual(manifest["samples"][0]["text"], "8908583[44.47%]")
 
     def test_learning_service_dedupes_and_deletes_pending_cases(self):
         from maple_star.services import experience_ocr_learning as learning_service
