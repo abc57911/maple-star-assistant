@@ -5,6 +5,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..constants import POTION_MIN_COOLDOWN_SECONDS
+
 def app_base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -58,7 +60,6 @@ def normalize_profile_name(value: object, fallback: str = DEFAULT_PROFILE_NAME) 
     normalized = value.strip()
     return normalized or fallback
 
-
 @dataclass
 class AutoPotionSettings:
     hp_enabled: bool = True
@@ -70,6 +71,8 @@ class AutoPotionSettings:
     mp_key: str = "End"
     hp_cooldown_seconds: float = 0.2
     mp_cooldown_seconds: float = 0.2
+    hp_continuous_enabled: bool = False
+    mp_continuous_enabled: bool = False
     rb_jump_key: str = "X"
     rb_skill_key: str = "C"
     rb_controller_button: str = "RB"
@@ -109,6 +112,8 @@ class AutoPotionSettings:
             self.mp_key,
             self.hp_cooldown_seconds,
             self.mp_cooldown_seconds,
+            self.hp_continuous_enabled,
+            self.mp_continuous_enabled,
             self.rb_jump_key,
             self.rb_skill_key,
             self.rb_controller_button,
@@ -156,6 +161,8 @@ class AutoPotionSettings:
             "mp_key": self.mp_key,
             "hp_cooldown_seconds": self.hp_cooldown_seconds,
             "mp_cooldown_seconds": self.mp_cooldown_seconds,
+            "hp_continuous_enabled": self.hp_continuous_enabled,
+            "mp_continuous_enabled": self.mp_continuous_enabled,
             "rb_jump_key": self.rb_jump_key,
             "rb_skill_key": self.rb_skill_key,
             "rb_controller_button": self.rb_controller_button,
@@ -242,6 +249,8 @@ PROFILE_SETTING_KEYS = (
     "mp_key",
     "hp_cooldown_seconds",
     "mp_cooldown_seconds",
+    "hp_continuous_enabled",
+    "mp_continuous_enabled",
     "rb_jump_key",
     "rb_skill_key",
     "rb_controller_button",
@@ -334,8 +343,30 @@ def _read_profile_payload(raw: object, fallback: AutoPotionSettings) -> dict[str
         "mp_threshold_percent": _read_float(data, "mp_threshold_percent", fallback.mp_threshold_percent, 1.0, 100.0),
         "hp_key": _read_string(data, "hp_key", fallback.hp_key),
         "mp_key": _read_string(data, "mp_key", fallback.mp_key),
-        "hp_cooldown_seconds": _read_float(data, "hp_cooldown_seconds", fallback.hp_cooldown_seconds, 0.05, 60.0),
-        "mp_cooldown_seconds": _read_float(data, "mp_cooldown_seconds", fallback.mp_cooldown_seconds, 0.05, 60.0),
+        "hp_cooldown_seconds": _read_float(
+            data,
+            "hp_cooldown_seconds",
+            fallback.hp_cooldown_seconds,
+            POTION_MIN_COOLDOWN_SECONDS,
+            60.0,
+        ),
+        "mp_cooldown_seconds": _read_float(
+            data,
+            "mp_cooldown_seconds",
+            fallback.mp_cooldown_seconds,
+            POTION_MIN_COOLDOWN_SECONDS,
+            60.0,
+        ),
+        "hp_continuous_enabled": _read_bool(
+            data,
+            "hp_continuous_enabled",
+            fallback.hp_continuous_enabled,
+        ),
+        "mp_continuous_enabled": _read_bool(
+            data,
+            "mp_continuous_enabled",
+            fallback.mp_continuous_enabled,
+        ),
         "rb_jump_key": _read_string(data, "rb_jump_key", fallback.rb_jump_key),
         "rb_skill_key": _read_string(data, "rb_skill_key", fallback.rb_skill_key),
         "rb_controller_button": normalize_controller_button_name(data.get("rb_controller_button"), fallback.rb_controller_button),
@@ -420,8 +451,22 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
         mp_threshold_percent=_read_float(raw, "mp_threshold_percent", settings.mp_threshold_percent, 1.0, 100.0),
         hp_key=_read_string(raw, "hp_key", settings.hp_key),
         mp_key=_read_string(raw, "mp_key", settings.mp_key),
-        hp_cooldown_seconds=_read_float(raw, "hp_cooldown_seconds", settings.hp_cooldown_seconds, 0.05, 60.0),
-        mp_cooldown_seconds=_read_float(raw, "mp_cooldown_seconds", settings.mp_cooldown_seconds, 0.05, 60.0),
+        hp_cooldown_seconds=_read_float(
+            raw,
+            "hp_cooldown_seconds",
+            settings.hp_cooldown_seconds,
+            POTION_MIN_COOLDOWN_SECONDS,
+            60.0,
+        ),
+        mp_cooldown_seconds=_read_float(
+            raw,
+            "mp_cooldown_seconds",
+            settings.mp_cooldown_seconds,
+            POTION_MIN_COOLDOWN_SECONDS,
+            60.0,
+        ),
+        hp_continuous_enabled=_read_bool(raw, "hp_continuous_enabled", settings.hp_continuous_enabled),
+        mp_continuous_enabled=_read_bool(raw, "mp_continuous_enabled", settings.mp_continuous_enabled),
         rb_jump_key=_read_string(raw, "rb_jump_key", settings.rb_jump_key),
         rb_skill_key=_read_string(raw, "rb_skill_key", settings.rb_skill_key),
         rb_controller_button=normalize_controller_button_name(raw.get("rb_controller_button"), settings.rb_controller_button),

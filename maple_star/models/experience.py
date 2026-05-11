@@ -96,6 +96,7 @@ EXP_PIXEL_FONT_NO_BAR_LOW_PERCENT_MIN_CONFIDENCE = 0.84
 EXP_PIXEL_FONT_ZERO_THREE_TOPOLOGY_MARGIN = 0.10
 EXP_PIXEL_FONT_ZERO_THREE_TOPOLOGY_BONUS = 0.12
 EXP_PIXEL_LEARNING_MAX_ATTEMPTS_SAVED = 8
+EXP_PIXEL_LEARNING_MIN_TEXT_SEGMENTS = 4
 EXP_TOTAL_ESTIMATE_MAX_DEVIATION_RATIO = 0.35
 EXP_SINGLE_GAIN_MAX_LEVEL_RATIO = 0.35
 EXP_GAIN_EXPECTED_TOLERANCE_RATIO = 3.0
@@ -2822,6 +2823,14 @@ def save_experience_ocr_learning_case(
         ]
         if not _experience_ocr_learning_has_visual_content(materialized_frames):
             return ""
+        if not _experience_ocr_learning_is_actionable_exp_case(
+            materialized_frames,
+            bar_percent=bar_percent,
+            pixel_reading=pixel_reading,
+            paddle_reading=paddle_reading,
+            final_reading=final_reading,
+        ):
+            return ""
         image_hashes = _experience_ocr_learning_image_hashes(materialized_frames)
         reading_key = _experience_ocr_learning_reading_key(final_reading, paddle_reading, pixel_reading)
         pixel_reason = "" if pixel_reading is None else pixel_reading.reason
@@ -2962,6 +2971,47 @@ def _experience_ocr_learning_has_visual_content(image_frames: list[list[Experien
             channels = image[:, :, :3] if image.ndim == 3 else image
             if channels.size and (float(channels.max()) > 8.0 or float(channels.std()) > 1.0):
                 return True
+    return False
+
+
+def _experience_ocr_learning_is_actionable_exp_case(
+    image_frames: list[list[ExperienceOcrImage]],
+    *,
+    bar_percent: float | None,
+    pixel_reading: ExperienceTextReading | None,
+    paddle_reading: ExperienceTextReading | None,
+    final_reading: ExperienceTextReading | None,
+) -> bool:
+    if bar_percent is not None:
+        return True
+    for reading in (final_reading, paddle_reading, pixel_reading):
+        if reading is None:
+            continue
+        if reading.current_exp is not None and reading.percent is not None:
+            return True
+        if _best_experience_text_candidate(reading.text) is not None:
+            return True
+    for images in image_frames:
+        for ocr_image in images:
+            if _experience_ocr_learning_image_looks_like_exp_roi(ocr_image):
+                return True
+    return False
+
+
+def _experience_ocr_learning_image_looks_like_exp_roi(ocr_image: ExperienceOcrImage) -> bool:
+    image = ocr_image.image
+    if image.size == 0:
+        return False
+    if estimate_experience_bar_percent(image, bar_crop_left_ratio=ocr_image.bar_crop_left_ratio) is not None:
+        return True
+    for attempt in _experience_pixel_font_attempts(ocr_image)[:EXP_PIXEL_LEARNING_MAX_ATTEMPTS_SAVED]:
+        mask = _experience_pixel_font_mask(attempt.image)
+        segments = _experience_pixel_font_segments(mask)
+        if len(segments) < EXP_PIXEL_LEARNING_MIN_TEXT_SEGMENTS:
+            continue
+        candidates = _decode_experience_pixel_font_text_candidates(attempt.image, bar_percent=None)
+        if any(_best_experience_text_candidate(text) is not None for text, _confidence in candidates[:6]):
+            return True
     return False
 
 

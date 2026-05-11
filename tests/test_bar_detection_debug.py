@@ -32,6 +32,28 @@ class BarDetectionDebugTests(unittest.TestCase):
         self.assertEqual(reason, "找不到符合顏色的填滿欄位")
         self.assertIsNone(tail_clear)
 
+    def test_percent_result_treats_full_width_bar_with_large_internal_gap_as_full(self):
+        controller = self.make_controller()
+        mask = np.ones((8, 100), dtype=bool)
+        mask[:, 42:64] = False
+
+        percent, reason, tail_clear = controller._percent_from_bar_mask_result(mask)
+
+        self.assertEqual(percent, 100.0)
+        self.assertEqual(reason, "OK:FullWidth")
+        self.assertIsNone(tail_clear)
+
+    def test_percent_result_does_not_treat_partial_bar_as_full_without_right_edge_fill(self):
+        controller = self.make_controller()
+        mask = np.zeros((8, 100), dtype=bool)
+        mask[:, :82] = True
+
+        percent, reason, tail_clear = controller._percent_from_bar_mask_result(mask)
+
+        self.assertEqual(percent, 82.0)
+        self.assertEqual(reason, "OK")
+        self.assertIsNone(tail_clear)
+
     def test_bar_detection_debug_text_includes_source_region_and_percent(self):
         controller = self.make_controller()
         controller._set_bar_detection_debug(
@@ -107,6 +129,25 @@ class BarDetectionDebugTests(unittest.TestCase):
         self.assertEqual(mp_track[3], 16)
         self.assertLess(regions["hp"][1], hp_track[1])
         self.assertGreater(regions["hp"][3], hp_track[3])
+
+    def test_bottom_bar_pair_ignores_upper_map_objects_in_search_area(self):
+        controller = self.make_controller()
+
+        regions = controller._bottom_bar_pair_regions_from_candidates(
+            hp_candidates=[(600, 12, 320), (490, 118, 250)],
+            mp_candidates=[(970, 14, 320), (795, 119, 44)],
+            search_left=0,
+            search_top=900,
+            search_width=1920,
+            search_height=173,
+            client_width=1920,
+            client_height=1080,
+        )
+
+        self.assertEqual(set(regions), {"hp", "mp"})
+        self.assertLess(regions["hp"][0], 600)
+        self.assertGreater(regions["hp"][1], 1000)
+        self.assertGreater(regions["mp"][1], 1000)
 
     def test_bottom_bar_search_areas_include_centered_gameplay_content_for_wide_window(self):
         controller = self.make_controller()

@@ -1291,6 +1291,45 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(case_id, "")
         self.assertFalse(pending_dir.exists())
 
+    def test_experience_ocr_learning_case_skips_non_exp_roi(self):
+        image = np.zeros((24, 140, 3), dtype=np.uint8)
+        image[:, :, :3] = (120, 70, 30)
+        image[7:17, 24:116, :3] = (150, 95, 45)
+        image[9:12, 40:104, :3] = (175, 120, 70)
+        final_reading = ExperienceTextReading(text="--", confidence=0.0, reason="EXP 百分比解析失敗")
+
+        case_id = save_experience_ocr_learning_case(
+            [[ExperienceOcrImage(image=image, source_id="primary")]],
+            trigger="ocr_failure",
+            pixel_reading=None,
+            paddle_reading=None,
+            final_reading=final_reading,
+        )
+        pending_dir = experience_ocr_learning_pending_dir()
+
+        self.assertEqual(case_id, "")
+        self.assertFalse(pending_dir.exists())
+
+    def test_experience_ocr_learning_case_keeps_exp_bar_roi_without_ocr_text(self):
+        image = np.zeros((24, 140, 3), dtype=np.uint8)
+        image[:, :, :3] = (28, 28, 28)
+        image[:, :82, :3] = (40, 215, 95)
+        image[8:15, 58:63, :3] = 245
+        image[8:15, 70:75, :3] = 245
+        final_reading = ExperienceTextReading(text="--", confidence=0.0, reason="OCR 失敗")
+
+        case_id = save_experience_ocr_learning_case(
+            [[ExperienceOcrImage(image=image, source_id="primary")]],
+            trigger="ocr_failure",
+            pixel_reading=None,
+            paddle_reading=None,
+            final_reading=final_reading,
+        )
+        pending_dir = experience_ocr_learning_pending_dir()
+
+        self.assertTrue(case_id.startswith("exp-"))
+        self.assertTrue((pending_dir / case_id / "metadata.json").exists())
+
     def test_learning_service_promotes_pending_case_to_fixture_manifest(self):
         from maple_star.services import experience_ocr_learning as learning_service
 

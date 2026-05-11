@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 import customtkinter as ctk
 
-from ..constants import MAX_CONSOLE_CHARS, MAX_CONSOLE_LINES
+from ..constants import MAX_CONSOLE_CHARS, MAX_CONSOLE_LINES, POTION_MIN_COOLDOWN_SECONDS
 from ..adapters.debug_logging import install_tk_exception_logging, write_debug_text
 from ..models.experience import (
     ExperienceSnapshot,
@@ -228,7 +228,6 @@ class AutoPotionSettingsGui:
         self.experience_learning_correct_text = tk.StringVar(value="")
         self.experience_learning_status = tk.StringVar(value="")
         self.experience_learning_image_label: ctk.CTkLabel | None = None
-
         self.active_profile = tk.StringVar(value=settings.active_profile)
         self.hp_enabled = tk.BooleanVar(value=settings.hp_enabled)
         self.mp_enabled = tk.BooleanVar(value=settings.mp_enabled)
@@ -241,6 +240,8 @@ class AutoPotionSettingsGui:
         self.mp_key = tk.StringVar(value=settings.mp_key)
         self.hp_cooldown = tk.StringVar(value=f"{settings.hp_cooldown_seconds:g}")
         self.mp_cooldown = tk.StringVar(value=f"{settings.mp_cooldown_seconds:g}")
+        self.hp_continuous_enabled = tk.BooleanVar(value=settings.hp_continuous_enabled)
+        self.mp_continuous_enabled = tk.BooleanVar(value=settings.mp_continuous_enabled)
         self.rb_jump_key = tk.StringVar(value=settings.rb_jump_key)
         self.rb_skill_key = tk.StringVar(value=settings.rb_skill_key)
         self.rb_controller_button = tk.StringVar(value=settings.rb_controller_button)
@@ -349,7 +350,6 @@ class AutoPotionSettingsGui:
             "<Button-1>",
             lambda event: self._start_key_detection_from_entry(event, self.pickup_key, "拾取鍵"),
         )
-
         profile_section, _header, profile_frame = self._build_section(controls_frame, "設定檔", row=1)
         for column in range(7):
             profile_frame.columnconfigure(column, weight=0)
@@ -371,8 +371,30 @@ class AutoPotionSettingsGui:
 
         potion_section, _header, controls = self._build_section(controls_frame, "藥水監控", row=2)
         controls.columnconfigure(1, weight=1)
-        self._build_row(controls, 0, "紅水", self.hp_enabled, self.hp_threshold, self.hp_threshold_text, self.hp_key, self.hp_cooldown, self.hp_current)
-        self._build_row(controls, 1, "藍水", self.mp_enabled, self.mp_threshold, self.mp_threshold_text, self.mp_key, self.mp_cooldown, self.mp_current)
+        self._build_row(
+            controls,
+            0,
+            "紅水",
+            self.hp_enabled,
+            self.hp_threshold,
+            self.hp_threshold_text,
+            self.hp_key,
+            self.hp_cooldown,
+            self.hp_continuous_enabled,
+            self.hp_current,
+        )
+        self._build_row(
+            controls,
+            1,
+            "藍水",
+            self.mp_enabled,
+            self.mp_threshold,
+            self.mp_threshold_text,
+            self.mp_key,
+            self.mp_cooldown,
+            self.mp_continuous_enabled,
+            self.mp_current,
+        )
 
         monitor_frame = ctk.CTkFrame(controls_frame, fg_color="transparent")
         self.monitor_frame = monitor_frame
@@ -1417,6 +1439,7 @@ class AutoPotionSettingsGui:
         threshold_text: tk.StringVar,
         key_var: tk.StringVar,
         cooldown_var: tk.StringVar,
+        continuous_var: tk.BooleanVar,
         current_var: tk.StringVar,
     ) -> None:
         self._checkbox(parent, label, enabled_var, width=70).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
@@ -1442,7 +1465,8 @@ class AutoPotionSettingsGui:
         key_entry.bind("<Button-1>", lambda event, var=key_var, name=label: self._start_key_detection_from_entry(event, var, name))
         self._entry(parent, cooldown_var, width=SECONDS_ENTRY_WIDTH).grid(row=row, column=5, sticky="w", padx=(0, 4), pady=4)
         self._label(parent, "秒").grid(row=row, column=6, sticky="w", pady=4)
-        self._label(parent, textvariable=current_var, width=82, anchor="e", font=MONO_FONT).grid(row=row, column=7, sticky="e", padx=(12, 0), pady=4)
+        self._checkbox(parent, "連續", continuous_var, width=64).grid(row=row, column=7, sticky="w", padx=(10, 0), pady=4)
+        self._label(parent, textvariable=current_var, width=82, anchor="e", font=MONO_FONT).grid(row=row, column=8, sticky="e", padx=(12, 0), pady=4)
 
         entry.bind("<Return>", lambda _event, var=threshold_var, text=threshold_text: self._apply_percent_text(var, text))
         entry.bind("<FocusOut>", lambda _event, var=threshold_var, text=threshold_text: self._apply_percent_text(var, text))
@@ -1829,6 +1853,8 @@ class AutoPotionSettingsGui:
         self.mp_key.set(self.settings.mp_key)
         self.hp_cooldown.set(f"{self.settings.hp_cooldown_seconds:g}")
         self.mp_cooldown.set(f"{self.settings.mp_cooldown_seconds:g}")
+        self.hp_continuous_enabled.set(self.settings.hp_continuous_enabled)
+        self.mp_continuous_enabled.set(self.settings.mp_continuous_enabled)
         self.rb_jump_key.set(self.settings.rb_jump_key)
         self.rb_skill_key.set(self.settings.rb_skill_key)
         self.rb_controller_button.set(self.settings.rb_controller_button)
@@ -2114,6 +2140,8 @@ class AutoPotionSettingsGui:
         self.settings.mp_key = self.mp_key.get().strip()
         self.settings.hp_cooldown_seconds = self._read_cooldown(self.hp_cooldown, self.settings.hp_cooldown_seconds)
         self.settings.mp_cooldown_seconds = self._read_cooldown(self.mp_cooldown, self.settings.mp_cooldown_seconds)
+        self.settings.hp_continuous_enabled = self.hp_continuous_enabled.get()
+        self.settings.mp_continuous_enabled = self.mp_continuous_enabled.get()
         self.settings.rb_jump_key = self.rb_jump_key.get().strip()
         self.settings.rb_skill_key = self.rb_skill_key.get().strip()
         self.settings.rb_controller_button = normalize_controller_button_name(
@@ -2169,7 +2197,7 @@ class AutoPotionSettingsGui:
         self.settings.exp_efficiency_enabled = enabled
 
     def _read_cooldown(self, var: tk.StringVar, fallback: float) -> float:
-        return self._read_seconds(var, fallback, 0.05, 60.0)
+        return self._read_seconds(var, fallback, POTION_MIN_COOLDOWN_SECONDS, 60.0)
 
     def _read_seconds(self, var: tk.StringVar, fallback: float, minimum: float, maximum: float) -> float:
         try:
