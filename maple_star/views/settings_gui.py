@@ -36,8 +36,10 @@ from ..models.settings import (
 )
 from ..services.settings_store import load_settings, save_settings
 from ..services.experience_ocr_learning import (
+    auto_promote_experience_ocr_learning_cases,
     delete_experience_ocr_learning_case,
     delete_experience_ocr_learning_cases_by_reading_key,
+    delete_recommended_experience_ocr_learning_cases,
     list_experience_ocr_learning_cases,
     promote_experience_ocr_learning_case,
     regen_experience_pixel_templates,
@@ -409,7 +411,9 @@ class AutoPotionSettingsGui:
         exp_section.configure(width=EXP_PANEL_WIDTH, height=MONITOR_PANEL_HEIGHT)
         exp_section.grid_propagate(False)
         self._checkbox(exp_title, "", self.exp_efficiency_enabled, width=20).grid(row=0, column=0, sticky="w", padx=(8, 0), pady=4)
-        self._title_label(exp_title, "經驗計算").grid(row=0, column=1, sticky="w", padx=(2, 0), pady=4)
+        exp_title_label = self._title_label(exp_title, "經驗計算")
+        exp_title_label.grid(row=0, column=1, sticky="w", padx=(2, 0), pady=4)
+        self._bind_checkbox_label(exp_title_label, self.exp_efficiency_enabled)
         exp_actions = ctk.CTkFrame(exp_title, fg_color="transparent")
         exp_actions.grid(row=0, column=99, sticky="e", padx=(8, 8), pady=4)
         self._button(exp_actions, "重置", self.reset_experience_statistics, width=64).grid(row=0, column=0, sticky="w", padx=(0, 6))
@@ -490,7 +494,9 @@ class AutoPotionSettingsGui:
             combo_frame.columnconfigure(8, weight=1)
 
         self._checkbox(combo_a_title, "", self.rb_enabled, width=20).grid(row=0, column=0, sticky="w", padx=(8, 0), pady=4)
-        self._title_label(combo_a_title, "組合A").grid(row=0, column=1, sticky="w", padx=(2, 10), pady=4)
+        combo_a_label = self._title_label(combo_a_title, "組合A")
+        combo_a_label.grid(row=0, column=1, sticky="w", padx=(2, 10), pady=4)
+        self._bind_checkbox_label(combo_a_label, self.rb_enabled)
         self._build_controller_button_select(combo_a_title, 0, 2, "觸發", self.rb_controller_button, pady=4)
         self._info_icon(combo_a_title, self._combo_a_description).grid(row=0, column=99, sticky="e", padx=(8, 8), pady=4)
         self._build_key_entry(combo_a_frame, 0, 0, "跳躍鍵", self.rb_jump_key, pady=(0, 6))
@@ -501,7 +507,9 @@ class AutoPotionSettingsGui:
         self._build_seconds_stepper(combo_a_frame, 2, 1, self.rb_jump_interval, 0.05, 10.0, pady=(0, 4))
 
         self._checkbox(combo_b_title, "", self.lb_enabled, width=20).grid(row=0, column=0, sticky="w", padx=(8, 0), pady=4)
-        self._title_label(combo_b_title, "組合B").grid(row=0, column=1, sticky="w", padx=(2, 10), pady=4)
+        combo_b_label = self._title_label(combo_b_title, "組合B")
+        combo_b_label.grid(row=0, column=1, sticky="w", padx=(2, 10), pady=4)
+        self._bind_checkbox_label(combo_b_label, self.lb_enabled)
         self._build_controller_button_select(combo_b_title, 0, 2, "觸發", self.lb_controller_button, pady=4)
         self._info_icon(combo_b_title, self._combo_b_description).grid(row=0, column=99, sticky="e", padx=(8, 8), pady=4)
         self._build_key_entry(combo_b_frame, 0, 0, "跳躍鍵", self.lb_jump_key, pady=(0, 6))
@@ -1279,6 +1287,21 @@ class AutoPotionSettingsGui:
             font=UI_FONT,
         )
 
+    def _bind_checkbox_label(
+        self,
+        label: ctk.CTkLabel,
+        variable: tk.BooleanVar,
+        command: Callable[[], None] | None = None,
+    ) -> ctk.CTkLabel:
+        label.configure(cursor="hand2")
+        label.bind("<Button-1>", lambda _event: self._toggle_checkbox_label(variable, command))
+        return label
+
+    def _toggle_checkbox_label(self, variable: tk.BooleanVar, command: Callable[[], None] | None = None) -> str:
+        variable.set(not bool(variable.get()))
+        (command or self.apply_to_settings)()
+        return "break"
+
     def _info_icon(self, parent: ctk.CTkFrame, text_provider: Callable[[], str]) -> ctk.CTkButton:
         button = ctk.CTkButton(
             parent,
@@ -1680,17 +1703,19 @@ class AutoPotionSettingsGui:
         button_frame = ctk.CTkFrame(body, fg_color="transparent")
         button_frame.grid(row=5, column=0, sticky="ew")
         self._button(button_frame, "套用並重建", self._promote_current_experience_learning_case, width=104, primary=True).grid(row=0, column=0, sticky="w", padx=(0, 6))
-        self._button(button_frame, "刪除", self._delete_current_experience_learning_case, width=64).grid(row=0, column=1, sticky="w", padx=(0, 6))
-        self._button(button_frame, "上一筆", self._previous_experience_learning_case, width=64).grid(row=0, column=2, sticky="w", padx=(0, 6))
-        self._button(button_frame, "下一筆", self._next_experience_learning_case, width=64).grid(row=0, column=3, sticky="w", padx=(0, 6))
-        self._button(button_frame, "刷新", self._reload_experience_learning_cases, width=64).grid(row=0, column=4, sticky="w")
+        self._button(button_frame, "自動套用可信", self._auto_promote_experience_learning_cases, width=112).grid(row=0, column=1, sticky="w", padx=(0, 6))
+        self._button(button_frame, "刪除", self._delete_current_experience_learning_case, width=64).grid(row=0, column=2, sticky="w", padx=(0, 6))
+        self._button(button_frame, "上一筆", self._previous_experience_learning_case, width=64).grid(row=0, column=3, sticky="w", padx=(0, 6))
+        self._button(button_frame, "下一筆", self._next_experience_learning_case, width=64).grid(row=0, column=4, sticky="w", padx=(0, 6))
+        self._button(button_frame, "刷新", self._reload_experience_learning_cases, width=64).grid(row=0, column=5, sticky="w")
+        self._button(button_frame, "刪除建議", self._delete_recommended_experience_learning_cases, width=88).grid(row=1, column=0, sticky="w", padx=(0, 6), pady=(6, 0))
 
         self._label(body, textvariable=self.experience_learning_status, color=MUTED_TEXT, font=SMALL_FONT).grid(row=6, column=0, sticky="w", pady=(8, 0))
 
         self._reload_experience_learning_cases()
         self._prepare_auxiliary_window_for_show(window)
         try:
-            window.geometry(f"560x360+{self.root.winfo_rootx() + 60}+{self.root.winfo_rooty() + 60}")
+            window.geometry(f"580x410+{self.root.winfo_rootx() + 60}+{self.root.winfo_rooty() + 60}")
             window.deiconify()
         except tk.TclError:
             pass
@@ -1723,19 +1748,45 @@ class AutoPotionSettingsGui:
 
         case = self.experience_learning_cases[self.experience_learning_index]
         index_label = f"{self.experience_learning_index + 1}/{len(self.experience_learning_cases)}"
-        self.experience_learning_id.set(f"{case.get('id', '--')}    {index_label}")
+        group_label = (
+            f"group {case.get('group_id', '--')}:"
+            f"{case.get('group_index', 1)}/{case.get('group_size', 1)}"
+        )
+        self.experience_learning_id.set(f"{case.get('id', '--')}    {index_label}    {group_label}")
+        top_candidates = self._experience_learning_candidate_summary(case)
+        confidence_gap = case.get("confidence_gap")
+        gap_text = "--" if confidence_gap is None else f"{float(confidence_gap):.3f}"
         self.experience_learning_detail.set(
             f"trigger={case.get('trigger', '--')}\n"
             f"Pixel: {case.get('pixel_text') or '--'} | {case.get('pixel_reason') or '--'}\n"
             f"Paddle: {case.get('paddle_text') or '--'} | {case.get('paddle_reason') or '--'}\n"
-            f"Final: {case.get('final_text') or '--'} | {case.get('final_reason') or '--'}"
+            f"Final: {case.get('final_text') or '--'} | {case.get('final_reason') or '--'}\n"
+            f"Candidates: {top_candidates} | gap={gap_text} | matches={case.get('candidate_match_count', 0)}\n"
+            f"Review: {case.get('review_label', '--')} | {case.get('review_reason', '--')}"
         )
         default_text = str(case.get("default_correct_text") or "")
         self.experience_learning_correct_text.set(default_text)
         source_warning = str(case.get("source_warning") or "")
-        self.experience_learning_status.set(source_warning or "確認正確值後可套用")
+        auto_reason = str(case.get("auto_promote_skip_reason") or "")
+        auto_status = "可自動套用" if case.get("auto_promote_promotable") else f"自動略過：{auto_reason}"
+        review_action = str(case.get("review_action") or "")
+        review_status = f"{case.get('review_label', '--')}：{case.get('review_reason', '--')}"
+        if review_action == "delete_recommended":
+            self.experience_learning_status.set(review_status)
+        else:
+            self.experience_learning_status.set(source_warning or auto_status or review_status or "確認正確值後可套用")
         preview_file = case.get("preview_file")
         self._set_experience_learning_preview(Path(preview_file) if preview_file else None)
+
+    def _experience_learning_candidate_summary(self, case: dict[str, Any]) -> str:
+        items = []
+        for candidate in (case.get("top_candidates") or [])[:3]:
+            text = str(candidate.get("text") or "--")
+            confidence = candidate.get("confidence")
+            confidence_text = "--" if confidence is None else f"{float(confidence):.3f}"
+            count = int(candidate.get("count") or 0)
+            items.append(f"{text}({confidence_text},x{count})")
+        return ", ".join(items) if items else "--"
 
     def _set_experience_learning_preview(self, path: Path | None) -> None:
         if self.experience_learning_image_label is None:
@@ -1777,10 +1828,39 @@ class AutoPotionSettingsGui:
                 "未套用，Pixel 仍未通過，保留 case："
                 f"{validation.get('text') or '--'} | {validation.get('reason') or '--'}"
             )
+        if validation.get("success"):
+            print(
+                "EXP OCR learning applied: "
+                f"{case_id} -> {result['sample_id']} | templates={regen['template_count']} | "
+                "pixel_valid=True"
+            )
+        else:
+            print(
+                "EXP OCR learning rolled back: "
+                f"{case_id} -> {result['sample_id']} | templates={regen['template_count']} | "
+                "pixel_valid=False | "
+                f"read_text={validation.get('text') or '--'} | "
+                f"reason={validation.get('reason') or '--'}"
+            )
+        self.experience_learning_status.set(status)
+        self._reload_experience_learning_cases()
+
+    def _auto_promote_experience_learning_cases(self) -> None:
+        try:
+            result = auto_promote_experience_ocr_learning_cases()
+        except Exception as exc:
+            self.experience_learning_status.set(f"自動套用失敗：{exc}")
+            return
+        promoted = len(result.get("promoted", []))
+        skipped = len(result.get("skipped", []))
+        rolled_back = len(result.get("rolled_back", []))
+        template_count = result.get("template_count")
+        status = f"自動套用可信：成功 {promoted}，跳過 {skipped}，回滾 {rolled_back}"
+        if template_count is not None:
+            status = f"{status}，模板 {template_count}"
         print(
-            "EXP OCR learning applied: "
-            f"{case_id} -> {result['sample_id']} | templates={regen['template_count']} | "
-            f"pixel_valid={bool(validation.get('success'))}"
+            "EXP OCR learning auto-promote: "
+            f"promoted={promoted} skipped={skipped} rolled_back={rolled_back} templates={template_count or '--'}"
         )
         self.experience_learning_status.set(status)
         self._reload_experience_learning_cases()
@@ -1793,6 +1873,17 @@ class AutoPotionSettingsGui:
         case_id = str(case.get("id", ""))
         delete_experience_ocr_learning_case(case_id)
         print(f"EXP OCR learning case deleted: {case_id}")
+        self._reload_experience_learning_cases()
+
+    def _delete_recommended_experience_learning_cases(self) -> None:
+        try:
+            deleted = delete_recommended_experience_ocr_learning_cases()
+        except Exception as exc:
+            self.experience_learning_status.set(f"刪除建議樣本失敗：{exc}")
+            return
+        for item in deleted:
+            print(f"EXP OCR learning recommended case deleted: {item['id']} | {item.get('reason') or '--'}")
+        self.experience_learning_status.set(f"已刪除建議樣本 {len(deleted)} 筆")
         self._reload_experience_learning_cases()
 
     def _previous_experience_learning_case(self) -> None:

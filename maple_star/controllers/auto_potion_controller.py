@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import hashlib
 import sys
 import time
@@ -85,7 +86,7 @@ from ..constants import (
     TOGGLE_HOTKEY_DEBOUNCE_SECONDS,
     WM_HOTKEY,
 )
-from ..adapters.debug_logging import log_debug, log_exception
+from ..adapters.debug_logging import log_debug, log_exception, log_experience_debug
 from ..services.control_hotkey_worker import (
     CONTROL_HOTKEY_EMERGENCY_STOP,
     CONTROL_HOTKEY_EXPERIENCE_RESET,
@@ -94,8 +95,10 @@ from ..services.control_hotkey_worker import (
     CONTROL_HOTKEY_TOGGLE,
     ControlHotkeyWorker,
 )
+from ..services.potion_action_worker import PotionActionWorker
 from ..models.experience import (
     ExperienceEfficiencyTracker,
+    ExperienceOcrContinuityHint,
     ExperienceOcrImage,
     ExperienceSnapshot,
     ExperienceTextReading,
@@ -153,7 +156,7 @@ BAR_PAIR_HP_MAX_LEFT_RATIO = 0.48
 BAR_PAIR_MIN_GAP_RATIO = 0.10
 BAR_PAIR_MAX_GAP_RATIO = 0.24
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MEDIA_VOLUME_PERCENT = 15
+MEDIA_VOLUME_PERCENT = 20
 MCI_MAX_VOLUME = 1000
 MCI_MEDIA_VOLUME = round(MCI_MAX_VOLUME * MEDIA_VOLUME_PERCENT / 100)
 AUTO_DRINK_START_SOUND_PATH = PROJECT_ROOT / "media" / "auto-drink-start.mp3"
@@ -210,6 +213,8 @@ class AutoPotionController:
         self.pickup_toggle_hotkey_registered = False
         self.control_hotkey_worker = ControlHotkeyWorker()
         self.control_hotkey_worker.start()
+        self.potion_action_worker = PotionActionWorker()
+        self.potion_action_worker.start()
         self.toggle_hotkey_was_down = False
         self.emergency_stop_hotkey_was_down = False
         self.experience_toggle_hotkey_was_down = False
@@ -678,9 +683,19 @@ class AutoPotionController:
         if not held_vk:
             return
         self._set_potion_held_vk(bar_type, 0)
+        worker = getattr(self, "potion_action_worker", None)
+        if worker is not None:
+            worker.release(bar_type, held_vk)
+            return
         key_up(held_vk)
 
     def _release_all_potion_keys(self) -> None:
+        worker = getattr(self, "potion_action_worker", None)
+        if worker is not None and (self.hp_potion_held_vk or self.mp_potion_held_vk):
+            worker.release_all()
+            self.hp_potion_held_vk = 0
+            self.mp_potion_held_vk = 0
+            return
         self._release_potion_key("hp")
         self._release_potion_key("mp")
 
@@ -696,9 +711,20 @@ class AutoPotionController:
         if self._potion_held_vk(bar_type) == vk_code:
             return True
         self._release_potion_key(bar_type)
-        key_down(vk_code)
+        worker = getattr(self, "potion_action_worker", None)
+        if worker is not None:
+            worker.hold(bar_type, vk_code)
+        else:
+            key_down(vk_code)
         self._set_potion_held_vk(bar_type, vk_code)
         return True
+
+    def _tap_potion_key(self, bar_type: str, key_name: str) -> None:
+        worker = getattr(self, "potion_action_worker", None)
+        if worker is not None:
+            worker.tap(bar_type, key_name)
+            return
+        tap_hotkey(key_name)
 
     def toggle_auto_drink_enabled(self) -> None:
         if self.auto_drink_enabled and self._has_out_of_potion_hold():
@@ -918,6 +944,10 @@ class AutoPotionController:
                 else:
                     self.gui.set_status("自動喝水監控中")
                     self.gui.refresh_bar_preview_once()
+            if self.auto_drink_enabled and hp_percent is not None and mp_percent is not None:
+                self._maybe_drink_hp(now, hp_percent)
+                self._maybe_drink_mp(now, mp_percent)
+                self._update_potion_effect_watch_cycles(now, hp_percent, mp_percent)
             if self.settings.exp_efficiency_enabled:
                 self._update_experience_efficiency(now)
             else:
@@ -926,10 +956,6 @@ class AutoPotionController:
                 snapshot = self.experience_tracker.snapshot(effective_now)
                 snapshot.status = "已停用，保留統計" if snapshot.sample_count else "已停用"
                 self.gui.set_experience_snapshot(snapshot)
-            if self.auto_drink_enabled and hp_percent is not None and mp_percent is not None:
-                if self._update_potion_effect_watch_cycles(now, hp_percent, mp_percent):
-                    self._maybe_drink_hp(now, hp_percent)
-                    self._maybe_drink_mp(now, mp_percent)
         except Exception as exc:
             if now - self.last_error_at >= 2.0:
                 print(f"自動喝水錯誤：{exc}")
@@ -1199,12 +1225,22 @@ class AutoPotionController:
             return
 
         submit_started_at = time.perf_counter()
+        continuity_hint = self._experience_ocr_continuity_hint(effective_now)
+        copied_frames = [[self._copy_experience_ocr_image(image) for image in images] for images in image_frames]
+        if continuity_hint is None:
+            future = self.experience_ocr_executor.submit(
+                self.experience_reader.read_burst_frames,
+                copied_frames,
+            )
+        else:
+            future = self.experience_ocr_executor.submit(
+                self.experience_reader.read_burst_frames,
+                copied_frames,
+                continuity_hint=continuity_hint,
+            )
         self.experience_ocr_job = ExperienceOcrJob(
             submitted_at=now,
-            future=self.experience_ocr_executor.submit(
-                self.experience_reader.read_burst_frames,
-                [[self._copy_experience_ocr_image(image) for image in images] for images in image_frames],
-            ),
+            future=future,
             image_signature=image_signature,
             image_frames=[[self._copy_experience_ocr_image(image) for image in images] for images in image_frames],
         )
@@ -1217,6 +1253,20 @@ class AutoPotionController:
         snapshot = self.experience_tracker.snapshot(effective_now)
         snapshot.status = "讀取經驗樣本中"
         self.gui.set_experience_snapshot(snapshot)
+
+    def _experience_ocr_continuity_hint(self, effective_now: float) -> ExperienceOcrContinuityHint | None:
+        samples = getattr(self.experience_tracker, "samples", [])
+        if not isinstance(samples, list) or not samples:
+            return None
+        latest = samples[-1]
+        if not hasattr(latest, "current_exp") or not hasattr(latest, "captured_at"):
+            return None
+        return ExperienceOcrContinuityHint(
+            current_exp=latest.current_exp,
+            percent=getattr(latest, "percent", None),
+            captured_at=latest.captured_at,
+            now=effective_now,
+        )
 
     def _copy_experience_ocr_image(self, image: np.ndarray | ExperienceOcrImage) -> np.ndarray | ExperienceOcrImage:
         if isinstance(image, ExperienceOcrImage):
@@ -1332,6 +1382,11 @@ class AutoPotionController:
             effective_now = self._experience_effective_time(now)
         job = self.experience_ocr_job
         if not job.future.done():
+            elapsed_seconds = max(0.0, now - job.submitted_at)
+            if elapsed_seconds >= EXPERIENCE_CAPTURE_INTERVAL_SECONDS:
+                snapshot = self.experience_tracker.snapshot(effective_now)
+                snapshot.status = f"OCR 延遲：{elapsed_seconds:.1f}s"
+                self.gui.set_experience_snapshot(snapshot)
             return True
 
         self.experience_ocr_job = None
@@ -1341,9 +1396,10 @@ class AutoPotionController:
         except Exception as exc:
             log_exception("OCR 背景工作失敗")
             reading = ExperienceTextReading(reason=f"OCR 背景工作失敗：{exc}")
+        job_elapsed_ms = max(0.0, now - job.submitted_at) * 1000.0
         log_debug(
             "EXP OCR timing job "
-            f"elapsed_ms={max(0.0, now - job.submitted_at) * 1000.0:.1f} "
+            f"elapsed_ms={job_elapsed_ms:.1f} "
             f"result={'success' if reading.success else 'failure'} "
             f"{self._experience_reading_log_fields(reading)} | reason={reading.reason}"
         )
@@ -1360,6 +1416,15 @@ class AutoPotionController:
                 snapshot = self.experience_tracker.snapshot(effective_now)
                 if snapshot.sample_count == 0:
                     snapshot.status = "等待明確 EXP 樣本"
+                self._log_experience_debug_reading(
+                    job,
+                    reading,
+                    snapshot,
+                    decision="guard_wait",
+                    completed_at=now,
+                    effective_now=effective_now,
+                    job_elapsed_ms=job_elapsed_ms,
+                )
                 self.gui.set_experience_snapshot(snapshot)
                 return True
             add_reading_kwargs = {"confidence": reading.confidence}
@@ -1376,12 +1441,31 @@ class AutoPotionController:
                     self._clear_failed_experience_ocr_signature()
                     snapshot = self.experience_tracker.snapshot(effective_now)
                     snapshot.status = "等待下一次 EXP 基準確認"
+                    self._log_experience_debug_reading(
+                        job,
+                        reading,
+                        snapshot,
+                        decision="baseline_wait",
+                        completed_at=now,
+                        effective_now=effective_now,
+                        job_elapsed_ms=job_elapsed_ms,
+                    )
                     self.gui.set_experience_snapshot(snapshot)
                     return True
                 self._remember_failed_experience_ocr_signature(job)
                 self._log_experience_sample_rejection(now, self.experience_tracker.last_status, reading)
+                self._save_rejected_experience_learning_case(job, reading, trigger="tracker_rejected")
                 snapshot = self.experience_tracker.snapshot(effective_now)
                 snapshot.status = "樣本已拒絕，詳見 Console"
+                self._log_experience_debug_reading(
+                    job,
+                    reading,
+                    snapshot,
+                    decision="rejected",
+                    completed_at=now,
+                    effective_now=effective_now,
+                    job_elapsed_ms=job_elapsed_ms,
+                )
                 self.gui.set_experience_snapshot(snapshot)
                 return True
             self.experience_tracker.record_ocr_result(True)
@@ -1390,17 +1474,135 @@ class AutoPotionController:
             else:
                 self._clear_failed_experience_ocr_signature()
                 self._remember_completed_experience_ocr_signature(job)
-            self.gui.set_experience_snapshot(self.experience_tracker.snapshot(effective_now))
+            snapshot = self.experience_tracker.snapshot(effective_now)
+            self._log_experience_debug_reading(
+                job,
+                reading,
+                snapshot,
+                decision="accepted",
+                completed_at=now,
+                effective_now=effective_now,
+                job_elapsed_ms=job_elapsed_ms,
+            )
+            self.gui.set_experience_snapshot(snapshot)
             return True
 
         self._remember_failed_experience_ocr_signature(job)
         self.experience_tracker.record_ocr_result(False)
+        if self._experience_reading_is_continuity_rejected(reading):
+            self._save_rejected_experience_learning_case(job, reading, trigger="ocr_continuity_rejected")
         self._log_experience_ocr_error(now, reading.reason, reading.text)
         snapshot = self.experience_tracker.snapshot(effective_now)
         if snapshot.sample_count == 0:
             snapshot.status = "等待有效 EXP 樣本"
+        self._log_experience_debug_reading(
+            job,
+            reading,
+            snapshot,
+            decision="ocr_failure",
+            completed_at=now,
+            effective_now=effective_now,
+            job_elapsed_ms=job_elapsed_ms,
+        )
         self.gui.set_experience_snapshot(snapshot)
         return True
+
+    def _log_experience_debug_reading(
+        self,
+        job: ExperienceOcrJob,
+        reading: ExperienceTextReading,
+        snapshot: ExperienceSnapshot,
+        *,
+        decision: str,
+        completed_at: float,
+        effective_now: float,
+        job_elapsed_ms: float,
+    ) -> None:
+        tracker_status = getattr(self.experience_tracker, "last_status", snapshot.status)
+        log_experience_debug(
+            {
+                "event": "experience_ocr_job",
+                "submitted_at": self._experience_debug_number(job.submitted_at),
+                "completed_at": self._experience_debug_number(completed_at),
+                "effective_now": self._experience_debug_number(effective_now),
+                "job_elapsed_ms": self._experience_debug_number(job_elapsed_ms),
+                "success": bool(reading.success),
+                "text": reading.text,
+                "current_exp": reading.current_exp,
+                "percent": self._experience_debug_number(reading.percent),
+                "confidence": self._experience_debug_number(reading.confidence),
+                "reason": reading.reason,
+                "needs_bar_percent_guard": bool(reading.needs_bar_percent_guard),
+                "bar_percent": self._experience_debug_number(reading.bar_percent),
+                "continuity_status": reading.continuity_status,
+                "source": reading.source,
+                "learning_case_id": reading.learning_case_id,
+                "level_total_estimate": self._experience_debug_number(
+                    getattr(self.experience_tracker, "estimated_level_total_exp", None)
+                ),
+                "level_total_deviation_ratio": self._experience_debug_number(
+                    self._experience_level_total_deviation_ratio(reading)
+                ),
+                "decision": decision,
+                "tracker_status": str(tracker_status),
+                "sample_count": self._experience_debug_number(snapshot.sample_count),
+                "sample_attempt_count": self._experience_debug_number(snapshot.sample_attempt_count),
+                "sample_accept_count": self._experience_debug_number(snapshot.sample_accept_count),
+                "ocr_attempt_count": self._experience_debug_number(snapshot.ocr_attempt_count),
+                "ocr_success_count": self._experience_debug_number(snapshot.ocr_success_count),
+                "xp_per_5m": self._experience_debug_number(snapshot.xp_per_5m),
+                "xp_per_10m": self._experience_debug_number(snapshot.xp_per_10m),
+                "xp_per_hour": self._experience_debug_number(snapshot.xp_per_hour),
+                "eta_seconds": self._experience_debug_number(snapshot.eta_seconds),
+                "rate_confidence": self._experience_debug_number(snapshot.rate_confidence),
+            }
+        )
+
+    def _experience_level_total_deviation_ratio(self, reading: ExperienceTextReading) -> float | None:
+        method = getattr(self.experience_tracker, "level_total_deviation_ratio", None)
+        if not callable(method):
+            return None
+        try:
+            value = method(reading.current_exp, reading.percent)
+        except Exception:
+            return None
+        return value if isinstance(value, (int, float)) else None
+
+    def _experience_reading_is_continuity_rejected(self, reading: ExperienceTextReading) -> bool:
+        return reading.continuity_status == "incompatible" or reading.reason == "EXP OCR 連續性不可信"
+
+    def _save_rejected_experience_learning_case(
+        self,
+        job: ExperienceOcrJob,
+        reading: ExperienceTextReading,
+        *,
+        trigger: str,
+    ) -> None:
+        if reading.learning_case_id:
+            return
+        image_frames = job.image_frames
+        if not image_frames:
+            return
+        case_id = save_experience_ocr_learning_case(
+            image_frames,
+            trigger=trigger,
+            pixel_reading=None,
+            paddle_reading=None,
+            final_reading=reading,
+            bar_percent=reading.bar_percent,
+        )
+        if not case_id:
+            return
+        reading.learning_case_id = case_id
+        self._log_experience_learning_case(reading)
+
+    def _experience_debug_number(self, value: object) -> int | float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        if not math.isfinite(number):
+            return None
+        return value
 
     def _stop_experience_ocr_job(self) -> None:
         self.experience_ocr_burst = None
@@ -1619,7 +1821,7 @@ class AutoPotionController:
             self.last_action = f"{label} 連續喝水：{key_name}"
             return
 
-        tap_hotkey(key_name)
+        self._tap_potion_key(bar_type, key_name)
         self._set_last_potion_drink_at(bar_type, now)
         self._record_potion_effect_attempt(bar_type, now, percent)
         self.last_action = f"{label} 喝水：{key_name}"
@@ -2841,6 +3043,9 @@ class AutoPotionController:
         worker = getattr(self, "control_hotkey_worker", None)
         if worker is not None:
             worker.stop()
+        potion_worker = getattr(self, "potion_action_worker", None)
+        if potion_worker is not None:
+            potion_worker.stop()
         try:
             self.experience_ocr_executor.shutdown(wait=False, cancel_futures=True)
         except Exception:

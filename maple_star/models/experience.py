@@ -33,14 +33,14 @@ EXP_RATE_1H_SECONDS = 3600.0
 EXP_RATE_5M_HALF_LIFE_SECONDS = 45.0
 EXP_RATE_10M_HALF_LIFE_SECONDS = 180.0
 EXP_RATE_1H_HALF_LIFE_SECONDS = 600.0
-EXP_RATE_5M_SMOOTHING_ALPHA = 0.95
-EXP_RATE_10M_SMOOTHING_ALPHA = 0.90
-EXP_RATE_1H_SMOOTHING_ALPHA = 0.85
+EXP_RATE_5M_SMOOTHING_ALPHA = 0.65
+EXP_RATE_10M_SMOOTHING_ALPHA = 0.45
+EXP_RATE_1H_SMOOTHING_ALPHA = 0.25
 EXP_RATE_FAST_CONVERGENCE_SAMPLE_COUNT = 8
 EXP_RATE_FAST_CHANGE_RATIO = 0.20
-EXP_RATE_FAST_SMOOTHING_ALPHA = 0.98
+EXP_RATE_FAST_SMOOTHING_ALPHA = 0.70
 EXP_ETA_MIN_CONFIDENCE = 0.25
-EXP_ETA_MIN_RATE_PER_SECOND = 1.0 / EXP_RATE_1H_SECONDS
+EXP_ETA_MIN_RATE_PER_SECOND = 1.0
 EXP_ETA_MAX_SECONDS = 9999.0 * 3600.0
 EXP_LEVEL_WRAP_HIGH_PERCENT = 65.0
 EXP_LEVEL_WRAP_LOW_PERCENT = 35.0
@@ -99,6 +99,10 @@ EXP_PIXEL_LEARNING_MAX_ATTEMPTS_SAVED = 8
 EXP_PIXEL_LEARNING_MIN_TEXT_SEGMENTS = 4
 EXP_TOTAL_ESTIMATE_MAX_DEVIATION_RATIO = 0.35
 EXP_SINGLE_GAIN_MAX_LEVEL_RATIO = 0.35
+EXP_OCR_CONTINUITY_MAX_PERCENT_GAIN_PER_SECOND = 10.0
+EXP_OCR_CONTINUITY_MIN_JUMP_PERCENT = 2.0
+EXP_OCR_CONTINUITY_LEVEL_UP_PREVIOUS_PERCENT_MIN = 95.0
+EXP_OCR_CONTINUITY_LEVEL_UP_CANDIDATE_PERCENT_MAX = 5.0
 EXP_GAIN_EXPECTED_TOLERANCE_RATIO = 3.0
 EXP_GAIN_MIN_ABSOLUTE_TOLERANCE = 5000
 EXP_INITIAL_REBASE_MAX_SAMPLES = 6
@@ -112,6 +116,7 @@ EXP_REBASE_CONFIRM_MAX_PERCENT_DELTA = 0.30
 EXP_REBASE_CONFIRM_MAX_LEVEL_RATIO = 0.03
 EXP_REBASE_CONFIRM_MIN_ABSOLUTE_DELTA = 8000
 EXP_REBASE_TRUSTED_CONFLICT_MIN_CONFIDENCE = 0.90
+EXP_REBASE_CONFIRM_MAX_TOTAL_DEVIATION_RATIO = 0.005
 EXP_INITIAL_BASELINE_CONFIRM_SECONDS = 20.0
 EXP_INITIAL_BASELINE_CONFIRM_MAX_PERCENT_DELTA = 0.30
 EXP_INITIAL_BASELINE_CONFIRM_MIN_ABSOLUTE_DELTA = 8000
@@ -119,6 +124,7 @@ EXP_INITIAL_BASELINE_CONFIRM_MAX_LEVEL_RATIO = 0.003
 EXP_OUTLIER_REPAIR_MAX_REMOVED_SAMPLES = 3
 EXP_OUTLIER_REPAIR_MAX_AGE_SECONDS = 60.0
 EXP_OUTLIER_REPAIR_REASON_PREFIX = "離群修正候選"
+EXP_RATE_MIN_ACCEPTED_SAMPLE_INTERVAL_SECONDS = 1.0
 EXP_LONG_RATE_BLEND_START_SECONDS = 300.0
 EXP_LONG_RATE_BLEND_FULL_SECONDS = 3600.0
 PADDLEOCR_LANGUAGE = "chinese_cht"
@@ -169,6 +175,9 @@ class ExperienceTextReading:
     reason: str = "尚未辨識"
     needs_bar_percent_guard: bool = False
     learning_case_id: str = ""
+    bar_percent: float | None = None
+    continuity_status: str = "unknown"
+    source: str = ""
 
 
 @dataclass(frozen=True)
@@ -179,6 +188,14 @@ class ExperienceOcrImage:
     roi_offset: tuple[int, int, int, int] = (0, 0, 0, 0)
     preprocess_variant: str = "capture"
     attempt_id: str = ""
+
+
+@dataclass(frozen=True)
+class ExperienceOcrContinuityHint:
+    current_exp: int
+    percent: float | None
+    captured_at: float
+    now: float
 
 
 @dataclass(frozen=True)
@@ -398,6 +415,9 @@ class ExperienceEfficiencyTracker:
             if self._pending_rebase_matches(now, current_exp, percent):
                 pending = self.pending_rebase
                 self.pending_rebase = None
+                if self._pending_rebase_level_total_deviation(pending, current_exp, percent) is not None:
+                    self._reject_sample("基準修正拒絕：總經驗估算不一致")
+                    return False
                 if self._is_pending_outlier_repair(pending):
                     if self._repair_recent_outlier_history(now, current_exp, percent):
                         return self._add_reading(now, current_exp, percent, confidence=confidence)
@@ -493,7 +513,14 @@ class ExperienceEfficiencyTracker:
         latest = self.samples[-1]
         rate_samples = self._samples_with_current_time(now)
         rate_latest = rate_samples[-1]
+        stale_seconds = max(0.0, rate_latest.captured_at - latest.captured_at)
         update_smoothed_rates = self.last_rate_sample_at != rate_latest.captured_at
+        suppress_rate_update = (
+            update_smoothed_rates
+            and rate_latest.captured_at == latest.captured_at
+            and self._latest_real_sample_interval_seconds() is not None
+            and (self._latest_real_sample_interval_seconds() or 0.0) < EXP_RATE_MIN_ACCEPTED_SAMPLE_INTERVAL_SECONDS
+        )
         five_minute_estimate = self._weighted_rate_estimate(
             EXP_RATE_5M_SECONDS,
             EXP_RATE_5M_HALF_LIFE_SECONDS,
@@ -512,6 +539,10 @@ class ExperienceEfficiencyTracker:
             rate_samples,
             add_stale_anchor=rate_latest.captured_at > latest.captured_at,
         )
+        if suppress_rate_update:
+            five_minute_estimate = None
+            ten_minute_estimate = None
+            long_estimate = None
         five_minute_rate = self._rate_per_second(five_minute_estimate)
         ten_minute_rate = self._rate_per_second(ten_minute_estimate)
         long_rate = self._rate_per_second(long_estimate)
@@ -522,6 +553,7 @@ class ExperienceEfficiencyTracker:
             EXP_RATE_5M_SMOOTHING_ALPHA,
             update_smoothed_rates,
             len(self.samples),
+            stale_seconds,
         )
         xp_per_10m = self._smoothed_rate_or_previous(
             ten_minute_rate,
@@ -530,6 +562,7 @@ class ExperienceEfficiencyTracker:
             EXP_RATE_10M_SMOOTHING_ALPHA,
             update_smoothed_rates,
             len(self.samples),
+            stale_seconds,
         )
         xp_per_hour = self._smoothed_rate_or_previous(
             long_rate,
@@ -538,6 +571,7 @@ class ExperienceEfficiencyTracker:
             EXP_RATE_1H_SMOOTHING_ALPHA,
             update_smoothed_rates,
             len(self.samples),
+            stale_seconds,
         )
         preferred_rate = self._preferred_eta_rate_per_second(
             self._window_rate_per_second(xp_per_5m, EXP_RATE_5M_SECONDS),
@@ -545,13 +579,14 @@ class ExperienceEfficiencyTracker:
             self._window_rate_per_second(xp_per_hour, EXP_RATE_1H_SECONDS),
             rate_samples,
         )
+        eta_rate = preferred_rate
         rate_confidence = self._preferred_eta_confidence(
             five_minute_estimate,
             ten_minute_estimate,
             long_estimate,
             rate_samples,
         )
-        eta_seconds = self._eta_seconds(rate_latest, preferred_rate)
+        eta_seconds = self._eta_seconds(rate_latest, eta_rate)
         if (
             self.last_snapshot is not None
             and rate_confidence is not None
@@ -695,19 +730,15 @@ class ExperienceEfficiencyTracker:
         confidence: float | None,
         reason: str,
     ) -> bool:
-        if percent is None or confidence is None or confidence < EXP_REBASE_TRUSTED_CONFLICT_MIN_CONFIDENCE:
-            return False
-        if not self.samples or self.last_current_exp is None:
-            return False
-        if current_exp <= 0:
-            return False
-        trusted_reasons = (
-            "EXP 百分比回落但數字增加",
-            "EXP 跳動與百分比不一致",
-            "EXP 跳動過大",
-            "總經驗估算偏離過大",
-        )
-        return reason.startswith(trusted_reasons)
+        return False
+
+    def level_total_deviation_ratio(self, current_exp: int | None, percent: float | None) -> float | None:
+        if current_exp is None:
+            return None
+        estimate = self._level_total_estimate(current_exp, percent)
+        if estimate is None or self.estimated_level_total_exp is None or self.estimated_level_total_exp <= 0:
+            return None
+        return abs(estimate - self.estimated_level_total_exp) / self.estimated_level_total_exp
 
     def _normalized_confidence(self, confidence: float | None) -> float | None:
         if confidence is None:
@@ -822,6 +853,19 @@ class ExperienceEfficiencyTracker:
         tolerance = self._pending_rebase_exp_tolerance(pending, percent)
         delta = current_exp - pending.current_exp
         return -tolerance <= delta <= tolerance
+
+    def _pending_rebase_level_total_deviation(
+        self,
+        pending: PendingExperienceRebase,
+        current_exp: int,
+        percent: float | None,
+    ) -> float | None:
+        if self._is_pending_outlier_repair(pending) or self._can_rebase_initial_session():
+            return None
+        deviation = self.level_total_deviation_ratio(current_exp, percent)
+        if deviation is None or deviation <= EXP_REBASE_CONFIRM_MAX_TOTAL_DEVIATION_RATIO:
+            return None
+        return deviation
 
     def _pending_rebase_expired_or_conflicts(
         self,
@@ -1188,6 +1232,11 @@ class ExperienceEfficiencyTracker:
             ),
         ]
 
+    def _latest_real_sample_interval_seconds(self) -> float | None:
+        if len(self.samples) < 2:
+            return None
+        return max(0.0, self.samples[-1].captured_at - self.samples[-2].captured_at)
+
     def _rate_per_second(self, estimate: RateEstimate | None) -> float | None:
         return None if estimate is None else estimate.rate_per_second
 
@@ -1204,6 +1253,7 @@ class ExperienceEfficiencyTracker:
         smoothing_alpha: float,
         update_smoothed_rate: bool,
         sample_count: int,
+        stale_seconds: float = 0.0,
     ) -> float | None:
         previous = self._previous_rate_value(field_name)
         if rate_per_second is not None:
@@ -1218,6 +1268,10 @@ class ExperienceEfficiencyTracker:
                 change_ratio = abs(current - previous) / previous
                 if change_ratio >= EXP_RATE_FAST_CHANGE_RATIO:
                     smoothing_alpha = max(smoothing_alpha, EXP_RATE_FAST_SMOOTHING_ALPHA)
+            if stale_seconds > 0.0:
+                decay_span = max(EXP_RATE_MIN_SECONDS, multiplier * 0.25)
+                stale_alpha = 1.0 - math.pow(0.5, stale_seconds / decay_span)
+                smoothing_alpha = max(smoothing_alpha, min(0.98, stale_alpha))
             return previous * (1.0 - smoothing_alpha) + current * smoothing_alpha
         return previous
 
@@ -1321,12 +1375,19 @@ class PaddleExperienceTextReader:
         self.ocr: Any | None = None
         self.unavailable_reason: str | None = None
 
-    def read_burst(self, images: Iterable[np.ndarray | ExperienceOcrImage]) -> ExperienceTextReading:
-        return self.read_burst_frames([[image] for image in images])
+    def read_burst(
+        self,
+        images: Iterable[np.ndarray | ExperienceOcrImage],
+        *,
+        continuity_hint: ExperienceOcrContinuityHint | None = None,
+    ) -> ExperienceTextReading:
+        return self.read_burst_frames([[image] for image in images], continuity_hint=continuity_hint)
 
     def read_burst_frames(
         self,
         image_frames: Iterable[Iterable[np.ndarray | ExperienceOcrImage]],
+        *,
+        continuity_hint: ExperienceOcrContinuityHint | None = None,
     ) -> ExperienceTextReading:
         started_at = time.perf_counter()
         materialized_frames = [
@@ -1334,10 +1395,10 @@ class PaddleExperienceTextReader:
             for images in image_frames
         ]
         frame_readings = [
-            self._read_burst_frame(images, record_learning=False)
+            self._read_burst_frame(images, record_learning=False, continuity_hint=continuity_hint)
             for images in materialized_frames
         ]
-        reading = self._select_burst_reading(frame_readings)
+        reading = self._select_burst_reading(frame_readings, continuity_hint=continuity_hint)
         self._attach_burst_learning_case(materialized_frames, reading)
         log_debug(
             "EXP OCR timing burst "
@@ -1351,6 +1412,7 @@ class PaddleExperienceTextReader:
         images: Iterable[np.ndarray | ExperienceOcrImage],
         *,
         record_learning: bool = True,
+        continuity_hint: ExperienceOcrContinuityHint | None = None,
     ) -> ExperienceTextReading:
         started_at = time.perf_counter()
         materialized_images = list(images)
@@ -1363,7 +1425,13 @@ class PaddleExperienceTextReader:
             )
             return reading
 
-        readings = [self.read(materialized_images[0], record_learning=record_learning)]
+        readings = [
+            self.read(
+                materialized_images[0],
+                record_learning=record_learning,
+                continuity_hint=continuity_hint,
+            )
+        ]
         primary = readings[0]
         if primary.success and primary.current_exp is not None and primary.percent is not None:
             log_debug(
@@ -1374,7 +1442,7 @@ class PaddleExperienceTextReader:
             return primary
 
         readings.extend(
-            self.read(image, record_learning=record_learning)
+            self.read(image, record_learning=record_learning, continuity_hint=continuity_hint)
             for image in materialized_images[1:]
         )
         if not readings:
@@ -1462,7 +1530,12 @@ class PaddleExperienceTextReader:
         )
         return result
 
-    def _select_burst_reading(self, readings: list[ExperienceTextReading]) -> ExperienceTextReading:
+    def _select_burst_reading(
+        self,
+        readings: list[ExperienceTextReading],
+        *,
+        continuity_hint: ExperienceOcrContinuityHint | None = None,
+    ) -> ExperienceTextReading:
         if not readings:
             return ExperienceTextReading(reason="EXP burst 未取得影像")
 
@@ -1481,6 +1554,9 @@ class PaddleExperienceTextReader:
             groups.setdefault((reading.current_exp, round(reading.percent, 2)), []).append(reading)
 
         if len(groups) > 1:
+            continuity_group = _select_continuity_compatible_reading_group(groups, continuity_hint)
+            if continuity_group is not None:
+                return _select_best_success_reading(continuity_group)
             progression = self._burst_progression_reading(successes)
             if progression is not None:
                 return progression
@@ -1544,6 +1620,7 @@ class PaddleExperienceTextReader:
         image: np.ndarray | ExperienceOcrImage,
         *,
         record_learning: bool = True,
+        continuity_hint: ExperienceOcrContinuityHint | None = None,
     ) -> ExperienceTextReading:
         started_at = time.perf_counter()
         ocr_image = _coerce_experience_ocr_image(image)
@@ -1555,19 +1632,36 @@ class PaddleExperienceTextReader:
         )
         bar_ms = _elapsed_ms(bar_started_at)
         pixel_started_at = time.perf_counter()
-        pixel_reading = _read_experience_pixel_font_adaptive(ocr_image, bar_percent=bar_percent)
+        pixel_reading = _read_experience_pixel_font_adaptive(
+            ocr_image,
+            bar_percent=bar_percent,
+            continuity_hint=continuity_hint,
+        )
+        pixel_reading = _with_experience_reading_metadata(pixel_reading, bar_percent=bar_percent, source="pixel")
         pixel_ms = _elapsed_ms(pixel_started_at)
         if pixel_reading.success:
+            guarded_pixel_reading = _apply_experience_ocr_continuity_guard(pixel_reading, continuity_hint)
+            if guarded_pixel_reading.success:
+                log_debug(
+                    "EXP OCR timing read "
+                    f"source={ocr_image.source_id or 'roi'} shape={_experience_timing_shape(image_array)} "
+                    f"bar_ms={bar_ms:.1f} pixel_ms={pixel_ms:.1f} paddle_ms=0.0 total_ms={_elapsed_ms(started_at):.1f} "
+                    f"result={_experience_timing_result(guarded_pixel_reading)}"
+                )
+                return guarded_pixel_reading
+            pixel_reading = guarded_pixel_reading
             log_debug(
                 "EXP OCR timing read "
                 f"source={ocr_image.source_id or 'roi'} shape={_experience_timing_shape(image_array)} "
                 f"bar_ms={bar_ms:.1f} pixel_ms={pixel_ms:.1f} paddle_ms=0.0 total_ms={_elapsed_ms(started_at):.1f} "
                 f"result={_experience_timing_result(pixel_reading)}"
             )
-            return pixel_reading
 
         paddle_started_at = time.perf_counter()
         paddle_reading = self._read_with_paddle(ocr_image, bar_percent=bar_percent)
+        paddle_reading = _with_experience_reading_metadata(paddle_reading, bar_percent=bar_percent, source="paddle")
+        if paddle_reading.success:
+            paddle_reading = _apply_experience_ocr_continuity_guard(paddle_reading, continuity_hint)
         paddle_ms = _elapsed_ms(paddle_started_at)
         if paddle_reading.success:
             log_debug(
@@ -1582,7 +1676,7 @@ class PaddleExperienceTextReader:
         if record_learning:
             case_id = save_experience_ocr_learning_case(
                 [[ocr_image]],
-                trigger="ocr_failure",
+                trigger=_experience_ocr_learning_trigger_for_reading(final_reading),
                 pixel_reading=pixel_reading,
                 paddle_reading=paddle_reading,
                 final_reading=final_reading,
@@ -1611,7 +1705,7 @@ class PaddleExperienceTextReader:
 
         case_id = save_experience_ocr_learning_case(
             image_frames,
-            trigger="ocr_failure",
+            trigger=_experience_ocr_learning_trigger_for_reading(reading),
             pixel_reading=None,
             paddle_reading=None,
             final_reading=reading,
@@ -1939,20 +2033,71 @@ def _apply_experience_bar_percent_guard(
     reading: ExperienceTextReading,
     bar_percent: float | None,
 ) -> ExperienceTextReading:
+    reading = _with_experience_reading_metadata(reading, bar_percent=bar_percent)
     if not reading.success or reading.percent is None or bar_percent is None:
         if reading.success and reading.needs_bar_percent_guard:
             return ExperienceTextReading(
+                current_exp=reading.current_exp,
+                percent=reading.percent,
                 text=reading.text,
                 confidence=reading.confidence,
                 reason="EXP 百分比需要綠條確認",
+                needs_bar_percent_guard=reading.needs_bar_percent_guard,
+                bar_percent=bar_percent,
+                continuity_status=reading.continuity_status,
+                source=reading.source,
             )
         return reading
     if abs(reading.percent - bar_percent) <= EXP_OCR_BAR_PERCENT_TOLERANCE:
         return reading
     return ExperienceTextReading(
+        current_exp=reading.current_exp,
+        percent=reading.percent,
         text=reading.text,
         confidence=reading.confidence,
         reason="EXP 百分比與綠條不一致",
+        needs_bar_percent_guard=reading.needs_bar_percent_guard,
+        bar_percent=bar_percent,
+        continuity_status=reading.continuity_status,
+        source=reading.source,
+    )
+
+
+def _with_experience_reading_metadata(
+    reading: ExperienceTextReading,
+    *,
+    bar_percent: float | None = None,
+    continuity_status: str | None = None,
+    source: str | None = None,
+) -> ExperienceTextReading:
+    if bar_percent is not None:
+        reading.bar_percent = bar_percent
+    if continuity_status is not None:
+        reading.continuity_status = continuity_status
+    if source is not None and not reading.source:
+        reading.source = source
+    return reading
+
+
+def _apply_experience_ocr_continuity_guard(
+    reading: ExperienceTextReading,
+    continuity_hint: ExperienceOcrContinuityHint | None,
+) -> ExperienceTextReading:
+    status = _experience_ocr_continuity_status(reading.current_exp, reading.percent, continuity_hint)
+    reading.continuity_status = status
+    if status != "incompatible":
+        return reading
+    return ExperienceTextReading(
+        current_exp=reading.current_exp,
+        percent=reading.percent,
+        text=reading.text,
+        confidence=reading.confidence,
+        reason="EXP OCR 連續性不可信",
+        needs_bar_percent_guard=reading.needs_bar_percent_guard,
+        learning_case_id=reading.learning_case_id,
+        bar_percent=reading.bar_percent,
+        continuity_status=status,
+        source=reading.source,
     )
 
 
@@ -1960,6 +2105,7 @@ def _read_experience_pixel_font_adaptive(
     ocr_image: ExperienceOcrImage,
     *,
     bar_percent: float | None,
+    continuity_hint: ExperienceOcrContinuityHint | None = None,
 ) -> ExperienceTextReading:
     started_at = time.perf_counter()
     successes: list[tuple[tuple[float, float, float, int], ExperienceTextReading]] = []
@@ -2001,11 +2147,11 @@ def _read_experience_pixel_font_adaptive(
             elif reading.confidence >= best_failure.confidence:
                 best_failure = reading
 
-        selected = _select_pixel_font_success(successes, effective_bar_percent)
+        selected = _select_pixel_font_success(successes, effective_bar_percent, continuity_hint=continuity_hint)
         if selected is not None and selected.success:
             return finish(selected)
 
-    selected = _select_pixel_font_success(successes, bar_percent)
+    selected = _select_pixel_font_success(successes, bar_percent, continuity_hint=continuity_hint)
     return finish(selected if selected is not None else best_failure)
 
 
@@ -2162,6 +2308,8 @@ def _pixel_font_reading_rank(
 def _select_pixel_font_success(
     successes: list[tuple[tuple[float, float, float, int], ExperienceTextReading]],
     bar_percent: float | None,
+    *,
+    continuity_hint: ExperienceOcrContinuityHint | None = None,
 ) -> ExperienceTextReading | None:
     if not successes:
         return None
@@ -2178,6 +2326,9 @@ def _select_pixel_font_success(
     for current_exp, percent in groups:
         same_percent_exps.setdefault(percent, set()).add(current_exp)
     if any(len(exps) > 1 for exps in same_percent_exps.values()):
+        continuity_group = _select_continuity_compatible_reading_group(groups, continuity_hint)
+        if continuity_group is not None:
+            return max(continuity_group, key=lambda item: item[0])[1]
         ranked = sorted(successes, key=lambda item: item[0], reverse=True)
         best_rank, best = ranked[0]
         second_rank = ranked[1][0] if len(ranked) > 1 else (0.0, 0.0, 0.0, 0)
@@ -2186,6 +2337,9 @@ def _select_pixel_font_success(
         return ExperienceTextReading(text=best.text, confidence=best.confidence, reason="EXP OCR 模糊數字候選不一致")
 
     if len(groups) > 1 and bar_percent is None:
+        continuity_group = _select_continuity_compatible_reading_group(groups, continuity_hint)
+        if continuity_group is not None:
+            return max(continuity_group, key=lambda item: item[0])[1]
         best = max(successes, key=lambda item: item[0])[1]
         return ExperienceTextReading(text=best.text, confidence=best.confidence, reason="EXP OCR 候選不一致")
 
@@ -2199,6 +2353,7 @@ def _select_pixel_font_success(
             _key, selected_group = max(
                 viable,
                 key=lambda item: (
+                    _continuity_group_rank(item[0][0], item[0][1], continuity_hint),
                     max(group_item[0][0] for group_item in item[1]),
                     max(group_item[0][2] for group_item in item[1]),
                     -abs(item[0][1] - bar_percent),
@@ -2207,8 +2362,83 @@ def _select_pixel_font_success(
             )
             return max(selected_group, key=lambda item: item[0])[1]
 
-    selected_group = max(groups.values(), key=lambda group: max(item[0] for item in group))
+    selected_group = max(
+        groups.values(),
+        key=lambda group: (
+            _continuity_group_rank(group[0][1].current_exp, group[0][1].percent, continuity_hint),
+            max(item[0] for item in group),
+        ),
+    )
     return max(selected_group, key=lambda item: item[0])[1]
+
+
+def _select_continuity_compatible_reading_group(
+    groups: dict[tuple[int, float], list[Any]],
+    continuity_hint: ExperienceOcrContinuityHint | None,
+) -> list[Any] | None:
+    if continuity_hint is None or not groups:
+        return None
+    ranked_groups = sorted(
+        groups.items(),
+        key=lambda item: _continuity_group_rank(item[0][0], item[0][1], continuity_hint),
+        reverse=True,
+    )
+    best_key, best_group = ranked_groups[0]
+    best_rank = _continuity_group_rank(best_key[0], best_key[1], continuity_hint)
+    if best_rank < 2:
+        return None
+    second_rank = -1 if len(ranked_groups) == 1 else _continuity_group_rank(
+        ranked_groups[1][0][0],
+        ranked_groups[1][0][1],
+        continuity_hint,
+    )
+    if best_rank <= second_rank:
+        return None
+    return best_group
+
+
+def _continuity_group_rank(
+    current_exp: int | None,
+    percent: float | None,
+    continuity_hint: ExperienceOcrContinuityHint | None,
+) -> int:
+    status = _experience_ocr_continuity_status(current_exp, percent, continuity_hint)
+    if status in {"compatible", "level_up"}:
+        return 3
+    if status == "unknown":
+        return 1
+    if status == "suspicious_jump":
+        return 0
+    return -1
+
+
+def _experience_ocr_continuity_status(
+    current_exp: int | None,
+    percent: float | None,
+    continuity_hint: ExperienceOcrContinuityHint | None,
+) -> str:
+    if continuity_hint is None or current_exp is None:
+        return "unknown"
+    previous_percent = continuity_hint.percent
+    if previous_percent is None or percent is None:
+        return "compatible" if current_exp >= continuity_hint.current_exp else "unknown"
+    if current_exp < continuity_hint.current_exp:
+        if (
+            previous_percent >= EXP_OCR_CONTINUITY_LEVEL_UP_PREVIOUS_PERCENT_MIN
+            and percent <= EXP_OCR_CONTINUITY_LEVEL_UP_CANDIDATE_PERCENT_MAX
+        ):
+            return "level_up"
+        return "incompatible"
+    if percent < previous_percent - EXP_PERCENT_REGRESSION_TOLERANCE:
+        return "incompatible"
+    elapsed_seconds = max(0.0, continuity_hint.now - continuity_hint.captured_at)
+    allowed_gain = max(
+        EXP_OCR_CONTINUITY_MIN_JUMP_PERCENT,
+        elapsed_seconds * EXP_OCR_CONTINUITY_MAX_PERCENT_GAIN_PER_SECOND,
+    )
+    if percent - previous_percent > allowed_gain:
+        return "suspicious_jump"
+    return "compatible"
 
 
 def _decode_experience_pixel_font_text_candidates(
@@ -2807,6 +3037,12 @@ def experience_ocr_learning_pending_dir() -> Path:
     return Path.cwd() / ".maplestar" / "experience_ocr_pending"
 
 
+def _experience_ocr_learning_trigger_for_reading(reading: ExperienceTextReading) -> str:
+    if reading.continuity_status == "incompatible" or reading.reason == "EXP OCR 連續性不可信":
+        return "ocr_continuity_rejected"
+    return "ocr_failure"
+
+
 def save_experience_ocr_learning_case(
     image_frames: Iterable[Iterable[np.ndarray | ExperienceOcrImage]],
     *,
@@ -3096,6 +3332,9 @@ def _experience_reading_metadata(reading: ExperienceTextReading | None) -> dict[
         "percent": reading.percent,
         "reason": reading.reason,
         "needs_bar_percent_guard": reading.needs_bar_percent_guard,
+        "bar_percent": reading.bar_percent,
+        "continuity_status": reading.continuity_status,
+        "source": reading.source,
     }
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import json
 import re
 import shutil
@@ -20,6 +21,13 @@ FIXTURE_DIR = ROOT / "tests" / "fixtures" / "experience_ocr"
 MANIFEST_PATH = FIXTURE_DIR / "manifest.json"
 TEMPLATE_MODULE_PATH = ROOT / "maple_star" / "models" / "experience_pixel_templates.py"
 PROMOTED_TEXT_RE = re.compile(r"([0-9]+)\[((?:[0-9]{1,2}|100)\.[0-9]{2})%\]")
+AUTO_PROMOTE_MIN_CONFIDENCE = 0.965
+AUTO_PROMOTE_MIN_CONFIDENCE_GAP = 0.006
+AUTO_PROMOTE_MIN_MATCHING_ATTEMPTS = 2
+REVIEW_ACTION_AUTO_PROMOTE = "auto_promote"
+REVIEW_ACTION_MANUAL_REVIEW = "manual_review"
+REVIEW_ACTION_DELETE_RECOMMENDED = "delete_recommended"
+FALSE_POSITIVE_REVIEW_TRIGGERS = {"tracker_rejected", "ocr_continuity_rejected"}
 
 
 def list_experience_ocr_learning_cases() -> list[dict[str, Any]]:
@@ -50,28 +58,42 @@ def list_experience_ocr_learning_cases() -> list[dict[str, Any]]:
         source_warning = ""
         if reading_key and reading_source is None:
             source_warning = "預設 OCR 文字未綁定到此 case 的任何候選影像，請依預覽圖手動輸入正確值"
-        cases.append(
-            {
-                "id": metadata_path.parent.name,
-                "metadata_path": metadata_path,
-                "case_dir": metadata_path.parent,
-                "created_at": metadata.get("created_at", ""),
-                "trigger": metadata.get("trigger", "--"),
-                "final_text": final.get("text", ""),
-                "final_reason": final.get("reason", "--"),
-                "final_success": bool(final.get("success")),
-                "pixel_text": pixel.get("text", ""),
-                "pixel_reason": pixel.get("reason", "--"),
-                "paddle_text": paddle.get("text", ""),
-                "paddle_reason": paddle.get("reason", "--"),
-                "reading_key": reading_key,
-                "default_correct_text": reading_key if reading_source is not None else "",
-                "source_warning": source_warning,
-                "preview_file": preview_file,
-                "metadata": metadata,
-            }
-        )
-    return sorted(cases, key=lambda item: (str(item.get("created_at", "")), str(item.get("id", ""))))
+        candidate_stats = _learning_case_candidate_stats(metadata, reading_key)
+        auto_decision: dict[str, Any] = {"promotable": False, "skip_reason": "尚未評估"}
+        case_item = {
+            "id": metadata_path.parent.name,
+            "metadata_path": metadata_path,
+            "case_dir": metadata_path.parent,
+            "created_at": metadata.get("created_at", ""),
+            "trigger": metadata.get("trigger", "--"),
+            "final_text": final.get("text", ""),
+            "final_reason": final.get("reason", "--"),
+            "final_success": bool(final.get("success")),
+            "pixel_text": pixel.get("text", ""),
+            "pixel_reason": pixel.get("reason", "--"),
+            "paddle_text": paddle.get("text", ""),
+            "paddle_reason": paddle.get("reason", "--"),
+            "reading_key": reading_key,
+            "default_correct_text": reading_key if reading_source is not None else "",
+            "source_warning": source_warning,
+            "preview_file": preview_file,
+            "metadata": metadata,
+            "top_candidates": candidate_stats["top_candidates"],
+            "confidence_gap": candidate_stats["confidence_gap"],
+            "candidate_match_count": candidate_stats["matching_attempts"],
+            "top_candidate_text": candidate_stats["top_text"],
+            "top_candidate_confidence": candidate_stats["top_confidence"],
+        }
+        auto_decision = _auto_promote_decision(case_item, str(case_item["default_correct_text"]))
+        case_item["auto_promote_decision"] = auto_decision
+        case_item["auto_promote_skip_reason"] = auto_decision["skip_reason"]
+        case_item["auto_promote_promotable"] = bool(auto_decision["promotable"])
+        review = _learning_case_review(case_item)
+        case_item.update(review)
+        cases.append(case_item)
+    cases = sorted(cases, key=lambda item: (str(item.get("created_at", "")), str(item.get("id", ""))))
+    _attach_learning_case_groups(cases)
+    return cases
 
 
 def promote_experience_ocr_learning_case(
@@ -132,6 +154,7 @@ def promote_experience_ocr_learning_case(
             "current_exp": exp_value,
             "percent": float(percent_text),
             "text": compact,
+            "paddle_fallback": False,
         }
     )
     _write_manifest(manifest)
@@ -140,6 +163,315 @@ def promote_experience_ocr_learning_case(
         "target_path": target_path,
         "text": compact,
     }
+
+
+def auto_promote_experience_ocr_learning_cases(*, dry_run: bool = False) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "dry_run": dry_run,
+        "promotable": [],
+        "promoted": [],
+        "skipped": [],
+        "rolled_back": [],
+        "template_count": None,
+    }
+    for case in list_experience_ocr_learning_cases():
+        case_id = str(case.get("id") or "")
+        text = str(case.get("default_correct_text") or "").strip()
+        decision = _auto_promote_decision(case, text)
+        if not decision["promotable"]:
+            result["skipped"].append({"id": case_id, "reason": decision["skip_reason"], "decision": decision})
+            continue
+        if dry_run:
+            result["promotable"].append({"id": case_id, "text": text, "decision": decision})
+            continue
+
+        try:
+            promoted = promote_experience_ocr_learning_case(case_id, text, force=True)
+            regen = regen_experience_pixel_templates()
+            validation = validate_promoted_experience_fixture(str(promoted["sample_id"]))
+        except Exception as exc:
+            result["skipped"].append({"id": case_id, "reason": f"套用失敗：{exc}"})
+            continue
+
+        if validation.get("success"):
+            deleted_ids = set(delete_experience_ocr_learning_cases_by_reading_key(str(promoted["text"])))
+            if delete_experience_ocr_learning_case(case_id):
+                deleted_ids.add(case_id)
+            result["template_count"] = regen["template_count"]
+            result["promoted"].append(
+                {
+                    "id": case_id,
+                    "sample_id": promoted["sample_id"],
+                    "text": promoted["text"],
+                    "deleted_count": len(deleted_ids),
+                }
+            )
+            continue
+
+        remove_experience_ocr_fixture_sample(str(promoted["sample_id"]))
+        regen = regen_experience_pixel_templates()
+        result["template_count"] = regen["template_count"]
+        result["rolled_back"].append(
+            {
+                "id": case_id,
+                "sample_id": promoted["sample_id"],
+                "text": promoted["text"],
+                "reason": validation.get("reason") or "Pixel validation failed",
+                "read_text": validation.get("text") or "",
+            }
+        )
+    return result
+
+
+def delete_recommended_experience_ocr_learning_cases(*, dry_run: bool = False) -> list[dict[str, str]]:
+    deleted: list[dict[str, str]] = []
+    for case in list_experience_ocr_learning_cases():
+        if case.get("review_action") != REVIEW_ACTION_DELETE_RECOMMENDED:
+            continue
+        case_id = str(case.get("id") or "")
+        item = {
+            "id": case_id,
+            "reason": str(case.get("review_reason") or ""),
+        }
+        deleted.append(item)
+        if not dry_run:
+            delete_experience_ocr_learning_case(case_id)
+    return deleted
+
+
+def _auto_promote_skip_reason(case: dict[str, Any], text: str) -> str:
+    return str(_auto_promote_decision(case, text)["skip_reason"])
+
+
+def _learning_case_review(case: dict[str, Any]) -> dict[str, str]:
+    if case.get("error"):
+        return {
+            "review_action": REVIEW_ACTION_MANUAL_REVIEW,
+            "review_label": "需人工確認",
+            "review_reason": f"metadata unreadable: {case['error']}",
+        }
+    if case.get("auto_promote_promotable"):
+        return {
+            "review_action": REVIEW_ACTION_AUTO_PROMOTE,
+            "review_label": "可自動套用",
+            "review_reason": "符合保守自動套用條件",
+        }
+
+    auto_reason = str(case.get("auto_promote_skip_reason") or "")
+    final_reason = str(case.get("final_reason") or "")
+    source_warning = str(case.get("source_warning") or "")
+    metadata = case.get("metadata") or {}
+    trigger = str(metadata.get("trigger") or case.get("trigger") or "")
+    reading_key = str(metadata.get("reading_key") or case.get("reading_key") or "")
+    stats = _learning_case_candidate_stats(metadata, reading_key)
+    if trigger in FALSE_POSITIVE_REVIEW_TRIGGERS:
+        return {
+            "review_action": REVIEW_ACTION_MANUAL_REVIEW,
+            "review_label": "需人工校正",
+            "review_reason": "此 case 來自 OCR false-positive 防線，必須人工確認正確值",
+        }
+    if auto_reason == "candidate 百分比與綠條不一致":
+        return {
+            "review_action": REVIEW_ACTION_DELETE_RECOMMENDED,
+            "review_label": "建議刪除",
+            "review_reason": "候選文字百分比與 saved 綠條估算衝突，不適合作為學習 fixture",
+        }
+    if (
+        final_reason == "EXP 百分比與綠條不一致"
+        and source_warning
+        and reading_key
+        and _find_candidate_source(metadata, reading_key) is None
+    ):
+        return {
+            "review_action": REVIEW_ACTION_DELETE_RECOMMENDED,
+            "review_label": "建議刪除",
+            "review_reason": "預設 OCR 文字未綁定 saved candidate，且百分比與綠條衝突",
+        }
+    if (
+        final_reason == "EXP 百分比與綠條不一致"
+        and not stats["top_text"]
+        and not case.get("default_correct_text")
+    ):
+        return {
+            "review_action": REVIEW_ACTION_DELETE_RECOMMENDED,
+            "review_label": "建議刪除",
+            "review_reason": "沒有可信候選文字且百分比與綠條衝突",
+        }
+    return {
+        "review_action": REVIEW_ACTION_MANUAL_REVIEW,
+        "review_label": "需人工校正",
+        "review_reason": source_warning or auto_reason or "需人工確認正確值",
+    }
+
+
+def _auto_promote_decision(case: dict[str, Any], text: str) -> dict[str, Any]:
+    compact_text = text.strip().replace(" ", "")
+    metadata = case.get("metadata") or {}
+    stats = _learning_case_candidate_stats(metadata, compact_text)
+    source_bound = bool(compact_text and _find_candidate_source(metadata, compact_text) is not None)
+    decision: dict[str, Any] = {
+        "promotable": False,
+        "skip_reason": "",
+        "confidence_gap": stats["confidence_gap"],
+        "source_bound": source_bound,
+        "continuity_status": "not_available",
+        "top_candidate_text": stats["top_text"],
+        "top_candidate_confidence": stats["top_confidence"],
+        "candidate_match_count": stats["matching_attempts"],
+        "candidate_bar_mismatch_count": stats["bar_mismatch_count"],
+    }
+    if case.get("error"):
+        decision["skip_reason"] = f"metadata unreadable: {case['error']}"
+        return decision
+    trigger = str(metadata.get("trigger") or case.get("trigger") or "")
+    if trigger in FALSE_POSITIVE_REVIEW_TRIGGERS:
+        decision["skip_reason"] = "false-positive case 必須人工確認"
+        return decision
+    if not compact_text:
+        decision["skip_reason"] = "沒有可自動套用的預設文字"
+        return decision
+    if case.get("source_warning"):
+        decision["skip_reason"] = str(case["source_warning"])
+        return decision
+    if PROMOTED_TEXT_RE.fullmatch(compact_text) is None:
+        decision["skip_reason"] = "文字格式不符合 EXP[percent%]"
+        return decision
+    if not source_bound:
+        decision["skip_reason"] = "預設文字未綁定到 saved candidate"
+        return decision
+    if stats["top_text"] != compact_text:
+        decision["skip_reason"] = "top candidate 與預設文字不同"
+        return decision
+    if stats["bar_mismatch_count"] > 0:
+        decision["skip_reason"] = "candidate 百分比與綠條不一致"
+        return decision
+    has_confident_gap = (
+        stats["top_confidence"] is not None
+        and stats["confidence_gap"] is not None
+        and stats["top_confidence"] >= AUTO_PROMOTE_MIN_CONFIDENCE
+        and stats["confidence_gap"] >= AUTO_PROMOTE_MIN_CONFIDENCE_GAP
+    )
+    has_attempt_support = stats["matching_attempts"] >= AUTO_PROMOTE_MIN_MATCHING_ATTEMPTS
+    if not has_confident_gap and not has_attempt_support:
+        decision["skip_reason"] = "candidate 信心或獨立 attempt 支援不足"
+        return decision
+    decision["promotable"] = True
+    return decision
+
+
+def _learning_case_candidate_stats(metadata: dict[str, Any], compact_text: str) -> dict[str, Any]:
+    attempt_tops: list[str] = []
+    bar_mismatch_count = 0
+    candidates_by_text: dict[str, dict[str, Any]] = {}
+    frames = metadata.get("frames") or []
+    for frame in frames:
+        for roi in frame:
+            for attempt in roi.get("attempts") or []:
+                attempt_candidates: list[tuple[str, float | None, int]] = []
+                for index, candidate in enumerate(attempt.get("candidates") or []):
+                    text = str(candidate.get("text") or "").strip().replace(" ", "")
+                    if not text:
+                        continue
+                    confidence = _candidate_confidence(candidate.get("confidence"))
+                    attempt_candidates.append((text, confidence, index))
+                    entry = candidates_by_text.setdefault(
+                        text,
+                        {"text": text, "confidence": None, "count": 0},
+                    )
+                    entry["count"] = int(entry["count"]) + 1
+                    if confidence is not None and (
+                        entry["confidence"] is None or confidence > float(entry["confidence"])
+                    ):
+                        entry["confidence"] = confidence
+                if attempt_candidates:
+                    attempt_top = max(
+                        attempt_candidates,
+                        key=lambda item: (-1.0 if item[1] is None else item[1], -item[2]),
+                    )
+                    attempt_tops.append(attempt_top[0])
+                    if attempt_top[0] == compact_text and _candidate_attempt_bar_mismatches(compact_text, attempt):
+                        bar_mismatch_count += 1
+
+    top_candidates = sorted(
+        candidates_by_text.values(),
+        key=lambda item: (
+            -1.0 if item.get("confidence") is None else float(item["confidence"]),
+            int(item.get("count") or 0),
+            str(item.get("text") or ""),
+        ),
+        reverse=True,
+    )
+    top_text = str(top_candidates[0]["text"]) if top_candidates else ""
+    top_confidence = top_candidates[0].get("confidence") if top_candidates else None
+    second_confidence = top_candidates[1].get("confidence") if len(top_candidates) > 1 else None
+    confidence_gap = None
+    if top_confidence is not None and second_confidence is not None:
+        confidence_gap = float(top_confidence) - float(second_confidence)
+    return {
+        "top_candidates": top_candidates[:5],
+        "top_text": top_text,
+        "top_confidence": top_confidence,
+        "confidence_gap": confidence_gap,
+        "matching_attempts": sum(1 for text in attempt_tops if text == compact_text),
+        "bar_mismatch_count": bar_mismatch_count,
+    }
+
+
+def _candidate_confidence(value: Any) -> float | None:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    return confidence if 0.0 <= confidence <= 1.0 else None
+
+
+def _candidate_attempt_bar_mismatches(compact_text: str, attempt: dict[str, Any]) -> bool:
+    bar_percent = _candidate_confidence(attempt.get("bar_percent"))
+    if bar_percent is None:
+        try:
+            bar_percent = float(attempt.get("bar_percent"))
+        except (TypeError, ValueError):
+            return False
+    match = PROMOTED_TEXT_RE.fullmatch(compact_text)
+    if match is None:
+        return False
+    percent = float(match.group(2))
+    return abs(percent - bar_percent) > experience_model.EXP_PIXEL_FONT_RECOGNIZER_BAR_PERCENT_TOLERANCE
+
+
+def _attach_learning_case_groups(cases: list[dict[str, Any]]) -> None:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for case in cases:
+        grouped.setdefault(_learning_case_group_key(case), []).append(case)
+    for group_key, group in grouped.items():
+        group_id = hashlib.blake2b(group_key.encode("utf-8"), digest_size=6).hexdigest()
+        for index, case in enumerate(group, start=1):
+            case["group_id"] = group_id
+            case["group_size"] = len(group)
+            case["group_index"] = index
+
+
+def _learning_case_group_key(case: dict[str, Any]) -> str:
+    default_text = str(case.get("default_correct_text") or "").strip().replace(" ", "")
+    if default_text:
+        return f"text:{default_text}"
+    candidate_texts = [str(item.get("text") or "") for item in case.get("top_candidates") or [] if item.get("text")]
+    if candidate_texts:
+        return json.dumps(
+            [
+                "candidates",
+                candidate_texts[:3],
+                str(case.get("source_warning") or ""),
+                str(case.get("pixel_reason") or ""),
+                str(case.get("final_reason") or ""),
+            ],
+            ensure_ascii=False,
+        )
+    metadata = case.get("metadata") or {}
+    fallback_key = str(metadata.get("dedupe_key") or metadata.get("reading_key") or "")
+    if fallback_key:
+        return f"metadata:{fallback_key}"
+    return f"case:{case.get('id', '')}"
 
 
 def _is_resolved_non_actionable_learning_case(metadata: dict[str, Any]) -> bool:

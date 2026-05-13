@@ -17,6 +17,7 @@ import numpy as np
 
 from maple_star.experience import (
     ExperienceEfficiencyTracker,
+    ExperienceOcrContinuityHint,
     ExperienceOcrImage,
     ExperiencePixelFontAttempt,
     ExperienceTextReading,
@@ -25,8 +26,10 @@ from maple_star.experience import (
     PADDLEOCR_LANGUAGE,
     PADDLEOCR_RECOGNITION_MODEL_NAME,
     PaddleExperienceTextReader,
+    _apply_experience_ocr_continuity_guard,
     _binarize_experience_text,
     _clean_experience_text_mask,
+    _experience_ocr_continuity_status,
     _experience_text_structure_score,
     _pixel_font_text_reading,
     _select_pixel_font_success,
@@ -970,22 +973,23 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(tracker.total_gained_exp, 10722)
         self.assertEqual(snapshot.current_percent, 76.98)
 
-    def test_experience_tracker_rebases_repeated_trusted_conflicting_reading(self):
+    def test_experience_tracker_rejects_repeated_percent_regression_without_rebase(self):
         tracker = ExperienceEfficiencyTracker()
         self.assertTrue(tracker.add_reading(0.0, 13186620, 78.24, confidence=0.98))
 
         self.assertFalse(tracker.add_reading(5.0, 13846565, 76.90, confidence=0.98))
         pending = tracker.snapshot(5.0)
         self.assertEqual(pending.current_exp, 13186620)
-        self.assertTrue(pending.status.startswith("樣本拒絕：基準修正候選"))
+        self.assertIsNone(tracker.pending_rebase)
+        self.assertTrue(pending.status.startswith("樣本拒絕：EXP 百分比回落"))
 
-        self.assertTrue(tracker.add_reading(10.0, 13856565, 76.95, confidence=0.98))
+        self.assertFalse(tracker.add_reading(10.0, 13856565, 76.95, confidence=0.98))
         snapshot = tracker.snapshot(10.0)
 
-        self.assertEqual(snapshot.current_exp, 13856565)
-        self.assertEqual(snapshot.sample_count, 2)
+        self.assertEqual(snapshot.current_exp, 13186620)
+        self.assertEqual(snapshot.sample_count, 1)
         self.assertEqual(tracker.sample_attempt_count, 3)
-        self.assertEqual(tracker.sample_accept_count, 2)
+        self.assertEqual(tracker.sample_accept_count, 1)
 
     def test_experience_tracker_requires_confirmed_initial_baseline_when_requested(self):
         tracker = ExperienceEfficiencyTracker()
@@ -1176,6 +1180,100 @@ class ExperienceTests(unittest.TestCase):
         self.assertFalse(reading.success)
         self.assertEqual(reading.reason, "EXP OCR 模糊數字候選不一致")
 
+    def test_pixel_reader_uses_continuity_to_resolve_same_percent_conflict(self):
+        conflict_candidates = [
+            (
+                (0.962, 1.0, 1.0, 0),
+                ExperienceTextReading(
+                    current_exp=16593283,
+                    percent=92.16,
+                    text="16593283[92.16%]",
+                    confidence=0.962,
+                    success=True,
+                    reason="OK:Pixel",
+                ),
+            ),
+            (
+                (0.960, 1.0, 1.0, -1),
+                ExperienceTextReading(
+                    current_exp=16593280,
+                    percent=92.16,
+                    text="16593280[92.16%]",
+                    confidence=0.960,
+                    success=True,
+                    reason="OK:Pixel",
+                ),
+            ),
+        ]
+        hint = ExperienceOcrContinuityHint(current_exp=16593281, percent=92.15, captured_at=10.0, now=11.0)
+
+        reading = _select_pixel_font_success(conflict_candidates, bar_percent=92.16, continuity_hint=hint)
+
+        self.assertIsNotNone(reading)
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 16593283)
+
+    def test_pixel_reader_continuity_demotes_implausible_percent_jump(self):
+        conflict_candidates = [
+            (
+                (0.980, 0.0, 1.0, 0),
+                ExperienceTextReading(
+                    current_exp=2000000,
+                    percent=50.0,
+                    text="2000000[50.00%]",
+                    confidence=0.980,
+                    success=True,
+                    reason="OK:Pixel",
+                ),
+            ),
+            (
+                (0.960, 0.0, 1.0, -1),
+                ExperienceTextReading(
+                    current_exp=1001000,
+                    percent=10.50,
+                    text="1001000[10.50%]",
+                    confidence=0.960,
+                    success=True,
+                    reason="OK:Pixel",
+                ),
+            ),
+        ]
+        hint = ExperienceOcrContinuityHint(current_exp=1000000, percent=10.0, captured_at=20.0, now=20.2)
+
+        reading = _select_pixel_font_success(conflict_candidates, bar_percent=None, continuity_hint=hint)
+
+        self.assertIsNotNone(reading)
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 1001000)
+
+    def test_experience_ocr_continuity_allows_level_up_reset(self):
+        hint = ExperienceOcrContinuityHint(current_exp=3800000, percent=99.80, captured_at=30.0, now=31.0)
+
+        status = _experience_ocr_continuity_status(12000, 0.35, hint)
+
+        self.assertEqual(status, "level_up")
+
+    def test_experience_ocr_continuity_guard_rejects_percent_regression_success(self):
+        hint = ExperienceOcrContinuityHint(current_exp=36884521, percent=96.99, captured_at=10.0, now=39.828)
+        reading = ExperienceTextReading(
+            current_exp=36984144,
+            percent=96.25,
+            text="36984144[96.25%]",
+            confidence=0.98,
+            success=True,
+            reason="OK:Pixel",
+            bar_percent=96.25,
+            source="pixel",
+        )
+
+        guarded = _apply_experience_ocr_continuity_guard(reading, hint)
+
+        self.assertFalse(guarded.success)
+        self.assertEqual(guarded.current_exp, 36984144)
+        self.assertEqual(guarded.percent, 96.25)
+        self.assertEqual(guarded.continuity_status, "incompatible")
+        self.assertEqual(guarded.reason, "EXP OCR 連續性不可信")
+
     def test_pixel_text_acceptance_does_not_depend_on_exp_digit_count(self):
         attempt = ExperiencePixelFontAttempt(
             image=np.zeros((16, 80, 3), dtype=np.uint8),
@@ -1351,7 +1449,10 @@ class ExperienceTests(unittest.TestCase):
                                     "attempts": [
                                         {
                                             "file": "attempt.png",
-                                            "candidates": [{"text": "2043879[10.75%]"}],
+                                            "candidates": [
+                                                {"text": "2043879[10.75%]", "confidence": 0.980},
+                                                {"text": "2043870[10.75%]", "confidence": 0.900},
+                                            ],
                                         }
                                     ],
                                 }
@@ -1523,6 +1624,396 @@ class ExperienceTests(unittest.TestCase):
 
         self.assertEqual(result["sample_id"], "exp-unit_ocr_8908583_4447")
         self.assertEqual(manifest["samples"][0]["text"], "8908583[44.47%]")
+
+    def test_learning_service_auto_promotes_trusted_pending_case(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        image = np.full((12, 80, 3), 255, dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pending_root = root / "pending"
+            case_dir = pending_root / "exp-unit"
+            case_dir.mkdir(parents=True)
+            cv2.imwrite(str(case_dir / "roi.png"), image)
+            (case_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "reading_key": "2043879[10.75%]",
+                        "frames": [
+                            [
+                                {
+                                    "file": "roi.png",
+                                    "attempts": [
+                                        {
+                                            "file": "roi.png",
+                                            "candidates": [
+                                                {"text": "2043879[10.75%]", "confidence": 0.980},
+                                                {"text": "2043870[10.75%]", "confidence": 0.900},
+                                            ],
+                                        }
+                                    ],
+                                }
+                            ]
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fixture_dir = root / "fixtures"
+            fixture_dir.mkdir()
+            manifest_path = fixture_dir / "manifest.json"
+            manifest_path.write_text('{"samples": []}\n', encoding="utf-8")
+
+            with (
+                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
+                patch.object(learning_service, "MANIFEST_PATH", manifest_path),
+                patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root),
+                patch.object(learning_service, "regen_experience_pixel_templates", return_value={"template_count": 1}),
+                patch.object(learning_service, "validate_promoted_experience_fixture", return_value={"success": True}),
+            ):
+                result = learning_service.auto_promote_experience_ocr_learning_cases()
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            pending_exists = (pending_root / "exp-unit").exists()
+
+        self.assertEqual([item["id"] for item in result["promoted"]], ["exp-unit"])
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(result["rolled_back"], [])
+        self.assertEqual(manifest["samples"][0]["text"], "2043879[10.75%]")
+        self.assertFalse(pending_exists)
+
+    def test_learning_service_groups_pending_cases_by_bound_text(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        image = np.full((12, 80, 3), 255, dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pending_root = Path(temp_dir) / "pending"
+            for case_id in ("exp-a", "exp-b"):
+                case_dir = pending_root / case_id
+                case_dir.mkdir(parents=True)
+                cv2.imwrite(str(case_dir / "roi.png"), image)
+                (case_dir / "metadata.json").write_text(
+                    json.dumps(
+                        {
+                            "reading_key": "2043879[10.75%]",
+                            "created_at": case_id,
+                            "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "candidates": [
+                                {"text": "2043879[10.75%]", "confidence": 0.980},
+                                {"text": "2043870[10.75%]", "confidence": 0.900},
+                            ]}]}]],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
+                cases = learning_service.list_experience_ocr_learning_cases()
+
+        self.assertEqual(len(cases), 2)
+        self.assertEqual({case["group_size"] for case in cases}, {2})
+        self.assertEqual(len({case["group_id"] for case in cases}), 1)
+
+    def test_learning_service_auto_promote_skips_low_confidence_gap(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        image = np.full((12, 80, 3), 255, dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pending_root = Path(temp_dir) / "pending"
+            case_dir = pending_root / "exp-low-gap"
+            case_dir.mkdir(parents=True)
+            cv2.imwrite(str(case_dir / "roi.png"), image)
+            (case_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "reading_key": "2043879[10.75%]",
+                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "candidates": [
+                            {"text": "2043879[10.75%]", "confidence": 0.966},
+                            {"text": "2043870[10.75%]", "confidence": 0.964},
+                        ]}]}]],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
+                result = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
+
+        self.assertEqual(result["promotable"], [])
+        self.assertEqual(result["skipped"][0]["id"], "exp-low-gap")
+        self.assertIn("信心", result["skipped"][0]["reason"])
+
+    def test_learning_service_auto_promote_skips_bar_mismatch_candidate(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        image = np.full((12, 80, 3), 255, dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pending_root = Path(temp_dir) / "pending"
+            case_dir = pending_root / "exp-bar-mismatch"
+            case_dir.mkdir(parents=True)
+            cv2.imwrite(str(case_dir / "roi.png"), image)
+            (case_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "reading_key": "2719156[83.84%]",
+                        "frames": [[{"file": "roi.png", "attempts": [
+                            {"file": "roi.png", "bar_percent": 75.53, "candidates": [
+                                {"text": "2719156[83.84%]", "confidence": 0.952},
+                                {"text": "2719136[83.84%]", "confidence": 0.950},
+                            ]},
+                            {"file": "roi.png", "candidates": [
+                                {"text": "2719156[83.84%]", "confidence": 0.952},
+                            ]},
+                        ]}]],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
+                cases = learning_service.list_experience_ocr_learning_cases()
+                result = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
+
+        self.assertEqual(cases[0]["review_action"], "delete_recommended")
+        self.assertIn("綠條", cases[0]["review_reason"])
+        self.assertEqual(result["promotable"], [])
+        self.assertEqual(result["skipped"][0]["id"], "exp-bar-mismatch")
+        self.assertIn("綠條", result["skipped"][0]["reason"])
+
+    def test_learning_service_marks_unbound_bar_mismatch_case_delete_recommended(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        image = np.full((12, 80, 3), 255, dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pending_root = Path(temp_dir) / "pending"
+            case_dir = pending_root / "exp-unbound"
+            case_dir.mkdir(parents=True)
+            cv2.imwrite(str(case_dir / "roi.png"), image)
+            (case_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "reading_key": "23706141[90.72%]",
+                        "final_reading": {
+                            "success": False,
+                            "text": "23706141[90.72%]",
+                            "reason": "EXP 百分比與綠條不一致",
+                        },
+                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "candidates": [
+                            {"text": "33736141[3073%]", "confidence": 0.861},
+                        ]}]}]],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
+                cases = learning_service.list_experience_ocr_learning_cases()
+
+        self.assertEqual(cases[0]["review_action"], "delete_recommended")
+        self.assertIn("未綁定", cases[0]["review_reason"])
+
+    def test_learning_service_delete_recommended_cases_supports_dry_run(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        image = np.full((12, 80, 3), 255, dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pending_root = Path(temp_dir) / "pending"
+            case_dir = pending_root / "exp-bar-mismatch"
+            case_dir.mkdir(parents=True)
+            cv2.imwrite(str(case_dir / "roi.png"), image)
+            (case_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "reading_key": "2719156[83.84%]",
+                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "bar_percent": 75.53, "candidates": [
+                            {"text": "2719156[83.84%]", "confidence": 0.952},
+                        ]}]}]],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
+                dry_run = learning_service.delete_recommended_experience_ocr_learning_cases(dry_run=True)
+                exists_after_dry_run = case_dir.exists()
+                deleted = learning_service.delete_recommended_experience_ocr_learning_cases()
+                exists_after_delete = case_dir.exists()
+
+        self.assertEqual([item["id"] for item in dry_run], ["exp-bar-mismatch"])
+        self.assertTrue(exists_after_dry_run)
+        self.assertEqual([item["id"] for item in deleted], ["exp-bar-mismatch"])
+        self.assertFalse(exists_after_delete)
+
+    def test_learning_service_auto_promote_skips_untrusted_cases(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        image = np.full((12, 80, 3), 255, dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pending_root = Path(temp_dir) / "pending"
+            bound_dir = pending_root / "exp-bound"
+            bound_dir.mkdir(parents=True)
+            cv2.imwrite(str(bound_dir / "roi.png"), image)
+            (bound_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "reading_key": "2043879[10.75%]",
+                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "candidates": []}]}]],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            empty_dir = pending_root / "exp-empty"
+            empty_dir.mkdir()
+            (empty_dir / "metadata.json").write_text(
+                json.dumps({"frames": [[{"file": "missing.png", "attempts": []}]]}),
+                encoding="utf-8",
+            )
+
+            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
+                result = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
+
+        skipped_ids = {item["id"] for item in result["skipped"]}
+        self.assertEqual(result["promotable"], [])
+        self.assertEqual(skipped_ids, {"exp-bound", "exp-empty"})
+
+    def test_learning_service_false_positive_cases_require_manual_review(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pending_root = Path(temp_dir) / "pending"
+            case_dir = pending_root / "exp-unit"
+            case_dir.mkdir(parents=True)
+            (case_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "id": "exp-unit",
+                        "created_at": "2026-05-13T18:00:00",
+                        "trigger": "tracker_rejected",
+                        "reading_key": "288900[27.08%]",
+                        "final_reading": {
+                            "success": True,
+                            "text": "288900[27.08%]",
+                            "confidence": 0.98,
+                            "current_exp": 288900,
+                            "percent": 27.08,
+                            "reason": "OK:Pixel",
+                        },
+                        "frames": [[{"file": "roi.png", "attempts": [{"bar_percent": 27.08, "candidates": [
+                            {"text": "288900[27.08%]", "confidence": 0.99},
+                            {"text": "283900[27.08%]", "confidence": 0.97},
+                        ]}]}]],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
+                cases = learning_service.list_experience_ocr_learning_cases()
+                result = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
+
+        self.assertEqual(cases[0]["review_action"], "manual_review")
+        self.assertFalse(cases[0]["auto_promote_promotable"])
+        self.assertEqual(result["promotable"], [])
+        self.assertEqual(result["skipped"][0]["reason"], "false-positive case 必須人工確認")
+
+    def test_learning_service_auto_promote_dry_run_has_no_side_effects(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        image = np.full((12, 80, 3), 255, dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pending_root = root / "pending"
+            case_dir = pending_root / "exp-unit"
+            case_dir.mkdir(parents=True)
+            cv2.imwrite(str(case_dir / "roi.png"), image)
+            (case_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "reading_key": "2043879[10.75%]",
+                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "candidates": [
+                            {"text": "2043879[10.75%]", "confidence": 0.980},
+                            {"text": "2043870[10.75%]", "confidence": 0.900},
+                        ]}]}]],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fixture_dir = root / "fixtures"
+            fixture_dir.mkdir()
+            manifest_path = fixture_dir / "manifest.json"
+            manifest_path.write_text('{"samples": []}\n', encoding="utf-8")
+
+            with (
+                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
+                patch.object(learning_service, "MANIFEST_PATH", manifest_path),
+                patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root),
+                patch.object(learning_service, "regen_experience_pixel_templates") as regen,
+            ):
+                result = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            pending_exists = (pending_root / "exp-unit").exists()
+            fixture_files = list(fixture_dir.glob("*.png"))
+
+        self.assertEqual(len(result["promotable"]), 1)
+        self.assertEqual(result["promotable"][0]["id"], "exp-unit")
+        self.assertEqual(result["promotable"][0]["text"], "2043879[10.75%]")
+        self.assertEqual(manifest["samples"], [])
+        self.assertTrue(pending_exists)
+        self.assertEqual(fixture_files, [])
+        regen.assert_not_called()
+
+    def test_learning_service_auto_promote_rolls_back_failed_pixel_validation(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        image = np.full((12, 80, 3), 255, dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pending_root = root / "pending"
+            case_dir = pending_root / "exp-unit"
+            case_dir.mkdir(parents=True)
+            cv2.imwrite(str(case_dir / "roi.png"), image)
+            (case_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "reading_key": "2043879[10.75%]",
+                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "candidates": [
+                            {"text": "2043879[10.75%]", "confidence": 0.980},
+                            {"text": "2043870[10.75%]", "confidence": 0.900},
+                        ]}]}]],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fixture_dir = root / "fixtures"
+            fixture_dir.mkdir()
+            manifest_path = fixture_dir / "manifest.json"
+            manifest_path.write_text('{"samples": []}\n', encoding="utf-8")
+
+            with (
+                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
+                patch.object(learning_service, "MANIFEST_PATH", manifest_path),
+                patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root),
+                patch.object(learning_service, "regen_experience_pixel_templates", return_value={"template_count": 1}) as regen,
+                patch.object(
+                    learning_service,
+                    "validate_promoted_experience_fixture",
+                    return_value={"success": False, "text": "2043870[10.75%]", "reason": "mismatch"},
+                ),
+            ):
+                result = learning_service.auto_promote_experience_ocr_learning_cases()
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            pending_exists = (pending_root / "exp-unit").exists()
+            fixture_files = list(fixture_dir.glob("*.png"))
+
+        self.assertEqual(result["promoted"], [])
+        self.assertEqual(result["rolled_back"][0]["id"], "exp-unit")
+        self.assertEqual(result["rolled_back"][0]["read_text"], "2043870[10.75%]")
+        self.assertEqual(manifest["samples"], [])
+        self.assertTrue(pending_exists)
+        self.assertEqual(fixture_files, [])
+        self.assertEqual(regen.call_count, 2)
 
     def test_learning_service_dedupes_and_deletes_pending_cases(self):
         from maple_star.services import experience_ocr_learning as learning_service
@@ -1767,6 +2258,7 @@ class ExperienceTests(unittest.TestCase):
             sample
             for sample in manifest.get("samples", [])
             if sample.get("id") not in pixel_primary_ids
+            and sample.get("paddle_fallback", True) is not False
         ]
         if not samples:
             self.skipTest("缺少 EXP OCR fixture samples")
@@ -1906,6 +2398,72 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(snapshot.xp_per_10m, 60000.0)
         self.assertAlmostEqual(snapshot.xp_per_hour, 360000.0)
         self.assertIsNotNone(snapshot.eta_seconds)
+
+    def test_tracker_reports_smoothed_rate_windows_for_early_continuous_gain(self):
+        tracker = ExperienceEfficiencyTracker()
+        for index in range(37):
+            captured_at = index * 5.0
+            current_exp = 100000 + index * 1000
+            tracker.add_reading(captured_at, current_exp, 10.0 + index * 0.02, confidence=0.98)
+            snapshot = tracker.snapshot(captured_at)
+
+        self.assertAlmostEqual(snapshot.xp_per_5m or 0.0, 60000.0, delta=1000.0)
+        self.assertAlmostEqual(snapshot.xp_per_10m or 0.0, 120000.0, delta=1000.0)
+        self.assertAlmostEqual(snapshot.xp_per_hour or 0.0, 720000.0, delta=1000.0)
+        self.assertIsNotNone(snapshot.eta_seconds)
+
+    def test_tracker_rate_windows_handle_bursty_gain_without_extreme_zeroing(self):
+        tracker = ExperienceEfficiencyTracker()
+        for index in range(25):
+            captured_at = index * 5.0
+            burst_index = index // 4
+            current_exp = 100000 + burst_index * 2000
+            tracker.add_reading(captured_at, current_exp, 10.0 + burst_index * 0.2, confidence=0.98)
+            snapshot = tracker.snapshot(captured_at)
+
+        rate_5m = (snapshot.xp_per_5m or 0.0) / 300.0
+        rate_10m = (snapshot.xp_per_10m or 0.0) / 600.0
+        rate_hour = (snapshot.xp_per_hour or 0.0) / 3600.0
+        self.assertGreater(rate_5m, 60.0)
+        self.assertLess(rate_5m, 140.0)
+        self.assertGreater(rate_10m, 60.0)
+        self.assertLess(rate_10m, 140.0)
+        self.assertGreater(rate_hour, 60.0)
+        self.assertLess(rate_hour, 140.0)
+
+    def test_tracker_rate_windows_decay_without_immediately_clearing_eta(self):
+        tracker = ExperienceEfficiencyTracker()
+        for index in range(13):
+            captured_at = index * 5.0
+            current_exp = 100000 + index * 1000
+            tracker.add_reading(captured_at, current_exp, 10.0 + index * 0.02, confidence=0.98)
+            tracker.snapshot(captured_at)
+        before = tracker.snapshot(60.0)
+
+        after = tracker.snapshot(180.0)
+
+        self.assertGreater(after.xp_per_5m or 0.0, 0.0)
+        self.assertLess(after.xp_per_5m or 0.0, before.xp_per_5m or 0.0)
+        self.assertGreater(after.xp_per_10m or 0.0, 0.0)
+        self.assertLess(after.xp_per_10m or 0.0, before.xp_per_10m or 0.0)
+        self.assertGreater(after.xp_per_hour or 0.0, 0.0)
+        self.assertLess(after.xp_per_hour or 0.0, before.xp_per_hour or 0.0)
+        self.assertIsNotNone(after.eta_seconds)
+        self.assertGreater(after.eta_seconds or 0.0, before.eta_seconds or 0.0)
+
+    def test_tracker_rejected_outlier_preserves_rate_windows(self):
+        tracker = ExperienceEfficiencyTracker()
+        tracker.add_reading(0.0, 100000, 10.0, confidence=0.98)
+        tracker.add_reading(60.0, 110000, 11.0, confidence=0.98)
+        before = tracker.snapshot(60.0)
+
+        self.assertFalse(tracker.add_reading(68.0, 18886119, 21.03, confidence=0.98))
+        after = tracker.snapshot(68.0)
+
+        self.assertEqual(after.xp_per_5m, before.xp_per_5m)
+        self.assertEqual(after.xp_per_10m, before.xp_per_10m)
+        self.assertEqual(after.xp_per_hour, before.xp_per_hour)
+        self.assertTrue(after.status.startswith("樣本拒絕"))
 
     def test_tracker_rejects_outlier_exp_and_keeps_last_statistics(self):
         tracker = ExperienceEfficiencyTracker()
@@ -2054,6 +2612,51 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(snapshot.current_percent, 88.73)
         self.assertTrue(snapshot.status.startswith("樣本拒絕：EXP 百分比回落"))
 
+    def test_tracker_rejects_live_percent_regression_without_rate_rebase(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 36800000, 96.70, confidence=0.98))
+        self.assertTrue(tracker.add_reading(10.0, 36884521, 96.99, confidence=0.98))
+        before = tracker.snapshot(10.0)
+
+        self.assertFalse(tracker.add_reading(39.828, 36984144, 96.25, confidence=0.98))
+        after = tracker.snapshot(39.828)
+
+        self.assertIsNone(tracker.pending_rebase)
+        self.assertEqual(after.current_exp, before.current_exp)
+        self.assertEqual(after.current_percent, before.current_percent)
+        self.assertEqual(after.xp_per_10m, before.xp_per_10m)
+        self.assertTrue(after.status.startswith("樣本拒絕：EXP 百分比回落"))
+
+    def test_tracker_rejects_repeated_live_wrong_percent_path(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 36800000, 96.70, confidence=0.98))
+        self.assertTrue(tracker.add_reading(10.0, 36884521, 96.99, confidence=0.98))
+
+        self.assertFalse(tracker.add_reading(20.0, 36902571, 96.03, confidence=0.98))
+        self.assertFalse(tracker.add_reading(25.0, 36973214, 96.22, confidence=0.98))
+        self.assertFalse(tracker.add_reading(30.0, 36984144, 96.25, confidence=0.98))
+        snapshot = tracker.snapshot(30.0)
+
+        self.assertIsNone(tracker.pending_rebase)
+        self.assertEqual(snapshot.current_exp, 36884521)
+        self.assertEqual(snapshot.current_percent, 96.99)
+        self.assertEqual(snapshot.sample_count, 2)
+
+    def test_tracker_short_interval_sample_updates_exp_without_rate_recalc(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 100000, 10.0, confidence=0.98))
+        self.assertTrue(tracker.add_reading(10.0, 110000, 11.0, confidence=0.98))
+        before = tracker.snapshot(10.0)
+
+        self.assertTrue(tracker.add_reading(10.5, 154000, 15.40, confidence=0.98))
+        after = tracker.snapshot(10.5)
+
+        self.assertEqual(after.current_exp, 154000)
+        self.assertEqual(after.current_percent, 15.40)
+        self.assertEqual(after.xp_per_5m, before.xp_per_5m)
+        self.assertEqual(after.xp_per_10m, before.xp_per_10m)
+        self.assertEqual(after.xp_per_hour, before.xp_per_hour)
+
     def test_tracker_rejects_small_digit_error_when_percent_does_not_move(self):
         tracker = ExperienceEfficiencyTracker()
         self.assertTrue(tracker.add_reading(0.0, 283744, 27.06))
@@ -2171,7 +2774,7 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(second.xp_per_10m, first.xp_per_10m)
         self.assertEqual(second.xp_per_hour, first.xp_per_hour)
 
-    def test_tracker_rates_converge_quickly_after_rate_change(self):
+    def test_tracker_rates_converge_after_rate_change_without_overshooting(self):
         tracker = ExperienceEfficiencyTracker()
         for index in range(5):
             captured_at = index * 60.0
@@ -2188,9 +2791,9 @@ class ExperienceTests(unittest.TestCase):
 
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
-        self.assertGreater(snapshot.xp_per_5m, 85000.0)
-        self.assertGreater(snapshot.xp_per_10m, 130000.0)
-        self.assertGreater(snapshot.xp_per_hour, 700000.0)
+        self.assertGreater(snapshot.xp_per_5m, 80000.0)
+        self.assertGreater(snapshot.xp_per_10m, 120000.0)
+        self.assertGreater(snapshot.xp_per_hour, 650000.0)
         self.assertLess(snapshot.xp_per_hour, 900000.0)
         self.assertEqual(format_rate_confidence(snapshot.rate_confidence), "高")
 

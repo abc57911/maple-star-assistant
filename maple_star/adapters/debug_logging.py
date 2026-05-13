@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import threading
@@ -12,29 +13,41 @@ from ..models.settings import app_base_dir
 
 
 DEBUG_LOG_PATH = app_base_dir() / "debug.log"
+EXPERIENCE_DEBUG_LOG_PATH = app_base_dir() / "experience_debug.log"
 
 _LOGGER_NAME = "maple_star.debug"
+_EXPERIENCE_LOGGER_NAME = "maple_star.experience_debug"
 _configured_path: Path | None = None
+_experience_configured_path: Path | None = None
 _original_excepthook = sys.excepthook
 _original_threading_excepthook = getattr(threading, "excepthook", None)
 
 
 def configure_debug_logging(path: Path | None = None, *, reset: bool = False) -> Path:
     log_path = path or DEBUG_LOG_PATH
-    _configure_logger(log_path, reset=reset)
+    _configure_logger(_LOGGER_NAME, log_path, reset=reset)
     sys.excepthook = _handle_unhandled_exception
     if hasattr(threading, "excepthook"):
         threading.excepthook = _handle_thread_exception
     return log_path
 
 
+def configure_experience_debug_logging(path: Path | None = None, *, reset: bool = False) -> Path:
+    log_path = path or EXPERIENCE_DEBUG_LOG_PATH
+    _configure_logger(_EXPERIENCE_LOGGER_NAME, log_path, reset=reset)
+    return log_path
+
+
 def close_debug_logging() -> None:
     global _configured_path
-    logger = logging.getLogger(_LOGGER_NAME)
-    for handler in list(logger.handlers):
-        logger.removeHandler(handler)
-        handler.close()
+    _close_logger(_LOGGER_NAME)
     _configured_path = None
+
+
+def close_experience_debug_logging() -> None:
+    global _experience_configured_path
+    _close_logger(_EXPERIENCE_LOGGER_NAME)
+    _experience_configured_path = None
 
 
 def install_tk_exception_logging(root: object) -> None:
@@ -59,6 +72,13 @@ def log_debug(message: str) -> None:
     if _configured_path is None:
         configure_debug_logging()
     logging.getLogger(_LOGGER_NAME).info(message)
+
+
+def log_experience_debug(event: dict[str, object]) -> None:
+    if _experience_configured_path is None:
+        configure_experience_debug_logging()
+    payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"), default=str)
+    logging.getLogger(_EXPERIENCE_LOGGER_NAME).info(payload)
 
 
 def write_debug_text(text: str) -> None:
@@ -89,11 +109,12 @@ def write_exception_text(
         pass
 
 
-def _configure_logger(log_path: Path, *, reset: bool = False) -> None:
-    global _configured_path
+def _configure_logger(logger_name: str, log_path: Path, *, reset: bool = False) -> None:
+    global _configured_path, _experience_configured_path
     resolved = log_path.resolve()
-    logger = logging.getLogger(_LOGGER_NAME)
-    if _configured_path == resolved and logger.handlers and not reset:
+    configured_path = _logger_configured_path(logger_name)
+    logger = logging.getLogger(logger_name)
+    if configured_path == resolved and logger.handlers and not reset:
         return
 
     resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -105,14 +126,32 @@ def _configure_logger(log_path: Path, *, reset: bool = False) -> None:
 
     handler = logging.FileHandler(resolved, mode="w" if reset else "a", encoding="utf-8")
     handler.setLevel(logging.DEBUG)
-    handler.setFormatter(
-        logging.Formatter(
+    if logger_name == _EXPERIENCE_LOGGER_NAME:
+        formatter = logging.Formatter("%(message)s")
+    else:
+        formatter = logging.Formatter(
             "%(asctime)s [%(levelname)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
-    )
+    handler.setFormatter(formatter)
     logger.addHandler(handler)
-    _configured_path = resolved
+    if logger_name == _EXPERIENCE_LOGGER_NAME:
+        _experience_configured_path = resolved
+    else:
+        _configured_path = resolved
+
+
+def _logger_configured_path(logger_name: str) -> Path | None:
+    if logger_name == _EXPERIENCE_LOGGER_NAME:
+        return _experience_configured_path
+    return _configured_path
+
+
+def _close_logger(logger_name: str) -> None:
+    logger = logging.getLogger(logger_name)
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
 
 
 def _handle_unhandled_exception(

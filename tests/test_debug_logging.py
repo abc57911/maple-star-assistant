@@ -3,7 +3,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from maple_star.debug_logging import close_debug_logging, configure_debug_logging, log_exception, write_debug_text
+from maple_star.debug_logging import (
+    close_debug_logging,
+    close_experience_debug_logging,
+    configure_debug_logging,
+    configure_experience_debug_logging,
+    log_exception,
+    log_experience_debug,
+    write_debug_text,
+)
 from maple_star.gui import GuiConsoleWriter
 
 
@@ -56,6 +64,36 @@ class DebugLoggingTests(unittest.TestCase):
             gui.append_console.assert_called_once_with("經驗效率 OCR 錯誤：sample\n")
             text = debug_log.read_text(encoding="utf-8")
             self.assertIn("經驗效率 OCR 錯誤：sample", text)
+
+    def test_log_experience_debug_writes_jsonl_to_experience_debug_log(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            debug_log = Path(temp_dir) / "experience_debug.log"
+
+            try:
+                configure_experience_debug_logging(debug_log, reset=True)
+                log_experience_debug({"event": "experience_ocr_job", "current_exp": 123456, "percent": 78.9})
+            finally:
+                close_experience_debug_logging()
+
+            text = debug_log.read_text(encoding="utf-8")
+            self.assertIn('"event":"experience_ocr_job"', text)
+            self.assertIn('"current_exp":123456', text)
+            self.assertIn('"percent":78.9', text)
+
+    def test_configure_experience_debug_logging_reset_clears_previous_log(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            debug_log = Path(temp_dir) / "experience_debug.log"
+            debug_log.write_text("old log\n", encoding="utf-8")
+
+            try:
+                configure_experience_debug_logging(debug_log, reset=True)
+                log_experience_debug({"event": "new"})
+            finally:
+                close_experience_debug_logging()
+
+            text = debug_log.read_text(encoding="utf-8")
+            self.assertNotIn("old log", text)
+            self.assertIn('"event":"new"', text)
 
 
 if __name__ == "__main__":
