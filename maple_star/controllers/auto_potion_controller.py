@@ -1300,6 +1300,18 @@ class AutoPotionController:
         previous_regions = dict(getattr(self, "bottom_bar_regions", {}))
         previous_track_regions = dict(getattr(self, "bottom_bar_track_regions", {}))
         previous_client_bounds = getattr(self, "bottom_bar_client_bounds", None)
+        if self._can_reuse_stale_bottom_bar_regions(
+            previous_regions,
+            previous_track_regions,
+            previous_client_bounds,
+        ):
+            self.bottom_bar_regions = previous_regions
+            self.bottom_bar_track_regions = previous_track_regions
+            self.bottom_bar_client_bounds = previous_client_bounds
+            self.bottom_bar_regions_at = time.monotonic()
+            self._set_gameplay_hud_active(True, now)
+            return True
+
         regions = self._find_bottom_bar_pair_regions(
             use_cache=False,
             allow_stale_on_failure=False,
@@ -2831,8 +2843,12 @@ class AutoPotionController:
             self._release_potion_key(bar_type)
             self._clear_potion_attempt_state(bar_type)
             return
-        if not continuous_enabled and abs(now - self._last_potion_drink_at(bar_type)) <= POTION_TIME_EPSILON_SECONDS:
-            return
+        if not continuous_enabled:
+            last_drink_at = self._last_potion_drink_at(bar_type)
+            if last_drink_at > -100.0:
+                elapsed_since_drink = now - last_drink_at
+                if elapsed_since_drink + POTION_TIME_EPSILON_SECONDS < self._potion_cooldown_seconds(bar_type):
+                    return
         if not self._is_target_window_active_before_send(label, now):
             if continuous_enabled:
                 self._release_potion_key(bar_type)

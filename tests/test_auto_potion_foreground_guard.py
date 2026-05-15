@@ -1079,6 +1079,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(controller.bottom_bar_track_regions, old_track_regions)
         self.assertEqual(controller.last_hp_drink_at, -999.0)
         self.assertEqual(controller.last_mp_drink_at, -999.0)
+        controller._find_bottom_bar_pair_regions.assert_not_called()
         controller._bar_percent_from_region_snapshot.assert_called_once_with(
             old_regions["mp"],
             "mp",
@@ -1303,9 +1304,9 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         self.assertFalse(controller.hp_potion_effect_attempts[0].pre_window_is_stable)
 
-    def test_hp_flat_repeat_can_drink_as_fast_as_new_samples_arrive(self):
+    def test_hp_flat_repeat_respects_configured_cooldown(self):
         controller = self.make_controller([True] * 6)
-        controller.settings.hp_cooldown_seconds = 1.0
+        controller.settings.hp_cooldown_seconds = 0.2
 
         with (
             patch("maple_star.controller.tap_hotkey") as tap_hotkey,
@@ -1313,22 +1314,22 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         ):
             controller._maybe_drink_hp(100.0, 25.0)
             controller._maybe_drink_hp(100.05, 25.0)
-            controller._maybe_drink_hp(100.1, 25.0)
+            controller._maybe_drink_hp(100.19, 25.0)
+            controller._maybe_drink_hp(100.2, 25.0)
 
-        self.assertEqual(tap_hotkey.call_count, 3)
+        self.assertEqual(tap_hotkey.call_count, 2)
         tap_hotkey.assert_called_with("Delete")
         self.assertEqual(
             controller.hp_potion_effect_attempts,
             [
                 PotionEffectAttempt(100.0, 25.0),
-                PotionEffectAttempt(100.05, 25.0),
-                PotionEffectAttempt(100.1, 25.0),
+                PotionEffectAttempt(100.2, 25.0),
             ],
         )
 
-    def test_mp_flat_repeat_can_drink_as_fast_as_new_samples_arrive(self):
+    def test_mp_flat_repeat_respects_configured_cooldown(self):
         controller = self.make_controller([True] * 6)
-        controller.settings.mp_cooldown_seconds = 1.0
+        controller.settings.mp_cooldown_seconds = 0.2
 
         with (
             patch("maple_star.controller.tap_hotkey") as tap_hotkey,
@@ -1336,22 +1337,22 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         ):
             controller._maybe_drink_mp(100.0, 25.0)
             controller._maybe_drink_mp(100.05, 25.0)
-            controller._maybe_drink_mp(100.1, 25.0)
+            controller._maybe_drink_mp(100.19, 25.0)
+            controller._maybe_drink_mp(100.2, 25.0)
 
-        self.assertEqual(tap_hotkey.call_count, 3)
+        self.assertEqual(tap_hotkey.call_count, 2)
         tap_hotkey.assert_called_with("End")
         self.assertEqual(
             controller.mp_potion_effect_attempts,
             [
                 PotionEffectAttempt(100.0, 25.0),
-                PotionEffectAttempt(100.05, 25.0),
-                PotionEffectAttempt(100.1, 25.0),
+                PotionEffectAttempt(100.2, 25.0),
             ],
         )
 
-    def test_hp_repeat_skips_duplicate_same_sample_tick_only(self):
+    def test_hp_repeat_skips_until_configured_cooldown_elapsed(self):
         controller = self.make_controller([True] * 4)
-        controller.settings.hp_cooldown_seconds = 1.0
+        controller.settings.hp_cooldown_seconds = 0.2
 
         with (
             patch("maple_star.controller.tap_hotkey") as tap_hotkey,
@@ -1360,13 +1361,14 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             controller._maybe_drink_hp(100.0, 25.0)
             controller._maybe_drink_hp(100.0, 25.0)
             controller._maybe_drink_hp(100.05, 25.0)
+            controller._maybe_drink_hp(100.2, 25.0)
 
         self.assertEqual(tap_hotkey.call_count, 2)
         self.assertEqual(
             controller.hp_potion_effect_attempts,
             [
                 PotionEffectAttempt(100.0, 25.0),
-                PotionEffectAttempt(100.05, 25.0),
+                PotionEffectAttempt(100.2, 25.0),
             ],
         )
 
