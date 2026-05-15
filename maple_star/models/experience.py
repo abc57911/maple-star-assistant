@@ -67,6 +67,7 @@ EXP_OCR_BINARY_LUMINANCE_MIN = 200.0
 EXP_OCR_BINARY_MAX_CHROMA = 65.0
 EXP_OCR_GREEN_BACKGROUND_MIN_GREEN = 120.0
 EXP_OCR_GREEN_BACKGROUND_MIN_CHROMA = 35.0
+EXP_OCR_GREEN_BACKGROUND_MIN_RATIO = 0.02
 EXP_OCR_GREEN_BACKGROUND_MIN_BAR_PERCENT = 20.0
 EXP_OCR_GREEN_BACKGROUND_MAX_BAR_PERCENT = 97.5
 EXP_OCR_GREEN_BACKGROUND_REPLACEMENT = 28
@@ -80,12 +81,24 @@ EXP_OCR_BAR_MIN_GREEN_SPAN_RATIO = 0.25
 EXP_OCR_BAR_MIN_PARTIAL_GREEN_SPAN_RATIO = 0.025
 EXP_OCR_BAR_LEFT_TOUCH_RATIO = 0.04
 EXP_OCR_BAR_PERCENT_TOLERANCE = 12.0
+EXP_OCR_TIGHT_RIGHT_ROI_MIN_BAR_CROP_LEFT_RATIO = 0.55
+EXP_OCR_TIGHT_RIGHT_ROI_MAX_WIDTH = 280
+EXP_OCR_TIGHT_RIGHT_ROI_MAX_HEIGHT = 48
 EXP_PIXEL_FONT_RECOGNIZER_MIN_CONFIDENCE = 0.95
 EXP_PIXEL_FONT_RECOGNIZER_BAR_PERCENT_TOLERANCE = 6.0
 EXP_PIXEL_FONT_RECOGNIZER_MAX_ATTEMPTS = 18
+EXP_PIXEL_FONT_CONFLICT_ACCEPT_CONFIDENCE = 0.978
+EXP_PIXEL_FONT_CONFLICT_ACCEPT_GAP = 0.0012
 EXP_PIXEL_FONT_TEMPLATE_SIZE = (48, 32)
 EXP_PIXEL_FONT_PERCENT_ALTERNATIVE_SCORE_WINDOW = 0.30
 EXP_PIXEL_FONT_PERCENT_MAX_ALTERNATIVES = 8
+EXP_PIXEL_FONT_PERCENT_TOPOLOGY_CONFIDENCE = 0.992
+EXP_PIXEL_FONT_PERCENT_TOPOLOGY_DEMOTED_CONFIDENCE = 0.936
+EXP_PIXEL_FONT_PERCENT_UNRESOLVED_AMBIGUITY_GAP = 0.026
+EXP_PIXEL_FONT_SPLIT_PERCENT_REPAIR_CONFIDENCE = 0.982
+EXP_PIXEL_FONT_SPLIT_PERCENT_MIN_EXP_CONFIDENCE = 0.84
+EXP_PIXEL_FONT_SPLIT_PERCENT_MIN_EXP_AVERAGE_CONFIDENCE = 0.88
+EXP_PIXEL_FONT_SPLIT_PERCENT_AMBIGUITY_GAP = 0.08
 EXP_PIXEL_FONT_EXP_ALTERNATIVE_SCORE_WINDOW = 0.18
 EXP_PIXEL_FONT_EXP_MAX_ALTERNATIVE_POSITIONS = 3
 EXP_PIXEL_FONT_EXP_MAX_ALTERNATIVE_CANDIDATES = 24
@@ -121,6 +134,7 @@ EXP_INITIAL_BASELINE_CONFIRM_SECONDS = 20.0
 EXP_INITIAL_BASELINE_CONFIRM_MAX_PERCENT_DELTA = 0.30
 EXP_INITIAL_BASELINE_CONFIRM_MIN_ABSOLUTE_DELTA = 8000
 EXP_INITIAL_BASELINE_CONFIRM_MAX_LEVEL_RATIO = 0.003
+EXP_INITIAL_BASELINE_MAX_CANDIDATES = 5
 EXP_OUTLIER_REPAIR_MAX_REMOVED_SAMPLES = 3
 EXP_OUTLIER_REPAIR_MAX_AGE_SECONDS = 60.0
 EXP_OUTLIER_REPAIR_REASON_PREFIX = "離群修正候選"
@@ -130,6 +144,8 @@ EXP_LONG_RATE_BLEND_FULL_SECONDS = 3600.0
 PADDLEOCR_LANGUAGE = "chinese_cht"
 PADDLEOCR_DETECTION_MODEL_NAME = "PP-OCRv5_mobile_det"
 PADDLEOCR_RECOGNITION_MODEL_NAME = "PP-OCRv5_mobile_rec"
+EXP_STAT_WINDOW_OCR_ACCEPT_CONFIDENCE = 0.80
+EXP_STAT_WINDOW_OCR_PREPARED_SCALE = 3
 PADDLEOCR_ENV_DEFAULTS = {
     "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
     "GLOG_minloglevel": "2",
@@ -343,6 +359,7 @@ class ExperienceEfficiencyTracker:
         self.last_snapshot: ExperienceSnapshot | None = None
         self.last_rate_sample_at: float | None = None
         self.pending_initial_baseline: PendingExperienceBaseline | None = None
+        self.pending_initial_baselines: list[PendingExperienceBaseline] = []
         self.started_at: float | None = None
         self.pending_rebase: PendingExperienceRebase | None = None
         self.ocr_attempt_count = 0
@@ -406,6 +423,7 @@ class ExperienceEfficiencyTracker:
             self.last_current_exp = current_exp
             self.started_at = now
             self.pending_initial_baseline = None
+            self.pending_initial_baselines = []
             self.samples.append(ExperienceSample(now, current_exp, self.total_gained_exp, percent, confidence))
             self._update_level_total_estimate(current_exp, percent, force=True)
             self.last_status = "校準 EXP 基準"
@@ -627,6 +645,7 @@ class ExperienceEfficiencyTracker:
         self.last_rate_sample_at = None
         self.started_at = now
         self.pending_initial_baseline = None
+        self.pending_initial_baselines = []
         self.pending_rebase = None
         self._update_level_total_estimate(current_exp, percent, force=True)
         self.last_status = status
@@ -666,10 +685,24 @@ class ExperienceEfficiencyTracker:
         percent: float | None,
         confidence: float | None,
     ) -> bool:
-        pending = self.pending_initial_baseline
-        if pending is not None and self._pending_initial_baseline_matches(pending, now, current_exp, percent):
-            return True
-        self.pending_initial_baseline = PendingExperienceBaseline(now, current_exp, percent, confidence)
+        pending_candidates = [
+            pending
+            for pending in getattr(self, "pending_initial_baselines", [])
+            if now - pending.captured_at <= EXP_INITIAL_BASELINE_CONFIRM_SECONDS
+        ]
+        legacy_pending = self.pending_initial_baseline
+        if legacy_pending is not None and legacy_pending not in pending_candidates:
+            pending_candidates.append(legacy_pending)
+        for pending in pending_candidates:
+            if self._pending_initial_baseline_matches(pending, now, current_exp, percent):
+                self.pending_initial_baselines = []
+                self.pending_initial_baseline = None
+                return True
+
+        next_pending = PendingExperienceBaseline(now, current_exp, percent, confidence)
+        pending_candidates.append(next_pending)
+        self.pending_initial_baselines = pending_candidates[-EXP_INITIAL_BASELINE_MAX_CANDIDATES:]
+        self.pending_initial_baseline = next_pending
         self.last_status = "等待基準二次確認"
         return False
 
@@ -993,11 +1026,40 @@ class ExperienceEfficiencyTracker:
             return None
 
         latest = self.samples[-1] if self.samples else None
+        if self._can_accept_first_percent_after_exp_only_baseline(latest, current_exp, percent, delta):
+            return None
         elapsed = 0.0 if latest is None else max(0.0, now - latest.captured_at)
         max_delta = self._max_reasonable_delta(elapsed, percent)
         if delta > max_delta:
             return f"EXP 跳動過大：+{delta:,}"
         return None
+
+    def _can_accept_first_percent_after_exp_only_baseline(
+        self,
+        latest: ExperienceSample | None,
+        current_exp: int,
+        percent: float | None,
+        delta: int,
+    ) -> bool:
+        if (
+            latest is None
+            or len(self.samples) != 1
+            or self.total_gained_exp != 0
+            or latest.percent is not None
+            or percent is None
+            or delta < 0
+        ):
+            return False
+        tolerance = self._pending_initial_baseline_exp_tolerance(
+            PendingExperienceBaseline(
+                latest.captured_at,
+                latest.current_exp,
+                latest.percent,
+                latest.confidence,
+            ),
+            percent,
+        )
+        return delta <= tolerance
 
     def _correct_green_bar_three_as_eight_ocr(self, current_exp: int, percent: float | None) -> int | None:
         latest = self.samples[-1] if self.samples else None
@@ -1399,7 +1461,6 @@ class PaddleExperienceTextReader:
             for images in materialized_frames
         ]
         reading = self._select_burst_reading(frame_readings, continuity_hint=continuity_hint)
-        self._attach_burst_learning_case(materialized_frames, reading)
         log_debug(
             "EXP OCR timing burst "
             f"frames={len(materialized_frames)} rois={sum(len(images) for images in materialized_frames)} "
@@ -1441,9 +1502,15 @@ class PaddleExperienceTextReader:
             )
             return primary
 
+        primary_image = _coerce_experience_ocr_image(materialized_images[0])
+        secondary_images = [
+            image
+            for image in materialized_images[1:]
+            if _experience_should_read_secondary_roi(primary_image, primary, _coerce_experience_ocr_image(image))
+        ]
         readings.extend(
             self.read(image, record_learning=record_learning, continuity_hint=continuity_hint)
-            for image in materialized_images[1:]
+            for image in secondary_images
         )
         if not readings:
             return ExperienceTextReading(reason="EXP burst frame 未取得影像")
@@ -1657,6 +1724,15 @@ class PaddleExperienceTextReader:
                 f"result={_experience_timing_result(pixel_reading)}"
             )
 
+        if _experience_tight_right_roi_should_skip_paddle(ocr_image, pixel_reading):
+            log_debug(
+                "EXP OCR timing read "
+                f"source={ocr_image.source_id or 'roi'} shape={_experience_timing_shape(image_array)} "
+                f"bar_ms={bar_ms:.1f} pixel_ms={pixel_ms:.1f} paddle_ms=0.0 total_ms={_elapsed_ms(started_at):.1f} "
+                f"result={_experience_timing_result(pixel_reading)} skipped_paddle=tight_right_roi"
+            )
+            return pixel_reading
+
         paddle_started_at = time.perf_counter()
         paddle_reading = self._read_with_paddle(ocr_image, bar_percent=bar_percent)
         paddle_reading = _with_experience_reading_metadata(paddle_reading, bar_percent=bar_percent, source="paddle")
@@ -1673,16 +1749,6 @@ class PaddleExperienceTextReader:
             return paddle_reading
 
         final_reading = paddle_reading if paddle_reading.confidence >= pixel_reading.confidence else pixel_reading
-        if record_learning:
-            case_id = save_experience_ocr_learning_case(
-                [[ocr_image]],
-                trigger=_experience_ocr_learning_trigger_for_reading(final_reading),
-                pixel_reading=pixel_reading,
-                paddle_reading=paddle_reading,
-                final_reading=final_reading,
-                bar_percent=bar_percent,
-            )
-            final_reading.learning_case_id = case_id
         log_debug(
             "EXP OCR timing read "
             f"source={ocr_image.source_id or 'roi'} shape={_experience_timing_shape(image_array)} "
@@ -1691,26 +1757,56 @@ class PaddleExperienceTextReader:
         )
         return final_reading
 
-    def _attach_burst_learning_case(
-        self,
-        image_frames: list[list[ExperienceOcrImage]],
-        reading: ExperienceTextReading,
-    ) -> None:
-        if reading.learning_case_id:
-            return
-        if reading.success:
-            return
-        if not image_frames:
-            return
+    def read_stat_window_exp(self, image: np.ndarray | ExperienceOcrImage) -> ExperienceTextReading:
+        started_at = time.perf_counter()
+        ocr_image = _coerce_experience_ocr_image(image)
+        ensure_started_at = time.perf_counter()
+        if not self._ensure_ocr():
+            log_debug(
+                "EXP stat baseline OCR timing "
+                f"source={ocr_image.source_id or 'stat_window'} ensure_ms={_elapsed_ms(ensure_started_at):.1f} "
+                f"total_ms={_elapsed_ms(started_at):.1f} result=unavailable "
+                f"reason={self.unavailable_reason or '--'}"
+            )
+            return ExperienceTextReading(
+                reason=self.unavailable_reason or "PaddleOCR 尚未初始化",
+                source="stat_window",
+            )
+        ensure_ms = _elapsed_ms(ensure_started_at)
 
-        case_id = save_experience_ocr_learning_case(
-            image_frames,
-            trigger=_experience_ocr_learning_trigger_for_reading(reading),
-            pixel_reading=None,
-            paddle_reading=None,
-            final_reading=reading,
+        best_reading: ExperienceTextReading | None = None
+        predict_count = 0
+        predict_ms = 0.0
+        variants = prepare_stat_window_exp_ocr_images(ocr_image.image)
+        for variant in variants:
+            try:
+                predict_started_at = time.perf_counter()
+                result = self._predict(variant)
+                predict_ms += _elapsed_ms(predict_started_at)
+                predict_count += 1
+            except Exception as exc:
+                reading = ExperienceTextReading(reason=f"能力值 EXP OCR 辨識失敗：{exc}", source="stat_window")
+            else:
+                reading = reading_from_stat_window_paddle_result(result)
+            if reading.success:
+                log_debug(
+                    "EXP stat baseline OCR timing "
+                    f"source={ocr_image.source_id or 'stat_window'} variants={len(variants)} "
+                    f"ensure_ms={ensure_ms:.1f} predict_ms={predict_ms:.1f} predict_count={predict_count} "
+                    f"total_ms={_elapsed_ms(started_at):.1f} result={_experience_timing_result(reading)}"
+                )
+                return reading
+            if best_reading is None or reading.confidence > best_reading.confidence:
+                best_reading = reading
+
+        final = best_reading or ExperienceTextReading(reason="能力值 EXP OCR 未取得文字", source="stat_window")
+        log_debug(
+            "EXP stat baseline OCR timing "
+            f"source={ocr_image.source_id or 'stat_window'} variants={len(variants)} "
+            f"ensure_ms={ensure_ms:.1f} predict_ms={predict_ms:.1f} predict_count={predict_count} "
+            f"total_ms={_elapsed_ms(started_at):.1f} result={_experience_timing_result(final)}"
         )
-        reading.learning_case_id = case_id
+        return final
 
     def _read_with_paddle(
         self,
@@ -1839,6 +1935,30 @@ class PaddleExperienceTextReader:
         return self.ocr.ocr(image, cls=False)
 
 
+_EXPERIENCE_WORKER_READER: PaddleExperienceTextReader | None = None
+
+
+def _experience_worker_reader() -> PaddleExperienceTextReader:
+    global _EXPERIENCE_WORKER_READER
+    if _EXPERIENCE_WORKER_READER is None:
+        _EXPERIENCE_WORKER_READER = PaddleExperienceTextReader()
+    return _EXPERIENCE_WORKER_READER
+
+
+def read_experience_burst_frames_in_worker(
+    image_frames: Iterable[Iterable[np.ndarray | ExperienceOcrImage]],
+    continuity_hint: ExperienceOcrContinuityHint | None = None,
+) -> ExperienceTextReading:
+    return _experience_worker_reader().read_burst_frames(
+        image_frames,
+        continuity_hint=continuity_hint,
+    )
+
+
+def read_stat_window_exp_in_worker(image: np.ndarray | ExperienceOcrImage) -> ExperienceTextReading:
+    return _experience_worker_reader().read_stat_window_exp(image)
+
+
 def prepare_experience_ocr_image(image: np.ndarray) -> np.ndarray:
     bgr = _suppress_experience_green_bar_background(image[:, :, :3])
     height, width = bgr.shape[:2]
@@ -1933,6 +2053,41 @@ def prepare_experience_retry_ocr_images(image: np.ndarray) -> list[np.ndarray]:
     return unique
 
 
+def prepare_stat_window_exp_ocr_images(image: np.ndarray) -> list[np.ndarray]:
+    bgr = image[:, :, :3] if image.ndim >= 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if bgr.size == 0:
+        return [bgr]
+    padding = max(4, round(max(1, bgr.shape[0]) * 0.20))
+    padded = cv2.copyMakeBorder(
+        bgr,
+        padding,
+        padding,
+        padding,
+        padding,
+        borderType=cv2.BORDER_REPLICATE,
+    )
+    scaled = cv2.resize(
+        padded,
+        (
+            max(1, padded.shape[1] * EXP_STAT_WINDOW_OCR_PREPARED_SCALE),
+            max(1, padded.shape[0] * EXP_STAT_WINDOW_OCR_PREPARED_SCALE),
+        ),
+        interpolation=cv2.INTER_CUBIC,
+    )
+    contrast = cv2.convertScaleAbs(scaled, alpha=1.45, beta=4)
+    sharpened = _sharpen_experience_text_image(contrast)
+    variants = [bgr, scaled, contrast, sharpened]
+    unique: list[np.ndarray] = []
+    seen: set[tuple[tuple[int, ...], bytes]] = set()
+    for variant in variants:
+        key = (tuple(int(part) for part in variant.shape), variant.tobytes())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(variant)
+    return unique
+
+
 def _contrast_experience_text_image(image: np.ndarray) -> np.ndarray:
     return cv2.convertScaleAbs(image[:, :, :3], alpha=1.35, beta=8)
 
@@ -1942,31 +2097,76 @@ def _sharpen_experience_text_image(image: np.ndarray) -> np.ndarray:
     return cv2.filter2D(image[:, :, :3], -1, kernel)
 
 
-def _suppress_experience_green_bar_background(image: np.ndarray) -> np.ndarray:
-    bgr = image[:, :, :3].copy()
+def _experience_green_background_mask(image: np.ndarray) -> np.ndarray:
+    bgr = image[:, :, :3]
     if bgr.size == 0:
-        return bgr
-    bar_percent = estimate_experience_bar_percent(bgr)
-    if (
-        bar_percent is None
-        or bar_percent < EXP_OCR_GREEN_BACKGROUND_MIN_BAR_PERCENT
-        or bar_percent > EXP_OCR_GREEN_BACKGROUND_MAX_BAR_PERCENT
-    ):
-        return bgr
+        return np.zeros(bgr.shape[:2], dtype=bool)
     bgr_f = bgr.astype(np.float32)
     blue = bgr_f[:, :, 0]
     green = bgr_f[:, :, 1]
     red = bgr_f[:, :, 2]
     chroma = np.maximum.reduce([red, green, blue]) - np.minimum.reduce([red, green, blue])
-    green_background = (
+    return (
         (green >= EXP_OCR_GREEN_BACKGROUND_MIN_GREEN)
         & (chroma >= EXP_OCR_GREEN_BACKGROUND_MIN_CHROMA)
         & (green >= red + 8.0)
         & (green >= blue + 25.0)
     )
+
+
+def _experience_green_background_ratio(image: np.ndarray) -> float:
+    mask = _experience_green_background_mask(image)
+    return float(mask.mean()) if mask.size else 0.0
+
+
+def _experience_roi_bar_overlap_detected(image: np.ndarray) -> bool:
+    green_mask = _experience_green_background_mask(image)
+    return bool(green_mask.any() and _experience_green_background_is_relevant(image, green_mask))
+
+
+def _experience_green_background_is_relevant(image: np.ndarray, green_mask: np.ndarray) -> bool:
+    green_ratio = float(green_mask.mean()) if green_mask.size else 0.0
+    bar_percent = estimate_experience_bar_percent(image[:, :, :3])
+    if bar_percent is None:
+        return green_ratio >= EXP_OCR_GREEN_BACKGROUND_MIN_RATIO
+    return (
+        EXP_OCR_GREEN_BACKGROUND_MIN_BAR_PERCENT
+        <= bar_percent
+        <= EXP_OCR_GREEN_BACKGROUND_MAX_BAR_PERCENT
+    )
+
+
+def _suppress_experience_green_bar_background(image: np.ndarray) -> np.ndarray:
+    bgr = image[:, :, :3].copy()
+    if bgr.size == 0:
+        return bgr
+    green_background = _experience_green_background_mask(bgr)
+    if not _experience_green_background_is_relevant(bgr, green_background):
+        return bgr
     if green_background.any():
         bgr[green_background] = EXP_OCR_GREEN_BACKGROUND_REPLACEMENT
     return bgr
+
+
+def _erase_experience_green_bar_to_text_image(image: np.ndarray) -> np.ndarray | None:
+    bgr = image[:, :, :3]
+    if bgr.size == 0:
+        return None
+    green_background = _experience_green_background_mask(bgr)
+    if not green_background.any() or not _experience_green_background_is_relevant(bgr, green_background):
+        return None
+
+    text_mask = _clean_experience_text_mask(_experience_binary_text_mask(bgr))
+    erase_mask = green_background
+    if erase_mask.any():
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        erase_mask = cv2.dilate(erase_mask.astype(np.uint8), kernel, iterations=1).astype(bool)
+    erase_mask &= ~text_mask
+
+    prepared = np.zeros(bgr.shape, dtype=np.uint8)
+    prepared[text_mask] = 255
+    prepared[erase_mask] = 0
+    return prepared
 
 
 def estimate_experience_bar_percent(
@@ -1978,6 +2178,8 @@ def estimate_experience_bar_percent(
     if bgr.size == 0:
         return None
     bar_crop_left_ratio = max(0.0, min(0.98, float(bar_crop_left_ratio)))
+    if _experience_is_tight_right_text_roi(image, bar_crop_left_ratio):
+        return None
     blue = bgr[:, :, 0]
     green = bgr[:, :, 1]
     red = bgr[:, :, 2]
@@ -2121,7 +2323,7 @@ def _read_experience_pixel_font_adaptive(
         )
         return reading
 
-    for attempt_index, attempt in enumerate(_experience_pixel_font_attempts(ocr_image)):
+    for attempt_index, attempt in enumerate(_experience_pixel_font_runtime_attempts(ocr_image)):
         attempt_count += 1
         attempt_bar_percent = estimate_experience_bar_percent(
             attempt.image,
@@ -2150,6 +2352,7 @@ def _read_experience_pixel_font_adaptive(
         selected = _select_pixel_font_success(successes, effective_bar_percent, continuity_hint=continuity_hint)
         if selected is not None and selected.success:
             return finish(selected)
+        time.sleep(0)
 
     selected = _select_pixel_font_success(successes, bar_percent, continuity_hint=continuity_hint)
     return finish(selected if selected is not None else best_failure)
@@ -2163,6 +2366,9 @@ def _experience_pixel_font_attempts(ocr_image: ExperienceOcrImage) -> list[Exper
         if variant.size:
             variants.append((name, offset, variant))
 
+    green_bar_erased = _erase_experience_green_bar_to_text_image(image[:, :, :3])
+    if green_bar_erased is not None:
+        add_variant("green_bar_erased_text", (0, 0, 0, 0), green_bar_erased)
     add_variant("raw", (0, 0, 0, 0), image)
     add_variant("green_suppressed", (0, 0, 0, 0), _suppress_experience_green_bar_background(image[:, :, :3]))
     add_variant("low_threshold_mask", (0, 0, 0, 0), _experience_pixel_font_mask_source_image(image, luminance_min=170.0, close_iterations=0))
@@ -2202,6 +2408,49 @@ def _experience_pixel_font_attempts(ocr_image: ExperienceOcrImage) -> list[Exper
         if len(unique) >= EXP_PIXEL_FONT_RECOGNIZER_MAX_ATTEMPTS:
             break
     return unique
+
+
+def _experience_pixel_font_runtime_attempts(ocr_image: ExperienceOcrImage) -> list[ExperiencePixelFontAttempt]:
+    attempts = _experience_pixel_font_attempts(ocr_image)
+    if not _experience_is_tight_right_text_roi(ocr_image.image, ocr_image.bar_crop_left_ratio):
+        return attempts
+
+    preferred_order = (
+        "green_bar_erased_text",
+        "raw",
+        "green_suppressed",
+        "low_threshold_closed",
+        "shift_left_2",
+        "shift_right_2",
+        "tight_right_4",
+    )
+    preferred: list[ExperiencePixelFontAttempt] = []
+    for name in preferred_order:
+        preferred.extend(attempt for attempt in attempts if attempt.preprocess_variant == name)
+    return preferred or attempts[:6]
+
+
+def _experience_tight_right_roi_should_skip_paddle(
+    ocr_image: ExperienceOcrImage,
+    pixel_reading: ExperienceTextReading,
+) -> bool:
+    if pixel_reading.success:
+        return False
+    if not _experience_is_tight_right_text_roi(ocr_image.image, ocr_image.bar_crop_left_ratio):
+        return False
+    return False
+
+
+def _experience_is_tight_right_text_roi(
+    image: np.ndarray,
+    bar_crop_left_ratio: float,
+) -> bool:
+    height, width = image.shape[:2]
+    return (
+        bar_crop_left_ratio >= EXP_OCR_TIGHT_RIGHT_ROI_MIN_BAR_CROP_LEFT_RATIO
+        and width <= EXP_OCR_TIGHT_RIGHT_ROI_MAX_WIDTH
+        and height <= EXP_OCR_TIGHT_RIGHT_ROI_MAX_HEIGHT
+    )
 
 
 def _experience_pixel_font_mask_source_image(
@@ -2332,7 +2581,13 @@ def _select_pixel_font_success(
         ranked = sorted(successes, key=lambda item: item[0], reverse=True)
         best_rank, best = ranked[0]
         second_rank = ranked[1][0] if len(ranked) > 1 else (0.0, 0.0, 0.0, 0)
-        if best_rank[0] >= 0.98 and best_rank[0] - second_rank[0] >= 0.004:
+        if (
+            (best_rank[0] >= 0.98 and best_rank[0] - second_rank[0] >= 0.004)
+            or (
+                best_rank[0] >= EXP_PIXEL_FONT_CONFLICT_ACCEPT_CONFIDENCE
+                and best_rank[0] - second_rank[0] >= EXP_PIXEL_FONT_CONFLICT_ACCEPT_GAP
+            )
+        ):
             return best
         return ExperienceTextReading(text=best.text, confidence=best.confidence, reason="EXP OCR 模糊數字候選不一致")
 
@@ -2458,8 +2713,9 @@ def _decode_experience_pixel_font_text_candidates(
     candidates = _structured_pixel_font_text_candidates(alternatives, segments, bar_percent)
     characters = [item[0][0] for item in alternatives]
     confidences = [item[0][1] for item in alternatives]
-    candidates.append(("".join(characters), float(np.mean(confidences))))
-    candidates.extend(_bar_guided_pixel_font_percent_candidates(characters, alternatives, segments, bar_percent))
+    raw_text = "".join(characters)
+    if not candidates or any(text == raw_text for text, _confidence in candidates):
+        candidates.append((raw_text, float(np.mean(confidences))))
 
     unique: dict[str, float] = {}
     for text, confidence in candidates:
@@ -2483,11 +2739,11 @@ def _structured_pixel_font_text_candidates(
         layout = _pixel_font_percent_layout(open_index, integer_digit_count)
         if layout is None:
             continue
-        base = _pixel_font_candidate_from_layout(alternatives, layout, open_index, integer_digit_count)
+        base = _pixel_font_candidate_from_layout(alternatives, segments, layout, open_index, integer_digit_count)
         if base is not None:
             results.append(base)
             results.extend(_pixel_font_exp_alternative_candidates(alternatives, segments, layout, open_index))
-            results.extend(_bar_guided_pixel_font_percent_candidates(list(base[0]), alternatives, segments, bar_percent))
+    results.extend(_split_percent_marker_pixel_font_candidates(alternatives, segments))
     return results
 
 
@@ -2502,6 +2758,7 @@ def _pixel_font_percent_layout(open_index: int, integer_digit_count: int) -> dic
 
 def _pixel_font_candidate_from_layout(
     alternatives: list[list[tuple[str, float]]],
+    segments: list[np.ndarray],
     layout: dict[str, int],
     open_index: int,
     integer_digit_count: int,
@@ -2513,6 +2770,8 @@ def _pixel_font_candidate_from_layout(
         glyph_alternatives = alternatives[index]
         if role == "digit":
             return _first_character_alternative(glyph_alternatives, str.isdigit)
+        if role == "percent_digit":
+            return _first_pixel_font_percent_digit_alternative(glyph_alternatives, segments[index])
         return _first_character_alternative(glyph_alternatives, lambda character: character == role)
 
     for index in range(0, open_index):
@@ -2537,7 +2796,7 @@ def _pixel_font_candidate_from_layout(
         return None
 
     for index in range(open_index, len(alternatives)):
-        role = role_by_index.get(index, "digit")
+        role = role_by_index.get(index, "percent_digit")
         selected = select(index, role)
         if selected is None:
             return None
@@ -2548,6 +2807,140 @@ def _pixel_font_candidate_from_layout(
     if re.fullmatch(r"[0-9]+\[(?:[0-9]{1,2}|100)\.[0-9]{2}%\]", text) is None:
         return None
     return text, float(np.mean(selected_confidences))
+
+
+def _split_percent_marker_pixel_font_candidates(
+    alternatives: list[list[tuple[str, float]]],
+    segments: list[np.ndarray],
+) -> list[tuple[str, float]]:
+    if len(alternatives) != len(segments) or len(alternatives) < 10:
+        return []
+
+    results: list[tuple[str, float]] = []
+    close_index = len(alternatives) - 1
+    close = _first_character_alternative(alternatives[close_index], lambda character: character == "]")
+    if close is None or close[1] < 0.70:
+        return []
+
+    for open_index, glyph_alternatives in enumerate(alternatives[:-1]):
+        opening = _first_character_alternative(glyph_alternatives, lambda character: character == "[")
+        if opening is None or opening[1] < 0.80:
+            continue
+        exp_digits = _pixel_font_selected_digit_prefix(alternatives, segments, open_index)
+        if exp_digits is None:
+            continue
+        exp_text, exp_confidences = exp_digits
+        for integer_digit_count in (2, 1, 3):
+            dot_index = open_index + 1 + integer_digit_count
+            decimal_start = dot_index + 1
+            decimal_end = decimal_start + 2
+            suffix_start = decimal_end
+            if dot_index >= close_index or decimal_end > close_index:
+                continue
+            if suffix_start >= close_index:
+                continue
+            if close_index - suffix_start not in (2, 3, 4):
+                continue
+            dot = _first_character_alternative(alternatives[dot_index], lambda character: character == ".")
+            if dot is None or dot[1] < 0.70:
+                continue
+            percent_digits: list[str] = []
+            percent_confidences: list[float] = []
+            valid_digits = True
+            for index in range(open_index + 1, decimal_end):
+                if index == dot_index:
+                    continue
+                selected = _split_percent_digit_alternative(alternatives[index], segments[index])
+                if selected is None:
+                    valid_digits = False
+                    break
+                percent_digits.append(selected[0])
+                percent_confidences.append(selected[1])
+            if not valid_digits or len(percent_digits) != integer_digit_count + 2:
+                continue
+            if not _split_percent_marker_segments_look_valid(segments[suffix_start:close_index], alternatives[suffix_start:close_index]):
+                continue
+            percent_integer = "".join(percent_digits[:integer_digit_count])
+            percent_decimals = "".join(percent_digits[integer_digit_count:])
+            text = f"{exp_text}[{percent_integer}.{percent_decimals}%]"
+            if re.fullmatch(r"[0-9]+\[(?:[0-9]{1,2}|100)\.[0-9]{2}%\]", text) is None:
+                continue
+            confidence = max(
+                EXP_PIXEL_FONT_SPLIT_PERCENT_REPAIR_CONFIDENCE,
+                float(np.mean(exp_confidences + percent_confidences + [opening[1], dot[1], close[1]])),
+            )
+            results.append((text, min(1.0, confidence)))
+    return results
+
+
+def _split_percent_digit_alternative(
+    alternatives: list[tuple[str, float]],
+    glyph_mask: np.ndarray,
+) -> tuple[str, float] | None:
+    digit_alternatives = _pixel_font_digit_alternatives(alternatives, decimal_digit=True, glyph_mask=glyph_mask)
+    if _split_percent_digit_has_unresolved_zero_eight_three_ambiguity(digit_alternatives):
+        return None
+    return _first_character_alternative(digit_alternatives, str.isdigit)
+
+
+def _split_percent_digit_has_unresolved_zero_eight_three_ambiguity(
+    digit_alternatives: list[tuple[str, float]],
+) -> bool:
+    if not digit_alternatives or digit_alternatives[0][0] not in {"0", "8", "3"}:
+        return False
+    scores = {character: confidence for character, confidence in digit_alternatives if character in {"0", "8", "3"}}
+    if len(scores) < 2:
+        return False
+    top_character, top_confidence = max(scores.items(), key=lambda item: item[1])
+    return any(
+        character != top_character and top_confidence - confidence < EXP_PIXEL_FONT_SPLIT_PERCENT_AMBIGUITY_GAP
+        for character, confidence in scores.items()
+    )
+
+
+def _pixel_font_selected_digit_prefix(
+    alternatives: list[list[tuple[str, float]]],
+    segments: list[np.ndarray],
+    end_index: int,
+) -> tuple[str, list[float]] | None:
+    if end_index < 5:
+        return None
+    digits: list[str] = []
+    confidences: list[float] = []
+    for index in range(end_index):
+        selected = _first_character_alternative(
+            _pixel_font_digit_alternatives(alternatives[index], decimal_digit=False, glyph_mask=segments[index]),
+            str.isdigit,
+        )
+        if selected is None or selected[1] < EXP_PIXEL_FONT_SPLIT_PERCENT_MIN_EXP_CONFIDENCE:
+            return None
+        digits.append(selected[0])
+        confidences.append(selected[1])
+    if float(np.mean(confidences)) < EXP_PIXEL_FONT_SPLIT_PERCENT_MIN_EXP_AVERAGE_CONFIDENCE:
+        return None
+    return "".join(digits), confidences
+
+
+def _split_percent_marker_segments_look_valid(
+    segments: list[np.ndarray],
+    alternatives: list[list[tuple[str, float]]],
+) -> bool:
+    if len(segments) not in (2, 3, 4):
+        return False
+    widths = [segment.shape[1] for segment in segments if segment.ndim >= 2]
+    heights = [segment.shape[0] for segment in segments if segment.ndim >= 2]
+    if len(widths) != len(segments) or not heights:
+        return False
+    max_height = max(heights)
+    if any(width <= 0 or width > max(8, round(max_height * 0.45)) for width in widths):
+        return False
+    if sum(widths) < max(10, round(max_height * 0.35)):
+        return False
+    for glyph_alternatives in alternatives:
+        top = glyph_alternatives[0][0] if glyph_alternatives else ""
+        if top in {"[", "]"}:
+            return False
+    return True
 
 
 def _pixel_font_exp_alternative_candidates(
@@ -2588,10 +2981,13 @@ def _pixel_font_exp_alternative_candidates(
     }
     for index in range(open_index, len(alternatives)):
         role = role_by_index.get(index, "digit")
-        selected = _first_character_alternative(
-            alternatives[index],
-            str.isdigit if role == "digit" else lambda character, expected=role: character == expected,
-        )
+        if role == "digit":
+            selected = _first_pixel_font_percent_digit_alternative(alternatives[index], segments[index])
+        else:
+            selected = _first_character_alternative(
+                alternatives[index],
+                lambda character, expected=role: character == expected,
+            )
         if selected is None:
             return []
         fixed_tail.append(selected[0])
@@ -2672,7 +3068,7 @@ def _bar_guided_pixel_font_percent_candidates(
         digit_alternatives = _pixel_font_digit_alternatives(alternatives[index], decimal_digit=decimal_digit, glyph_mask=segments[index])
         if not digit_alternatives:
             return []
-        per_digit_alternatives.append(_pixel_font_percent_digit_alternatives(digit_alternatives))
+        per_digit_alternatives.append(_pixel_font_percent_digit_alternatives(digit_alternatives, glyph_mask=segments[index]))
 
     results: list[tuple[str, float]] = []
     for replacement in itertools.product(*per_digit_alternatives):
@@ -2712,7 +3108,20 @@ def _pixel_font_digit_alternatives(
     return sorted(digits.items(), key=lambda item: item[1], reverse=True)
 
 
-def _pixel_font_percent_digit_alternatives(digit_alternatives: list[tuple[str, float]]) -> list[tuple[str, float]]:
+def _first_pixel_font_percent_digit_alternative(
+    alternatives: list[tuple[str, float]],
+    glyph_mask: np.ndarray,
+) -> tuple[str, float] | None:
+    digit_alternatives = _pixel_font_digit_alternatives(alternatives, decimal_digit=True, glyph_mask=glyph_mask)
+    digit_alternatives = _pixel_font_percent_digit_alternatives(digit_alternatives, glyph_mask=glyph_mask)
+    return digit_alternatives[0] if digit_alternatives else None
+
+
+def _pixel_font_percent_digit_alternatives(
+    digit_alternatives: list[tuple[str, float]],
+    *,
+    glyph_mask: np.ndarray,
+) -> list[tuple[str, float]]:
     if not digit_alternatives:
         return []
     best_confidence = digit_alternatives[0][1]
@@ -2721,7 +3130,106 @@ def _pixel_font_percent_digit_alternatives(digit_alternatives: list[tuple[str, f
         for item in digit_alternatives
         if item[1] >= best_confidence - EXP_PIXEL_FONT_PERCENT_ALTERNATIVE_SCORE_WINDOW
     ]
-    return kept[:EXP_PIXEL_FONT_PERCENT_MAX_ALTERNATIVES]
+    kept = kept[:EXP_PIXEL_FONT_PERCENT_MAX_ALTERNATIVES]
+    preference = _experience_pixel_font_percent_digit_topology_preference(glyph_mask, kept)
+    if preference is None:
+        if _experience_pixel_font_has_unresolved_percent_digit_ambiguity(kept):
+            return []
+        return kept
+
+    adjusted: list[tuple[str, float]] = []
+    for character, confidence in kept:
+        if character == preference:
+            confidence = max(confidence, min(1.0, best_confidence + 0.018, EXP_PIXEL_FONT_PERCENT_TOPOLOGY_CONFIDENCE))
+        elif {character, preference} in ({"6", "8"}, {"0", "8"}):
+            confidence = min(confidence, EXP_PIXEL_FONT_PERCENT_TOPOLOGY_DEMOTED_CONFIDENCE)
+        adjusted.append((character, confidence))
+    return sorted(adjusted, key=lambda item: item[1], reverse=True)
+
+
+def _experience_pixel_font_percent_digit_topology_preference(
+    glyph_mask: np.ndarray,
+    digit_alternatives: list[tuple[str, float]],
+) -> str | None:
+    features = _experience_pixel_font_glyph_features(glyph_mask)
+    if features is None:
+        return None
+    characters = {character for character, _confidence in digit_alternatives}
+    scores = {character: confidence for character, confidence in digit_alternatives}
+    best_confidence = digit_alternatives[0][1] if digit_alternatives else 0.0
+    if (
+        {"6", "8"}.issubset(characters)
+        and max(scores["6"], scores["8"]) >= best_confidence - 0.08
+        and _experience_pixel_font_glyph_prefers_six_over_eight(features)
+    ):
+        return "6"
+    if (
+        {"0", "8"}.issubset(characters)
+        and max(scores["0"], scores["8"]) >= best_confidence - 0.08
+        and _experience_pixel_font_glyph_prefers_zero_over_eight(features)
+    ):
+        return "0"
+    return None
+
+
+def _experience_pixel_font_glyph_prefers_six_over_eight(features: dict[str, float]) -> bool:
+    six_signal = (
+        max(0.0, features["left_mid_edge"] - 0.55) * 1.4
+        + max(0.0, 0.34 - features["ur"]) * 0.9
+        + max(0.0, features["left_edge"] - features["right_edge"] - 0.15) * 0.8
+        + max(0.0, features["mid"] - 0.42) * 0.45
+    )
+    eight_signal = (
+        max(0.0, features["ur"] - 0.30) * 0.8
+        + max(0.0, features["right_mid_edge"] - 0.25) * 0.8
+        + max(0.0, 0.18 - abs(features["left_edge"] - features["right_edge"])) * 0.6
+    )
+    return six_signal - eight_signal >= 0.22
+
+
+def _experience_pixel_font_glyph_prefers_zero_over_eight(features: dict[str, float]) -> bool:
+    zero_signal = (
+        max(0.0, 0.06 - features["inner"]) * 3.0
+        + max(0.0, 0.38 - features["mid"]) * 0.8
+        + min(features["left_edge"], features["right_edge"]) * 0.45
+    )
+    eight_signal = (
+        max(0.0, features["inner"] - 0.08) * 1.4
+        + max(0.0, features["mid"] - 0.34) * 0.7
+        + max(0.0, features["area"] - 0.32) * 0.8
+    )
+    return zero_signal - eight_signal >= 0.16
+
+
+def _experience_pixel_font_has_unresolved_percent_digit_ambiguity(
+    digit_alternatives: list[tuple[str, float]],
+) -> bool:
+    scores = {character: confidence for character, confidence in digit_alternatives}
+    for left, right in (("6", "8"), ("0", "8")):
+        if left in scores and right in scores and abs(scores[left] - scores[right]) <= EXP_PIXEL_FONT_PERCENT_UNRESOLVED_AMBIGUITY_GAP:
+            return True
+    return False
+
+
+def _experience_pixel_font_glyph_ambiguity(
+    alternatives: list[tuple[str, float]],
+) -> dict[str, Any] | None:
+    digits = [(character, confidence) for character, confidence in alternatives if character.isdigit()]
+    if len(digits) < 2:
+        return None
+    scores = {character: confidence for character, confidence in digits}
+    for left, right in (("6", "8"), ("0", "8"), ("3", "8"), ("5", "6"), ("6", "9"), ("0", "9")):
+        if left not in scores or right not in scores:
+            continue
+        gap = abs(scores[left] - scores[right])
+        if gap <= 0.05:
+            ranked = sorted(((left, scores[left]), (right, scores[right])), key=lambda item: item[1], reverse=True)
+            return {
+                "characters": [ranked[0][0], ranked[1][0]],
+                "confidence_gap": gap,
+                "top_confidence": ranked[0][1],
+            }
+    return None
 
 
 def _experience_pixel_font_zero_three_preference(features: dict[str, float]) -> str | None:
@@ -2924,7 +3432,7 @@ def _experience_pixel_font_segments(mask: np.ndarray) -> list[np.ndarray]:
 
 def _merge_experience_pixel_font_column_runs(column_runs: list[tuple[int, int]]) -> list[list[int]]:
     if 10 <= len(column_runs) <= 18:
-        return [[start, end] for start, end in column_runs]
+        return _merge_experience_pixel_font_split_percent_runs([[start, end] for start, end in column_runs])
     merged: list[list[int]] = []
     for start, end in column_runs:
         if merged and start - merged[-1][1] <= 2:
@@ -2952,6 +3460,18 @@ def _merge_experience_pixel_font_column_runs(column_runs: list[tuple[int, int]])
         merged = compacted
         if not changed:
             break
+    return _merge_experience_pixel_font_split_percent_runs(merged)
+
+
+def _merge_experience_pixel_font_split_percent_runs(merged: list[list[int]]) -> list[list[int]]:
+    for index in range(max(0, len(merged) - 4), len(merged) - 1):
+        start, end = merged[index]
+        next_start, next_end = merged[index + 1]
+        width = end - start
+        next_width = next_end - next_start
+        gap = next_start - end
+        if width <= 4 and next_width >= 12 and gap <= 8 and len(merged) - index <= 3:
+            return merged[:index] + [[start, next_end]] + merged[index + 2 :]
     return merged
 
 
@@ -3144,12 +3664,19 @@ def save_experience_ocr_learning_case(
                             f"{attempt.preprocess_variant}_segment{segment_index}.png"
                         )
                         cv2.imwrite(str(case_dir / segment_name), segment.astype(np.uint8) * 255)
-                        segments.append(
-                            {
-                                "file": segment_name,
-                                "shape": list(segment.shape),
-                            }
-                        )
+                        glyph_alternatives = _experience_pixel_font_glyph_alternatives(segment)[:5]
+                        segment_item: dict[str, Any] = {
+                            "file": segment_name,
+                            "shape": list(segment.shape),
+                            "alternatives": [
+                                {"character": character, "confidence": confidence}
+                                for character, confidence in glyph_alternatives
+                            ],
+                        }
+                        ambiguity = _experience_pixel_font_glyph_ambiguity(glyph_alternatives)
+                        if ambiguity is not None:
+                            segment_item["ambiguity"] = ambiguity
+                        segments.append(segment_item)
                     attempts.append(
                         {
                             "file": attempt_name,
@@ -3157,6 +3684,8 @@ def save_experience_ocr_learning_case(
                             "variant": attempt.preprocess_variant,
                             "offset": list(attempt.roi_offset),
                             "bar_percent": effective_bar,
+                            "green_background_ratio": _experience_green_background_ratio(attempt.image),
+                            "roi_bar_overlap_detected": _experience_roi_bar_overlap_detected(attempt.image),
                             "segments": segments,
                             "candidates": [
                                 {"text": text, "confidence": confidence}
@@ -3172,6 +3701,8 @@ def save_experience_ocr_learning_case(
                         "roi_offset": list(ocr_image.roi_offset),
                         "preprocess_variant": ocr_image.preprocess_variant,
                         "attempt_id": ocr_image.attempt_id,
+                        "green_background_ratio": _experience_green_background_ratio(ocr_image.image),
+                        "roi_bar_overlap_detected": _experience_roi_bar_overlap_detected(ocr_image.image),
                         "attempts": attempts,
                     }
                 )
@@ -3366,6 +3897,81 @@ def reading_from_paddle_result(result: object) -> ExperienceTextReading:
     )
 
 
+def reading_from_stat_window_paddle_result(result: object) -> ExperienceTextReading:
+    text_items = extract_paddle_text_items(result)
+    text = " ".join(item_text for item_text, _score in text_items).strip()
+    confidence_values = [score for _item_text, score in text_items if score is not None]
+    confidence = float(np.mean(confidence_values)) if confidence_values else 0.0
+    return reading_from_stat_window_text(text, confidence)
+
+
+def reading_from_stat_window_text(text: str, confidence: float = 1.0) -> ExperienceTextReading:
+    parsed = parse_stat_window_exp_text(text)
+    if parsed is None:
+        return ExperienceTextReading(
+            text=text,
+            confidence=confidence,
+            reason="能力值 EXP 解析失敗",
+            source="stat_window",
+        )
+    if confidence < EXP_STAT_WINDOW_OCR_ACCEPT_CONFIDENCE:
+        return ExperienceTextReading(
+            text=text,
+            confidence=confidence,
+            reason="能力值 EXP OCR 信心未達可信門檻",
+            source="stat_window",
+        )
+    current_exp, percent = parsed
+    return ExperienceTextReading(
+        current_exp=current_exp,
+        percent=percent,
+        text=text,
+        confidence=confidence,
+        success=True,
+        reason="OK:StatWindow",
+        source="stat_window",
+    )
+
+
+def parse_stat_window_exp_text(text: str) -> tuple[int, float] | None:
+    if not text:
+        return None
+
+    compact = normalize_exp_ocr_text(text)
+    upper = compact.upper()
+    if not upper:
+        return None
+    if "/" in upper or "／" in text:
+        return None
+    if re.search(r"(?:^|[^A-Z])(?:HP|MP)[:：]?\d", upper):
+        return None
+
+    if "EXP" in upper:
+        parse_source = upper[upper.rfind("EXP") + 3 :]
+    else:
+        if re.search(r"[A-Z]", upper):
+            return None
+        parse_source = upper
+
+    matches = list(
+        re.finditer(
+            r"([0-9][0-9,.]*)[\(\[]((?:[0-9]{1,2}|100)(?:[\.,][0-9]{1,2})?)(?:[%Xx])?[\)\]]",
+            parse_source,
+        )
+    )
+    for match in reversed(matches):
+        exp_segment = match.group(1)
+        if not _exp_number_separators_are_valid(exp_segment):
+            continue
+        exp_digits = "".join(char for char in exp_segment if char.isdigit())
+        if not exp_digits:
+            continue
+        percent = float(match.group(2).replace(",", "."))
+        if 0.0 <= percent <= 100.0:
+            return int(exp_digits), percent
+    return None
+
+
 def _experience_reading_rank(reading: ExperienceTextReading, variant_index: int) -> tuple[float, float, float, float, int]:
     structure_score, exact_percent_score = _experience_text_candidate_rank(reading.text)
     return (
@@ -3375,6 +3981,25 @@ def _experience_reading_rank(reading: ExperienceTextReading, variant_index: int)
         reading.confidence,
         -variant_index,
     )
+
+
+def _experience_should_read_secondary_roi(
+    primary_image: ExperienceOcrImage,
+    primary_reading: ExperienceTextReading,
+    secondary_image: ExperienceOcrImage,
+) -> bool:
+    if secondary_image.source_id != "wide":
+        return True
+    primary_width = primary_image.image.shape[1] if primary_image.image.ndim >= 2 else 0
+    if primary_width < EXP_OCR_TIGHT_RIGHT_ROI_MAX_WIDTH:
+        return True
+    return primary_reading.reason not in {
+        "EXP OCR 結構不可信",
+        "EXP 數字解析失敗",
+        "EXP 百分比解析失敗",
+        "EXP 像素字型結構不可信",
+        "EXP 像素字型信心過低",
+    }
 
 
 def _selected_experience_reading_or_failure(
@@ -3764,6 +4389,7 @@ def _experience_text_candidates(text: str) -> list[ExperienceTextCandidate]:
                         percent_span=match.span(2),
                         structure_score=5.0 + min(len(exp_digits), 8) / 10.0,
                         repaired_percent=tail not in ("", "%"),
+                        needs_bar_percent_guard=tail == "",
                     )
                 )
     candidates.extend(_missing_open_bracket_experience_text_candidates(compact))

@@ -29,10 +29,15 @@ from maple_star.experience import (
     _apply_experience_ocr_continuity_guard,
     _binarize_experience_text,
     _clean_experience_text_mask,
+    _decode_experience_pixel_font_text_candidates,
+    _erase_experience_green_bar_to_text_image,
     _experience_ocr_continuity_status,
+    _experience_pixel_font_runtime_attempts,
+    _read_experience_pixel_font_adaptive,
     _experience_text_structure_score,
     _pixel_font_text_reading,
     _select_pixel_font_success,
+    _structured_pixel_font_text_candidates,
     _suppress_experience_green_bar_background,
     estimate_experience_bar_percent,
     experience_ocr_learning_pending_dir,
@@ -42,11 +47,13 @@ from maple_star.experience import (
     format_exp_rate,
     format_ocr_success_rate,
     format_rate_confidence,
+    parse_stat_window_exp_text,
     parse_exp_percent_text,
     parse_current_exp_text,
     prepare_experience_ocr_image,
     prepare_experience_ocr_images,
     reading_from_paddle_result,
+    reading_from_stat_window_text,
     save_experience_ocr_learning_case,
     suppress_subprocess_windows,
 )
@@ -62,6 +69,24 @@ class ExperienceTests(unittest.TestCase):
 
     def test_one_hour_rate_uses_responsive_half_life(self):
         self.assertEqual(EXP_RATE_1H_HALF_LIFE_SECONDS, 600.0)
+
+    def test_stat_window_exp_parser_accepts_value_with_parenthesized_percent(self):
+        self.assertEqual(parse_stat_window_exp_text("31595874(77%)"), (31595874, 77.0))
+        self.assertEqual(parse_stat_window_exp_text("EXP 31,595,874 (77%)"), (31595874, 77.0))
+
+        reading = reading_from_stat_window_text("EXP 31595874(77%)", 0.93)
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 31595874)
+        self.assertEqual(reading.percent, 77.0)
+        self.assertEqual(reading.source, "stat_window")
+        self.assertEqual(reading.reason, "OK:StatWindow")
+
+    def test_stat_window_exp_parser_rejects_hp_mp_or_missing_exp_value(self):
+        self.assertIsNone(parse_stat_window_exp_text("HP 13916 / 14051"))
+        self.assertIsNone(parse_stat_window_exp_text("MP 351/2856"))
+        self.assertIsNone(parse_stat_window_exp_text("物理防禦力 3489(3189+300)"))
+        self.assertFalse(reading_from_stat_window_text("HP 13916 / 14051", 0.95).success)
 
     def test_paddle_reader_burst_uses_consensus_result(self):
         reader = PaddleExperienceTextReader()
@@ -129,6 +154,24 @@ class ExperienceTests(unittest.TestCase):
         self.assertTrue(reading.success)
         self.assertEqual(reading.text, "14757042[96.19%]")
         self.assertEqual(reader.read.call_count, 2)
+
+    def test_burst_frame_skips_wide_roi_when_primary_is_already_overwide(self):
+        reader = PaddleExperienceTextReader()
+        reader.read = Mock(
+            return_value=ExperienceTextReading(
+                text="5858410[12,",
+                confidence=0.93,
+                reason="EXP 百分比解析失敗",
+            )
+        )
+        primary = ExperienceOcrImage(np.zeros((25, 287, 4), dtype=np.uint8), source_id="primary")
+        wide = ExperienceOcrImage(np.zeros((25, 379, 4), dtype=np.uint8), source_id="wide")
+
+        reading = reader._read_burst_frame([primary, wide])
+
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.text, "5858410[12,")
+        reader.read.assert_called_once_with(primary, record_learning=True, continuity_hint=None)
 
     def test_paddle_reader_burst_rejects_conflicting_successes_without_consensus(self):
         reader = PaddleExperienceTextReader()
@@ -447,6 +490,133 @@ class ExperienceTests(unittest.TestCase):
         self.assertLess(int(suppressed[5, 108, 1]), 60)
         self.assertGreater(int(suppressed[9, 98, 1]), 220)
 
+    def test_green_bar_erased_text_variant_keeps_white_text_only(self):
+        image = np.zeros((24, 140, 4), dtype=np.uint8)
+        image[:, :, :3] = 28
+        image[:, :, 3] = 255
+        image[10:22, :104, :3] = (40, 215, 95)
+        image[7:18, 78:84, :3] = 245
+
+        erased = _erase_experience_green_bar_to_text_image(image)
+
+        self.assertIsNotNone(erased)
+        assert erased is not None
+        self.assertEqual(int(erased[12, 20, 1]), 0)
+        self.assertEqual(int(erased[10, 80, 1]), 255)
+
+    def test_pixel_reader_prefers_green_bar_erased_text_variant(self):
+        image = np.zeros((28, 180, 4), dtype=np.uint8)
+        image[:, :, :3] = 28
+        image[:, :, 3] = 255
+        image[13:25, :142, :3] = (40, 215, 95)
+        image[8:20, 118:124, :3] = 245
+
+        def decode_by_green_presence(attempt_image, *, bar_percent):
+            green_present = bool(((attempt_image[:, :, 1] > 150) & (attempt_image[:, :, 0] < 140)).any())
+            if green_present:
+                return [("5805653[76.98%]", 0.99)]
+            return [("5805658[76.98%]", 0.99)]
+
+        with patch("maple_star.models.experience._decode_experience_pixel_font_text_candidates", side_effect=decode_by_green_presence):
+            reading = _read_experience_pixel_font_adaptive(
+                ExperienceOcrImage(image=image, bar_crop_left_ratio=0.44),
+                bar_percent=None,
+            )
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 5805658)
+        self.assertEqual(reading.reason, "OK:Pixel:green_bar_erased_text")
+
+    def test_pixel_reader_fails_closed_on_ambiguous_green_bar_digits(self):
+        image = np.zeros((28, 180, 4), dtype=np.uint8)
+        image[:, :, :3] = 28
+        image[:, :, 3] = 255
+        image[13:25, :142, :3] = (40, 215, 95)
+        image[8:20, 118:124, :3] = 245
+
+        with patch(
+            "maple_star.models.experience._decode_experience_pixel_font_text_candidates",
+            return_value=[
+                ("5805653[76.98%]", 0.9790),
+                ("5805658[76.98%]", 0.9785),
+            ],
+        ):
+            reading = _read_experience_pixel_font_adaptive(
+                ExperienceOcrImage(image=image, bar_crop_left_ratio=0.44),
+                bar_percent=76.98,
+            )
+
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.reason, "EXP OCR 模糊數字候選不一致")
+
+    def test_pixel_reader_rejects_green_bar_erased_percent_mismatch(self):
+        attempt = ExperiencePixelFontAttempt(
+            image=np.zeros((20, 80, 3), dtype=np.uint8),
+            bar_crop_left_ratio=0.44,
+            source_id="unit",
+            roi_offset=(0, 0, 0, 0),
+            preprocess_variant="green_bar_erased_text",
+            attempt_id="unit:green_bar_erased_text",
+        )
+
+        reading = _pixel_font_text_reading(
+            "5805658[76.98%]",
+            0.99,
+            bar_percent=64.0,
+            attempt=attempt,
+        )
+
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.reason, "EXP 百分比與綠條不一致")
+
+    def test_pixel_candidates_repair_split_percent_marker_tail(self):
+        characters = list("6014674[13.33") + ["3", "3", "3", "]"]
+        confidences = [0.91, 0.91, 0.94, 0.91, 0.91, 0.95, 0.96, 0.97, 0.96, 0.95, 0.92, 0.95, 0.91, 0.76, 0.83, 0.78, 0.90]
+        widths = [35, 34, 14, 34, 35, 34, 35, 13, 14, 34, 5, 34, 36, 20, 11, 12, 15]
+        alternatives = [[(character, confidence)] for character, confidence in zip(characters, confidences)]
+        segments = [np.ones((61, width), dtype=bool) for width in widths]
+
+        candidates = _structured_pixel_font_text_candidates(alternatives, segments, bar_percent=None)
+
+        self.assertIn(("6014674[13.33%]", 0.982), candidates)
+
+    def test_pixel_candidates_repair_split_percent_marker_when_three_is_clear(self):
+        characters = list("6014674[13.33") + ["3", "3", "3", "]"]
+        confidences = [0.91, 0.91, 0.94, 0.91, 0.91, 0.95, 0.96, 0.97, 0.96, 0.95, 0.92, 0.95, 0.91, 0.76, 0.83, 0.78, 0.90]
+        widths = [35, 34, 14, 34, 35, 34, 35, 13, 14, 34, 5, 34, 36, 20, 11, 12, 15]
+        alternatives = [[(character, confidence)] for character, confidence in zip(characters, confidences)]
+        alternatives[9] = [("3", 0.95), ("8", 0.77), ("0", 0.76)]
+        alternatives[11] = [("3", 0.95), ("8", 0.77), ("0", 0.76)]
+        alternatives[12] = [("3", 0.91), ("0", 0.82), ("8", 0.75)]
+        segments = [np.ones((61, width), dtype=bool) for width in widths]
+
+        candidates = _structured_pixel_font_text_candidates(alternatives, segments, bar_percent=None)
+
+        self.assertIn("6014674[13.33%]", {text for text, _confidence in candidates})
+
+    def test_pixel_candidates_reject_split_percent_marker_when_zero_eight_three_is_ambiguous(self):
+        characters = list("5945940[13.10") + ["3", "3", "3", "]"]
+        confidences = [0.93, 0.91, 0.92, 0.93, 0.91, 0.93, 0.95, 0.97, 0.96, 0.94, 0.92, 0.96, 0.95, 0.76, 0.83, 0.78, 0.90]
+        widths = [35, 34, 14, 35, 34, 14, 35, 13, 14, 34, 5, 14, 36, 20, 11, 12, 15]
+        alternatives = [[(character, confidence)] for character, confidence in zip(characters, confidences)]
+        alternatives[12] = [("0", 0.95), ("8", 0.91), ("3", 0.89)]
+        segments = [np.ones((61, width), dtype=bool) for width in widths]
+
+        candidates = _structured_pixel_font_text_candidates(alternatives, segments, bar_percent=None)
+
+        self.assertNotIn("5945940[13.10%]", {text for text, _confidence in candidates})
+
+    def test_pixel_candidates_do_not_repair_split_percent_without_closing_bracket(self):
+        characters = list("5656410[12.99") + ["3", "3"]
+        confidences = [0.92, 0.88, 0.93, 0.88, 0.95, 0.98, 0.92, 0.94, 0.95, 0.92, 0.92, 0.90, 0.91, 0.75, 0.78]
+        widths = [40, 38, 40, 38, 38, 13, 38, 13, 15, 38, 5, 37, 39, 21, 21]
+        alternatives = [[(character, confidence)] for character, confidence in zip(characters, confidences)]
+        segments = [np.ones((60, width), dtype=bool) for width in widths]
+
+        candidates = _structured_pixel_font_text_candidates(alternatives, segments, bar_percent=None)
+
+        self.assertNotIn(("5656410[12.99%]", 0.982), candidates)
+
     def test_binary_fallback_includes_bolder_text_variant(self):
         image = np.zeros((30, 180, 4), dtype=np.uint8)
         image[:, :, :3] = (45, 215, 95)
@@ -486,6 +656,16 @@ class ExperienceTests(unittest.TestCase):
         assert percent is not None
         self.assertGreater(percent, 38.0)
         self.assertLess(percent, 40.0)
+
+    def test_estimate_experience_bar_percent_ignores_tight_right_text_roi(self):
+        image = np.zeros((35, 214, 4), dtype=np.uint8)
+        image[:, :, :3] = (30, 30, 30)
+        image[:, :, 3] = 255
+        image[:, :128, :3] = (40, 215, 95)
+
+        percent = estimate_experience_bar_percent(image, bar_crop_left_ratio=0.60)
+
+        self.assertIsNone(percent)
 
     def test_paddle_reader_prefers_high_confidence_raw_roi(self):
         class FakeOcr:
@@ -1033,6 +1213,51 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(confirmed.current_percent, 76.95)
         self.assertEqual(confirmed.sample_count, 1)
 
+    def test_experience_tracker_confirms_initial_baseline_across_single_outlier(self):
+        tracker = ExperienceEfficiencyTracker()
+
+        self.assertFalse(
+            tracker.add_reading(
+                0.0,
+                30815736,
+                76.03,
+                confidence=0.93,
+                require_initial_confirmation=True,
+            )
+        )
+        self.assertFalse(
+            tracker.add_reading(
+                8.0,
+                33019336,
+                76.84,
+                confidence=0.95,
+                require_initial_confirmation=True,
+            )
+        )
+        self.assertTrue(
+            tracker.add_reading(
+                16.0,
+                30828336,
+                76.06,
+                confidence=0.95,
+                require_initial_confirmation=True,
+            )
+        )
+        snapshot = tracker.snapshot(16.0)
+
+        self.assertEqual(snapshot.current_exp, 30828336)
+        self.assertEqual(snapshot.current_percent, 76.06)
+        self.assertEqual(snapshot.sample_count, 1)
+        self.assertEqual(tracker.pending_initial_baselines, [])
+
+    def test_paddle_reader_marks_missing_percent_marker_as_guarded(self):
+        reading = reading_from_paddle_result([("31031512[76.71]", 0.92)])
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 31031512)
+        self.assertEqual(reading.percent, 76.71)
+        self.assertTrue(reading.needs_bar_percent_guard)
+
     def test_pixel_reader_handles_live7_to_live12_without_paddle(self):
         fixture_dir = Path(__file__).with_name("fixtures") / "experience_ocr"
         manifest = json.loads((fixture_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -1070,6 +1295,89 @@ class ExperienceTests(unittest.TestCase):
 
         self.assertEqual(false_accepts, [], "\n".join(false_accepts))
         reader._read_with_paddle.assert_not_called()
+
+    def test_pixel_reader_handles_green_bar_percent_digits_without_paddle(self):
+        fixture_dir = Path(__file__).with_name("fixtures") / "experience_ocr"
+        manifest = json.loads((fixture_dir / "manifest.json").read_text(encoding="utf-8"))
+        sample_ids = {
+            "exp-20260514-064_ocr_34870186_8603",
+            "exp-20260514-075_ocr_35099570_8660",
+            "exp-20260514-078_ocr_35171532_8677",
+        }
+        samples = [sample for sample in manifest.get("samples", []) if sample.get("id") in sample_ids]
+        self.assertEqual(len(samples), len(sample_ids))
+
+        reader = PaddleExperienceTextReader()
+        reader._read_with_paddle = Mock(side_effect=AssertionError("Pixel OCR should not need Paddle fallback"))
+
+        failures: list[str] = []
+        for sample in samples:
+            image = cv2.imread(str(fixture_dir / sample["file"]), cv2.IMREAD_UNCHANGED)
+            self.assertIsNotNone(image, sample["file"])
+            reading = reader.read(ExperienceOcrImage(image=image, source_id=sample["id"]))
+            expected_exp = int(sample["current_exp"])
+            expected_percent = float(sample["percent"])
+            if (
+                not reading.success
+                or reading.current_exp != expected_exp
+                or reading.percent is None
+                or round(reading.percent, 2) != round(expected_percent, 2)
+            ):
+                failures.append(
+                    f"{sample['id']}: expected={expected_exp}[{expected_percent:.2f}%] "
+                    f"got={reading.current_exp}[{reading.percent}] text={reading.text!r} reason={reading.reason}"
+                )
+
+        self.assertEqual(failures, [], "\n".join(failures))
+        reader._read_with_paddle.assert_not_called()
+
+    def test_pixel_reader_repairs_split_percent_dot_candidate(self):
+        fixture_dir = Path(__file__).with_name("fixtures") / "experience_ocr"
+        image = cv2.imread(str(fixture_dir / "exp-20260515-017_ocr_40327237_9432.png"), cv2.IMREAD_UNCHANGED)
+        self.assertIsNotNone(image)
+
+        candidates = _decode_experience_pixel_font_text_candidates(image, bar_percent=None)
+
+        texts = [text for text, _confidence in candidates]
+        self.assertFalse(any("94.32.%" in text for text in texts))
+        self.assertTrue(any("[94.32%]" in text for text in texts))
+
+    def test_tight_green_exp_roi_uses_paddle_fallback_for_live_fixture(self):
+        class FakeOcr:
+            def __init__(self):
+                self.calls = 0
+
+            def predict(self, input):
+                self.calls += 1
+                return [{"res": {"rec_texts": ["40327237[94.32%]"], "rec_scores": [0.9878]}}]
+
+        fixture_dir = Path(__file__).with_name("fixtures") / "experience_ocr"
+        image = cv2.imread(str(fixture_dir / "exp-20260515-017_ocr_40327237_9432.png"), cv2.IMREAD_UNCHANGED)
+        self.assertIsNotNone(image)
+        fake_ocr = FakeOcr()
+        reader = PaddleExperienceTextReader()
+        reader.ocr = fake_ocr
+        pixel_failure = ExperienceTextReading(
+            text="40327237[94.32%]",
+            confidence=0.93,
+            reason="EXP 像素字型信心過低",
+            source="pixel",
+        )
+
+        with patch("maple_star.models.experience._read_experience_pixel_font_adaptive", return_value=pixel_failure):
+            reading = reader.read(
+                ExperienceOcrImage(
+                    image=image,
+                    source_id="exp-20260515-017",
+                    bar_crop_left_ratio=0.5954063604240283,
+                ),
+                record_learning=False,
+            )
+
+        self.assertGreater(fake_ocr.calls, 0)
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 40327237)
+        self.assertEqual(reading.percent, 94.32)
 
     def test_pixel_reader_has_no_false_accepts_on_labeled_fixtures(self):
         fixture_dir = Path(__file__).with_name("fixtures") / "experience_ocr"
@@ -1146,6 +1454,33 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(reading.current_exp, 16593280)
         self.assertEqual(reading.learning_case_id, "")
         reader._read_with_paddle.assert_called_once()
+        save_case.assert_not_called()
+
+    def test_pixel_reader_failure_does_not_create_learning_case(self):
+        reader = PaddleExperienceTextReader()
+        image = np.zeros((24, 160, 3), dtype=np.uint8)
+        pixel_failure = ExperienceTextReading(
+            text="16593283[92.16%]",
+            confidence=0.96,
+            reason="EXP OCR 模糊數字候選不一致",
+            source="pixel",
+        )
+        paddle_failure = ExperienceTextReading(
+            text="16593283[92.16%]",
+            confidence=0.50,
+            reason="PaddleOCR 失敗",
+            source="paddle",
+        )
+        reader._read_with_paddle = Mock(return_value=paddle_failure)
+
+        with (
+            patch("maple_star.models.experience._read_experience_pixel_font_adaptive", return_value=pixel_failure),
+            patch("maple_star.models.experience.save_experience_ocr_learning_case", return_value="exp-unit") as save_case,
+        ):
+            reading = reader.read(ExperienceOcrImage(image=image, source_id="unit"))
+
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.learning_case_id, "")
         save_case.assert_not_called()
 
     def test_pixel_reader_rejects_same_percent_low_margin_exp_conflict(self):
@@ -1302,6 +1637,55 @@ class ExperienceTests(unittest.TestCase):
         self.assertTrue(long_reading.success)
         self.assertEqual(long_reading.current_exp, 16579564)
 
+    def test_tight_right_exp_roi_uses_limited_runtime_pixel_attempts(self):
+        image = np.zeros((35, 214, 4), dtype=np.uint8)
+        image[:, -8:, :3] = 255
+        tight_attempts = _experience_pixel_font_runtime_attempts(
+            ExperienceOcrImage(image=image, bar_crop_left_ratio=0.62, source_id="tight")
+        )
+        wide_image = np.zeros((35, 360, 4), dtype=np.uint8)
+        wide_image[:, -8:, :3] = 255
+        wide_attempts = _experience_pixel_font_runtime_attempts(
+            ExperienceOcrImage(image=wide_image, bar_crop_left_ratio=0.62, source_id="wide")
+        )
+
+        self.assertLess(len(tight_attempts), len(wide_attempts))
+        self.assertLessEqual(len(tight_attempts), 6)
+        self.assertIn("tight_right_4", {attempt.preprocess_variant for attempt in tight_attempts})
+
+    def test_tight_right_exp_roi_uses_paddle_after_pixel_text_failure(self):
+        reader = PaddleExperienceTextReader()
+        reader._read_with_paddle = Mock(
+            return_value=ExperienceTextReading(
+                current_exp=36232308,
+                percent=34.86,
+                text="36232308[34.86%]",
+                confidence=0.94,
+                success=True,
+                reason="OK",
+            )
+        )
+        pixel_failure = ExperienceTextReading(
+            text="36232308[34.86%]",
+            confidence=0.91,
+            reason="EXP 像素字型信心過低",
+            source="pixel",
+        )
+
+        with patch("maple_star.models.experience._read_experience_pixel_font_adaptive", return_value=pixel_failure):
+            reading = reader.read(
+                ExperienceOcrImage(
+                    image=np.zeros((35, 214, 4), dtype=np.uint8),
+                    bar_crop_left_ratio=0.62,
+                    source_id="tight",
+                ),
+                record_learning=False,
+            )
+
+        reader._read_with_paddle.assert_called_once()
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.reason, "OK")
+
     def test_experience_ocr_learning_case_writes_pending_bundle_under_localappdata(self):
         image = np.full((24, 120, 3), 255, dtype=np.uint8)
         pixel_reading = ExperienceTextReading(text="--", confidence=0.0, reason="EXP 像素字型解析失敗")
@@ -1331,7 +1715,11 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(metadata["frames"][0][0]["source_id"], "primary")
         self.assertTrue(roi_exists)
         self.assertIn("attempts", metadata["frames"][0][0])
+        self.assertIn("green_background_ratio", metadata["frames"][0][0])
+        self.assertIn("roi_bar_overlap_detected", metadata["frames"][0][0])
         self.assertIn("mask_file", metadata["frames"][0][0]["attempts"][0])
+        self.assertIn("green_background_ratio", metadata["frames"][0][0]["attempts"][0])
+        self.assertIn("roi_bar_overlap_detected", metadata["frames"][0][0]["attempts"][0])
         self.assertIn("segments", metadata["frames"][0][0]["attempts"][0])
 
     def test_experience_ocr_learning_case_deduplicates_same_reading(self):
@@ -1446,6 +1834,7 @@ class ExperienceTests(unittest.TestCase):
                             [
                                 {
                                     "file": "roi.png",
+                                    "bar_crop_left_ratio": 0.62,
                                     "attempts": [
                                         {
                                             "file": "attempt.png",
@@ -1504,6 +1893,7 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(len(manifest["samples"]), 1)
         self.assertEqual(manifest["samples"][0]["current_exp"], 2043879)
         self.assertEqual(manifest["samples"][0]["percent"], 10.75)
+        self.assertEqual(manifest["samples"][0]["bar_crop_left_ratio"], 0.62)
         self.assertIsNotNone(promoted_image)
         self.assertEqual(int(promoted_image[0, 0, 0]), 128)
         self.assertFalse(old_fixture.exists())
@@ -1574,6 +1964,7 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(manifest["samples"], [])
         self.assertEqual(cases[0]["default_correct_text"], "")
         self.assertIn("未綁定", cases[0]["source_warning"])
+        self.assertEqual(cases[0]["review_action"], "diagnostic_only")
         self.assertTrue(str(cases[0]["preview_file"]).endswith("frame0_roi0_primary.png"))
 
     def test_learning_service_allows_manual_text_from_visible_preview(self):
@@ -1624,6 +2015,54 @@ class ExperienceTests(unittest.TestCase):
 
         self.assertEqual(result["sample_id"], "exp-unit_ocr_8908583_4447")
         self.assertEqual(manifest["samples"][0]["text"], "8908583[44.47%]")
+
+    def test_learning_service_validation_uses_fixture_bar_crop_left_ratio(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        image = np.full((35, 223, 4), 255, dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fixture_dir = root / "fixtures"
+            fixture_dir.mkdir()
+            image_path = fixture_dir / "sample.png"
+            cv2.imwrite(str(image_path), image)
+            manifest_path = fixture_dir / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "samples": [
+                            {
+                                "id": "sample",
+                                "file": image_path.name,
+                                "current_exp": 38264102,
+                                "percent": 89.50,
+                                "text": "38264102[89.50%]",
+                                "bar_crop_left_ratio": 0.62,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            reading = ExperienceTextReading(
+                current_exp=38264102,
+                percent=89.50,
+                text="38264102[89.50%]",
+                confidence=0.98,
+                success=True,
+                reason="OK:Pixel",
+            )
+
+            with (
+                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
+                patch.object(learning_service, "MANIFEST_PATH", manifest_path),
+                patch.object(learning_service.experience_model, "estimate_experience_bar_percent", return_value=None) as estimate,
+                patch.object(learning_service.experience_model, "_read_experience_pixel_font_adaptive", return_value=reading),
+            ):
+                result = learning_service.validate_promoted_experience_fixture("sample")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(estimate.call_args.kwargs["bar_crop_left_ratio"], 0.62)
 
     def test_learning_service_auto_promotes_trusted_pending_case(self):
         from maple_star.services import experience_ocr_learning as learning_service
@@ -1779,6 +2218,111 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(result["skipped"][0]["id"], "exp-bar-mismatch")
         self.assertIn("綠條", result["skipped"][0]["reason"])
 
+    def test_learning_service_auto_promote_skips_ambiguous_pixel_failure(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        image = np.full((12, 80, 3), 255, dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pending_root = Path(temp_dir) / "pending"
+            case_dir = pending_root / "exp-ambiguous"
+            case_dir.mkdir(parents=True)
+            cv2.imwrite(str(case_dir / "roi.png"), image)
+            (case_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "id": "exp-ambiguous",
+                        "created_at": "2026-05-14T12:52:51",
+                        "trigger": "ocr_failure",
+                        "reading_key": "35171532[88.77%]",
+                        "final_reading": {
+                            "success": False,
+                            "text": "35171532[88.77%]",
+                            "reason": "EXP OCR 模糊數字候選不一致",
+                        },
+                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "segments": [
+                            {
+                                "file": "seg10.png",
+                                "shape": [41, 23],
+                                "ambiguity": {
+                                    "characters": ["8", "6"],
+                                    "confidence_gap": 0.012,
+                                    "top_confidence": 0.98,
+                                },
+                            }
+                        ], "candidates": [
+                            {"text": "35171532[88.77%]", "confidence": 0.979},
+                            {"text": "35171532[86.77%]", "confidence": 0.971},
+                        ]}]}]],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
+                cases = learning_service.list_experience_ocr_learning_cases()
+                result = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
+
+        self.assertFalse(cases[0]["auto_promote_promotable"])
+        self.assertEqual(cases[0]["glyph_ambiguity_count"], 1)
+        self.assertEqual(cases[0]["review_action"], "diagnostic_only")
+        self.assertEqual(result["promotable"], [])
+        self.assertIn("Pixel glyph", result["skipped"][0]["reason"])
+
+    def test_learning_service_auto_promotes_strong_candidate_despite_glyph_ambiguity(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        image = np.full((12, 80, 3), 255, dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pending_root = Path(temp_dir) / "pending"
+            case_dir = pending_root / "exp-strong"
+            case_dir.mkdir(parents=True)
+            cv2.imwrite(str(case_dir / "roi.png"), image)
+            (case_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "id": "exp-strong",
+                        "created_at": "2026-05-15T03:52:51",
+                        "trigger": "ocr_failure",
+                        "reading_key": "1142804[2.53%]",
+                        "final_reading": {
+                            "success": False,
+                            "text": "1142804[2.53%]",
+                            "reason": "EXP 像素字型信心過低",
+                        },
+                        "frames": [[{"file": "roi.png", "attempts": [
+                            {
+                                "file": f"attempt{index}.png",
+                                "segments": [
+                                    {
+                                        "file": f"seg{index}.png",
+                                        "shape": [41, 23],
+                                        "ambiguity": {
+                                            "characters": ["8", "6"],
+                                            "confidence_gap": 0.012,
+                                            "top_confidence": 0.98,
+                                        },
+                                    }
+                                ],
+                                "candidates": [
+                                    {"text": "1142804[2.53%]", "confidence": 0.934},
+                                    {"text": "1142004[2.53%]", "confidence": 0.870},
+                                ],
+                            }
+                            for index in range(4)
+                        ]}]],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
+                cases = learning_service.list_experience_ocr_learning_cases()
+                result = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
+
+        self.assertTrue(cases[0]["auto_promote_promotable"])
+        self.assertEqual(cases[0]["review_action"], "auto_promote")
+        self.assertEqual([item["id"] for item in result["promotable"]], ["exp-strong"])
+
     def test_learning_service_marks_unbound_bar_mismatch_case_delete_recommended(self):
         from maple_star.services import experience_ocr_learning as learning_service
 
@@ -1875,7 +2419,7 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(result["promotable"], [])
         self.assertEqual(skipped_ids, {"exp-bound", "exp-empty"})
 
-    def test_learning_service_false_positive_cases_require_manual_review(self):
+    def test_learning_service_false_positive_cases_are_background_diagnostics(self):
         from maple_star.services import experience_ocr_learning as learning_service
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1911,10 +2455,56 @@ class ExperienceTests(unittest.TestCase):
                 cases = learning_service.list_experience_ocr_learning_cases()
                 result = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
 
-        self.assertEqual(cases[0]["review_action"], "manual_review")
+        self.assertEqual(cases[0]["review_action"], "diagnostic_only")
+        self.assertEqual(cases[0]["review_label"], "背景診斷")
         self.assertFalse(cases[0]["auto_promote_promotable"])
         self.assertEqual(result["promotable"], [])
-        self.assertEqual(result["skipped"][0]["reason"], "false-positive case 必須人工確認")
+        self.assertEqual(result["skipped"][0]["reason"], "false-positive case 僅作背景診斷")
+
+    def test_learning_service_sorts_actionable_cases_before_background_diagnostics(self):
+        from maple_star.services import experience_ocr_learning as learning_service
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pending_root = Path(temp_dir) / "pending"
+            diagnostic_dir = pending_root / "exp-diagnostic"
+            diagnostic_dir.mkdir(parents=True)
+            (diagnostic_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "id": "exp-diagnostic",
+                        "created_at": "2026-05-13T18:00:00",
+                        "trigger": "tracker_rejected",
+                        "reading_key": "288900[27.08%]",
+                        "final_reading": {"success": True, "text": "288900[27.08%]", "reason": "OK"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manual_dir = pending_root / "exp-manual"
+            manual_dir.mkdir()
+            cv2.imwrite(str(manual_dir / "roi.png"), np.full((12, 80, 3), 255, dtype=np.uint8))
+            (manual_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "id": "exp-manual",
+                        "created_at": "2026-05-13T18:10:00",
+                        "trigger": "ocr_failure",
+                        "reading_key": "288901[27.09%]",
+                        "final_reading": {"success": False, "text": "288901[27.09%]", "reason": "EXP 百分比解析失敗"},
+                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "candidates": [
+                            {"text": "288901[27.09%]", "confidence": 0.950},
+                        ]}]}]],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
+                cases = learning_service.list_experience_ocr_learning_cases()
+
+        self.assertEqual([case["id"] for case in cases], ["exp-manual", "exp-diagnostic"])
+        self.assertEqual(cases[0]["review_action"], "manual_review")
+        self.assertEqual(cases[1]["review_action"], "diagnostic_only")
 
     def test_learning_service_auto_promote_dry_run_has_no_side_effects(self):
         from maple_star.services import experience_ocr_learning as learning_service
@@ -2006,10 +2596,19 @@ class ExperienceTests(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             pending_exists = (pending_root / "exp-unit").exists()
             fixture_files = list(fixture_dir.glob("*.png"))
+            metadata = json.loads((pending_root / "exp-unit" / "metadata.json").read_text(encoding="utf-8"))
+            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
+                cases = learning_service.list_experience_ocr_learning_cases()
+                retry = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
 
         self.assertEqual(result["promoted"], [])
         self.assertEqual(result["rolled_back"][0]["id"], "exp-unit")
         self.assertEqual(result["rolled_back"][0]["read_text"], "2043870[10.75%]")
+        self.assertEqual(metadata["last_promotion_validation"]["read_text"], "2043870[10.75%]")
+        self.assertEqual(cases[0]["review_action"], "delete_recommended")
+        self.assertIn("Pixel validation", cases[0]["review_reason"])
+        self.assertEqual(retry["promotable"], [])
+        self.assertIn("Pixel validation", retry["skipped"][0]["reason"])
         self.assertEqual(manifest["samples"], [])
         self.assertTrue(pending_exists)
         self.assertEqual(fixture_files, [])
@@ -2562,6 +3161,18 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(snapshot.elapsed_seconds, 30.0)
         self.assertEqual(snapshot.sample_count, 1)
         self.assertEqual(snapshot.status, "校準 EXP 基準")
+
+    def test_tracker_accepts_first_precise_percent_after_exp_only_baseline(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 33107701, None, confidence=0.98))
+
+        self.assertTrue(tracker.add_reading(0.4, 33118511, 81.71, confidence=0.95))
+        snapshot = tracker.snapshot(0.4)
+
+        self.assertEqual(snapshot.current_exp, 33118511)
+        self.assertEqual(snapshot.current_percent, 81.71)
+        self.assertEqual(snapshot.sample_count, 2)
+        self.assertEqual(snapshot.status, "統計中")
 
     def test_tracker_rejects_non_level_exp_drop_without_resetting(self):
         tracker = ExperienceEfficiencyTracker()

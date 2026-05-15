@@ -65,6 +65,22 @@ class DebugLoggingTests(unittest.TestCase):
             text = debug_log.read_text(encoding="utf-8")
             self.assertIn("經驗效率 OCR 錯誤：sample", text)
 
+    def test_debug_log_rotates_instead_of_growing_without_bound(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            debug_log = Path(temp_dir) / "debug.log"
+
+            try:
+                configure_debug_logging(debug_log, reset=True, max_bytes=220, backup_count=2)
+                for index in range(20):
+                    write_debug_text(f"debug line {index:02d} abcdefghijklmnopqrstuvwxyz\n")
+            finally:
+                close_debug_logging()
+
+            log_files = sorted(debug_log.parent.glob("debug.log*"))
+            self.assertLessEqual(len(log_files), 3)
+            self.assertTrue((debug_log.parent / "debug.log.1").exists())
+            self.assertTrue(debug_log.exists())
+
     def test_log_experience_debug_writes_jsonl_to_experience_debug_log(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             debug_log = Path(temp_dir) / "experience_debug.log"
@@ -94,6 +110,28 @@ class DebugLoggingTests(unittest.TestCase):
             text = debug_log.read_text(encoding="utf-8")
             self.assertNotIn("old log", text)
             self.assertIn('"event":"new"', text)
+
+    def test_experience_debug_log_rotates_instead_of_growing_without_bound(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            debug_log = Path(temp_dir) / "experience_debug.log"
+
+            try:
+                configure_experience_debug_logging(debug_log, reset=True, max_bytes=180, backup_count=2)
+                for index in range(20):
+                    log_experience_debug(
+                        {
+                            "event": "experience_ocr_job",
+                            "index": index,
+                            "text": "abcdefghijklmnopqrstuvwxyz",
+                        }
+                    )
+            finally:
+                close_experience_debug_logging()
+
+            log_files = sorted(debug_log.parent.glob("experience_debug.log*"))
+            self.assertLessEqual(len(log_files), 3)
+            self.assertTrue((debug_log.parent / "experience_debug.log.1").exists())
+            self.assertTrue(debug_log.exists())
 
 
 if __name__ == "__main__":

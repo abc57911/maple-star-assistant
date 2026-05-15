@@ -4,6 +4,7 @@ import queue
 import threading
 from dataclasses import dataclass, field
 
+from ..adapters.debug_logging import log_exception
 from ..adapters.win_input import key_down, key_up, tap_hotkey
 
 
@@ -75,11 +76,16 @@ class PotionActionWorker:
                 action = self.action_queue.get(timeout=0.05)
             except queue.Empty:
                 continue
-            _apply_potion_action(action, held)
+            try:
+                _apply_potion_action(action, held)
+            except Exception:
+                log_exception(
+                    "喝水按鍵背景工作失敗："
+                    f"action={action.action} bar={action.bar_type} "
+                    f"key={action.key_name or action.vk_code}"
+                )
 
-        for vk_code in list(held.values()):
-            key_up(vk_code)
-        held.clear()
+        _release_held_potion_keys(held)
 
 
 def _apply_potion_action(action: PotionAction, held: dict[str, int]) -> None:
@@ -93,18 +99,28 @@ def _apply_potion_action(action: PotionAction, held: dict[str, int]) -> None:
             return
         if current_vk:
             key_up(current_vk)
+            held.pop(action.bar_type, None)
         key_down(action.vk_code)
         held[action.bar_type] = action.vk_code
         return
 
     if action.action == "release":
-        current_vk = held.pop(action.bar_type, 0)
+        current_vk = held.get(action.bar_type, 0)
         vk_code = current_vk or action.vk_code
         if vk_code:
             key_up(vk_code)
+        held.pop(action.bar_type, None)
         return
 
     if action.action == "release_all":
-        for vk_code in list(held.values()):
+        _release_held_potion_keys(held)
+
+
+def _release_held_potion_keys(held: dict[str, int]) -> None:
+    for bar_type, vk_code in list(held.items()):
+        try:
             key_up(vk_code)
-        held.clear()
+        except Exception:
+            log_exception(f"喝水按鍵釋放失敗：vk={vk_code}")
+            continue
+        held.pop(bar_type, None)

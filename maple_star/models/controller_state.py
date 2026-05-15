@@ -37,6 +37,16 @@ class ExperienceOcrBurst:
     capture_count: int
 
 
+@dataclass
+class ExperienceBaselineCalibration:
+    phase: str
+    attempt: int
+    started_at: float
+    next_step_at: float
+    opened_ui: bool = False
+    last_reason: str = ""
+
+
 @dataclass(frozen=True)
 class PotionEffectAttempt:
     attempted_at: float
@@ -85,3 +95,19 @@ class HudSearchArea:
     reference_left: int
     reference_width: int
     reference_height: int
+
+
+@dataclass(frozen=True)
+class BottomHudLayout:
+    hp_label_rect: tuple[int, int, int, int]
+    mp_label_rect: tuple[int, int, int, int]
+    exp_label_rect: tuple[int, int, int, int]
+    hp_region: tuple[int, int, int, int]
+    mp_region: tuple[int, int, int, int]
+    exp_bar_region: tuple[int, int, int, int]
+    exp_text_region: tuple[int, int, int, int] | None
+    hp_track_region: tuple[int, int, int, int]
+    mp_track_region: tuple[int, int, int, int]
+    exp_track_region: tuple[int, int, int, int]
+    scale: float
+    confidence: float

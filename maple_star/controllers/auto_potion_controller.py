@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import ctypes
+import contextlib
 import math
 import hashlib
+import multiprocessing as mp
 import sys
 import time
 import winsound
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from ctypes import wintypes
 from pathlib import Path
 from typing import Callable
 
+import cv2
 import mss
 import numpy as np
 
@@ -96,6 +99,15 @@ from ..services.control_hotkey_worker import (
     ControlHotkeyWorker,
 )
 from ..services.potion_action_worker import PotionActionWorker
+from ..services.runtime_processes import (
+    ExperienceControl,
+    ExperienceStatus,
+    InlineExecutor,
+    PotionControl,
+    PotionStatus,
+    RuntimeProcessCoordinator,
+    WorkerCrashed,
+)
 from ..models.experience import (
     ExperienceEfficiencyTracker,
     ExperienceOcrContinuityHint,
@@ -103,10 +115,13 @@ from ..models.experience import (
     ExperienceSnapshot,
     ExperienceTextReading,
     PaddleExperienceTextReader,
-    save_experience_ocr_learning_case,
+    read_experience_burst_frames_in_worker,
+    read_stat_window_exp_in_worker,
 )
 from ..models.controller_state import (
     BarDetectionDebug,
+    BottomHudLayout,
+    ExperienceBaselineCalibration,
     ExperienceOcrBurst,
     ExperienceOcrImageSignature,
     ExperienceOcrJob,
@@ -126,11 +141,15 @@ from ..services.settings_store import load_settings, save_settings
 from ..adapters.win_input import (
     Msg,
     Point,
+    client_to_screen_point,
+    click_client_point,
+    get_cursor_position,
     is_valid_window,
     is_window_minimized,
     key_down,
     key_up,
     parse_vk_key,
+    set_cursor_position,
     tap_hotkey,
     temporarily_make_window_topmost,
     user32,
@@ -152,6 +171,19 @@ EXPERIENCE_OCR_SIGNATURE_THUMB_HEIGHT = 18
 EXPERIENCE_OCR_SIGNATURE_CHANGED_PIXEL_DELTA = 4
 EXPERIENCE_OCR_SIGNATURE_MAX_MEAN_DIFF = 0.35
 EXPERIENCE_OCR_SIGNATURE_MAX_CHANGED_RATIO = 0.002
+EXPERIENCE_BASELINE_CALIBRATION_MAX_ATTEMPTS = 2
+EXPERIENCE_BASELINE_CALIBRATION_COOLDOWN_SECONDS = 30.0
+EXPERIENCE_BASELINE_CALIBRATION_TIMEOUT_SECONDS = 4.0
+EXPERIENCE_BASELINE_CALIBRATION_MENU_SETTLE_SECONDS = 0.18
+EXPERIENCE_BASELINE_CALIBRATION_STATS_SETTLE_SECONDS = 0.25
+HUD_LABEL_MATCH_THRESHOLD = 0.42
+HUD_LABEL_SCALE_MIN = 0.70
+HUD_LABEL_SCALE_MAX = 1.60
+HUD_LABEL_SCALE_STEP = 0.05
+HUD_LABEL_SCALE_TOLERANCE = 0.16
+HUD_LABEL_GEOMETRY_Y_TOLERANCE_RATIO = 1.10
+HUD_LABEL_BAR_SEARCH_RIGHT_RATIO = 0.48
+HUD_EXP_TEXT_RIGHT_PADDING_RATIO = 0.035
 BAR_PAIR_HP_MAX_LEFT_RATIO = 0.48
 BAR_PAIR_MIN_GAP_RATIO = 0.10
 BAR_PAIR_MAX_GAP_RATIO = 0.24
@@ -164,6 +196,16 @@ AUTO_DRINK_STOP_SOUND_PATH = PROJECT_ROOT / "media" / "auto-drink-stop.mp3"
 AUTO_PICKUP_START_SOUND_PATH = PROJECT_ROOT / "media" / "auto-pickup-start.mp3"
 AUTO_PICKUP_STOP_SOUND_PATH = PROJECT_ROOT / "media" / "auto-pickup-stop.mp3"
 POTION_TIME_EPSILON_SECONDS = 1e-9
+POTION_EXPERIENCE_DEFER_SECONDS = 1.0
+STAT_WINDOW_EXP_LABEL_TEMPLATE_MATCH_THRESHOLD = 0.80
+STAT_WINDOW_EXP_LABEL_TEMPLATE_PATH = PROJECT_ROOT / "maple_star" / "assets" / "stat_window_exp_label.png"
+HUD_LABEL_TEMPLATE_PATHS = {
+    "hp": PROJECT_ROOT / "maple_star" / "assets" / "hud_label_hp.png",
+    "mp": PROJECT_ROOT / "maple_star" / "assets" / "hud_label_mp.png",
+    "exp": PROJECT_ROOT / "maple_star" / "assets" / "hud_label_exp.png",
+}
+_STAT_WINDOW_EXP_LABEL_TEMPLATE: np.ndarray | None = None
+_HUD_LABEL_TEMPLATE_CACHE: dict[str, np.ndarray] = {}
 
 
 class AutoPotionController:
@@ -172,11 +214,17 @@ class AutoPotionController:
         is_target_window_active: Callable[[], bool],
         settings: AutoPotionSettings | None = None,
         target_window_provider: Callable[[], int] | None = None,
+        gui: object | None = None,
+        start_control_hotkey_worker: bool = True,
+        start_potion_action_worker: bool = True,
+        experience_executor: object | None = None,
+        runtime_processes_enabled: bool = True,
+        save_settings_on_cleanup: bool = True,
     ) -> None:
         self.is_target_window_active = is_target_window_active
         self.target_window_provider = target_window_provider
         self.settings = settings or load_settings()
-        self.gui = AutoPotionSettingsGui(self.settings)
+        self.gui = gui if gui is not None else AutoPotionSettingsGui(self.settings)
         self.gui.set_bar_preview_provider(self.capture_bar_preview_images)
         self.gui.set_experience_reset_handler(self.reset_experience_statistics)
         self.sct = mss.mss()
@@ -186,6 +234,7 @@ class AutoPotionController:
         self.experience_total_paused_seconds = 0.0
         self.last_hp_drink_at = -999.0
         self.last_mp_drink_at = -999.0
+        self.potion_send_prevalidated_at = -999.0
         self.hp_potion_effect_attempts: list[PotionEffectAttempt] = []
         self.mp_potion_effect_attempts: list[PotionEffectAttempt] = []
         self.hp_potion_no_effect_count = 0
@@ -211,10 +260,14 @@ class AutoPotionController:
         self.experience_toggle_hotkey_registered = False
         self.experience_reset_hotkey_registered = False
         self.pickup_toggle_hotkey_registered = False
-        self.control_hotkey_worker = ControlHotkeyWorker()
-        self.control_hotkey_worker.start()
-        self.potion_action_worker = PotionActionWorker()
-        self.potion_action_worker.start()
+        self.control_hotkeys_enabled = start_control_hotkey_worker
+        self.control_hotkey_worker = ControlHotkeyWorker() if start_control_hotkey_worker else None
+        if self.control_hotkey_worker is not None:
+            self.control_hotkey_worker.start()
+        start_potion_action_worker = start_potion_action_worker and not runtime_processes_enabled
+        self.potion_action_worker = PotionActionWorker() if start_potion_action_worker else None
+        if self.potion_action_worker is not None:
+            self.potion_action_worker.start()
         self.toggle_hotkey_was_down = False
         self.emergency_stop_hotkey_was_down = False
         self.experience_toggle_hotkey_was_down = False
@@ -242,14 +295,29 @@ class AutoPotionController:
         }
         self.bottom_bar_regions: dict[str, tuple[int, int, int, int]] = {}
         self.bottom_bar_track_regions: dict[str, tuple[int, int, int, int]] = {}
+        self.bottom_hud_layout: BottomHudLayout | None = None
         self.bottom_bar_regions_at = -999.0
         self.bottom_bar_client_bounds: tuple[int, int, int, int] | None = None
         self.stable_bar_samples: dict[str, tuple[float, tuple[int, int, int, int], float]] = {}
+        self.experience_text_region_bar_crop_left_ratios: list[float] = []
         self.experience_tracker = ExperienceEfficiencyTracker()
         self.experience_reader = PaddleExperienceTextReader()
-        self.experience_ocr_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="maple-exp-ocr")
+        if experience_executor is not None:
+            self.experience_ocr_executor = experience_executor
+        elif runtime_processes_enabled:
+            self.experience_ocr_executor = InlineExecutor()
+        else:
+            self.experience_ocr_executor = ProcessPoolExecutor(
+                max_workers=1,
+                mp_context=mp.get_context("spawn"),
+            )
         self.experience_ocr_job: ExperienceOcrJob | None = None
         self.experience_ocr_burst: ExperienceOcrBurst | None = None
+        self.experience_baseline_calibration: ExperienceBaselineCalibration | None = None
+        self.experience_baseline_ocr_job: ExperienceOcrJob | None = None
+        self.experience_baseline_calibration_attempts = 0
+        self.next_experience_baseline_calibration_at = 0.0
+        self.experience_baseline_cursor_position: tuple[int, int] | None = None
         self.last_completed_experience_ocr_signature: ExperienceOcrImageSignature | None = None
         self.last_failed_experience_ocr_signature: ExperienceOcrImageSignature | None = None
         self.last_experience_ocr_error_at = -999.0
@@ -262,7 +330,19 @@ class AutoPotionController:
         self.next_settings_save_at: float | None = None
         self.original_stdout: object | None = None
         self.original_stderr: object | None = None
-        self._sync_registered_control_hotkeys()
+        self.runtime_processes_enabled = runtime_processes_enabled
+        self.save_settings_on_cleanup = save_settings_on_cleanup
+        self.runtime_processes: RuntimeProcessCoordinator | None = None
+        self.runtime_settings_snapshot: tuple[object, ...] | None = None
+        self.runtime_target_hwnd = 0
+        self.runtime_control_state: tuple[bool, bool, bool] | None = None
+        self.runtime_potion_crash_reported = False
+        self.runtime_experience_crash_reported = False
+        self.last_runtime_potion_status_at = -999.0
+        if start_control_hotkey_worker:
+            self._sync_registered_control_hotkeys()
+        if runtime_processes_enabled:
+            self._start_runtime_processes()
 
     def install_console_redirect(self) -> None:
         if isinstance(sys.stdout, GuiConsoleWriter):
@@ -277,6 +357,132 @@ class AutoPotionController:
 
     def can_run_actions(self) -> bool:
         return self.scripts_enabled and self.gameplay_hud_active
+
+    def _runtime_processes_active(self) -> bool:
+        return bool(getattr(self, "runtime_processes_enabled", False) and getattr(self, "runtime_processes", None) is not None)
+
+    def _start_runtime_processes(self) -> None:
+        if getattr(self, "runtime_processes", None) is not None:
+            return
+        target_hwnd = self._target_window_handle()
+        self.runtime_processes = RuntimeProcessCoordinator(self.settings, target_hwnd)
+        self.runtime_processes.start()
+        self.runtime_target_hwnd = target_hwnd
+        self.runtime_settings_snapshot = None
+        self.runtime_control_state = None
+
+    def _send_runtime_settings_if_needed(self) -> None:
+        runtime = getattr(self, "runtime_processes", None)
+        if runtime is None:
+            return
+        snapshot = self.settings.snapshot()
+        if snapshot == getattr(self, "runtime_settings_snapshot", None):
+            return
+        self.runtime_settings_snapshot = snapshot
+        runtime.send_settings(self.settings)
+
+    def _send_runtime_target_if_needed(self) -> None:
+        runtime = getattr(self, "runtime_processes", None)
+        if runtime is None:
+            return
+        hwnd = self._target_window_handle()
+        if hwnd == getattr(self, "runtime_target_hwnd", 0):
+            return
+        self.runtime_target_hwnd = hwnd
+        runtime.send_target_window(hwnd)
+
+    def _send_runtime_controls_if_needed(self) -> None:
+        runtime = getattr(self, "runtime_processes", None)
+        if runtime is None:
+            return
+        state = (
+            bool(getattr(self, "auto_drink_enabled", False)),
+            bool(getattr(self, "scripts_enabled", False)),
+            bool(getattr(self.settings, "exp_efficiency_enabled", False)),
+        )
+        if state == getattr(self, "runtime_control_state", None):
+            return
+        self.runtime_control_state = state
+        runtime.send_potion_control(PotionControl(enabled=state[0], scripts_enabled=state[1]))
+        runtime.send_experience_control(ExperienceControl(enabled=state[2] and state[1], resume=state[2] and state[1]))
+
+    def _send_runtime_release_all_potions(self) -> None:
+        runtime = getattr(self, "runtime_processes", None)
+        if runtime is not None:
+            runtime.send_potion_control(
+                PotionControl(
+                    enabled=bool(getattr(self, "auto_drink_enabled", False)),
+                    scripts_enabled=bool(getattr(self, "scripts_enabled", False)),
+                    release_all=True,
+                )
+            )
+
+    def _update_runtime_processes(self, now: float) -> None:
+        runtime = getattr(self, "runtime_processes", None)
+        if runtime is None:
+            return
+        self._save_settings_when_idle(now)
+        target_active = self.is_target_window_active()
+        if target_active and not self.is_key_capture_blocking_actions():
+            self._sync_pickup_key_state()
+        else:
+            self._release_pickup_key()
+            if self.is_key_capture_blocking_actions():
+                self._send_runtime_release_all_potions()
+        self._send_runtime_target_if_needed()
+        self._send_runtime_settings_if_needed()
+        self._send_runtime_controls_if_needed()
+        self._drain_runtime_statuses()
+        self._report_runtime_worker_failures()
+
+    def _drain_runtime_statuses(self) -> None:
+        runtime = getattr(self, "runtime_processes", None)
+        if runtime is None:
+            return
+        for item in runtime.drain_potion_statuses():
+            if isinstance(item, PotionStatus):
+                self._apply_potion_status(item)
+            elif isinstance(item, WorkerCrashed):
+                self._apply_worker_crash(item)
+        for item in runtime.drain_experience_statuses():
+            if isinstance(item, ExperienceStatus):
+                self.gui.set_experience_snapshot(item.snapshot)
+            elif isinstance(item, WorkerCrashed):
+                self._apply_worker_crash(item)
+
+    def _apply_potion_status(self, status: PotionStatus) -> None:
+        self.gameplay_hud_active = status.gameplay_hud_active
+        self.gui.set_current_percentages(status.hp_percent, status.mp_percent)
+        self.gui.set_bar_detection_debug(status.hp_debug, status.mp_debug)
+        if status.status:
+            self.gui.set_status(status.status)
+        if status.notice:
+            self.gui.show_toggle_notice(status.notice)
+        if status.action:
+            self.last_action = status.action
+        for line in status.console_lines:
+            print(line)
+        self.last_runtime_potion_status_at = time.monotonic()
+
+    def _apply_worker_crash(self, crash: WorkerCrashed) -> None:
+        if crash.worker == "potion":
+            self.runtime_potion_crash_reported = True
+            self.auto_drink_enabled = False
+            self.gameplay_hud_active = False
+            self.gui.set_status(f"喝水 process 已停止：{crash.message}")
+            self.gui.show_toggle_notice("喝水 process 已停止")
+        elif crash.worker == "experience":
+            self.runtime_experience_crash_reported = True
+            self.gui.set_status(f"EXP process 已停止：{crash.message}")
+
+    def _report_runtime_worker_failures(self) -> None:
+        runtime = getattr(self, "runtime_processes", None)
+        if runtime is None:
+            return
+        if not runtime.potion_alive() and not getattr(self, "runtime_potion_crash_reported", False):
+            self._apply_worker_crash(WorkerCrashed("potion", "process exited"))
+        if not runtime.experience_alive() and not getattr(self, "runtime_experience_crash_reported", False):
+            self._apply_worker_crash(WorkerCrashed("experience", "process exited"))
 
     def _control_hotkey_vk(self, hotkey: str, fallback: str) -> int:
         try:
@@ -359,6 +565,8 @@ class AutoPotionController:
             worker.update_hotkeys({})
 
     def poll_control_hotkeys(self) -> None:
+        if not getattr(self, "control_hotkeys_enabled", True):
+            return
         if self.gui.is_detecting_key():
             self.toggle_hotkey_was_down = False
             self.emergency_stop_hotkey_was_down = False
@@ -690,6 +898,11 @@ class AutoPotionController:
         key_up(held_vk)
 
     def _release_all_potion_keys(self) -> None:
+        if self._runtime_processes_active():
+            self._send_runtime_release_all_potions()
+            self.hp_potion_held_vk = 0
+            self.mp_potion_held_vk = 0
+            return
         worker = getattr(self, "potion_action_worker", None)
         if worker is not None and (self.hp_potion_held_vk or self.mp_potion_held_vk):
             worker.release_all()
@@ -719,6 +932,13 @@ class AutoPotionController:
         self._set_potion_held_vk(bar_type, vk_code)
         return True
 
+    def _log_potion_key_trigger_interval(self, label: str, key_name: str, previous_at: float, now: float) -> None:
+        if previous_at <= -100.0:
+            interval_text = "首次"
+        else:
+            interval_text = f"{max(0.0, now - previous_at) * 1000.0:.0f}ms"
+        print(f"{label} 喝水按鍵觸發：{key_name}（間隔：{interval_text}）")
+
     def _tap_potion_key(self, bar_type: str, key_name: str) -> None:
         worker = getattr(self, "potion_action_worker", None)
         if worker is not None:
@@ -727,6 +947,31 @@ class AutoPotionController:
         tap_hotkey(key_name)
 
     def toggle_auto_drink_enabled(self) -> None:
+        if self._runtime_processes_active():
+            if self.auto_drink_enabled and self._has_out_of_potion_hold():
+                self._clear_potion_effect_state()
+                self.auto_drink_enabled = True
+                notice = "自動喝水已恢復"
+                action = f"{self.settings.toggle_hotkey} 自動喝水恢復"
+            else:
+                self.auto_drink_enabled = not self.auto_drink_enabled
+                notice = "自動喝水已啟用" if self.auto_drink_enabled else "自動喝水已暫停"
+                action = f"{self.settings.toggle_hotkey} {'自動喝水啟用' if self.auto_drink_enabled else '自動喝水暫停'}"
+            if self.auto_drink_enabled:
+                self._clear_potion_effect_state()
+                self._play_media_file(AUTO_DRINK_START_SOUND_PATH, "auto_drink_start")
+            else:
+                self._send_runtime_release_all_potions()
+                self._play_media_file(AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop")
+                self.gui.set_current_percentages(None, None)
+            self.gui.set_status(notice if self.auto_drink_enabled else f"自動喝水已暫停，按 {self.settings.toggle_hotkey} 恢復")
+            self.gui.show_toggle_notice(notice)
+            self.last_action = action
+            self.runtime_control_state = None
+            self._send_runtime_controls_if_needed()
+            print(f"{self.settings.toggle_hotkey}：{notice}")
+            return
+
         if self.auto_drink_enabled and self._has_out_of_potion_hold():
             self._clear_potion_effect_state()
             self._play_media_file(AUTO_DRINK_START_SOUND_PATH, "auto_drink_start")
@@ -764,10 +1009,25 @@ class AutoPotionController:
         now = time.monotonic()
         enabled = not self.settings.exp_efficiency_enabled
         self.gui.set_exp_efficiency_enabled(enabled)
+        if self._runtime_processes_active():
+            runtime = getattr(self, "runtime_processes", None)
+            if runtime is not None:
+                runtime.send_experience_control(ExperienceControl(enabled=enabled and self.scripts_enabled, resume=enabled, pause=not enabled))
+            self.runtime_control_state = None
+            snapshot = ExperienceSnapshot(status="等待下一次 EXP 樣本" if enabled else "已停用")
+            self.gui.set_experience_snapshot(snapshot)
+            self._play_toggle_beep(RESUME_BEEP_PATTERN if enabled else PAUSE_BEEP_PATTERN)
+            self.gui.set_status("經驗統計已啟用" if enabled else "經驗統計已停用")
+            self.gui.show_toggle_notice("經驗統計已啟用" if enabled else "經驗統計已停用")
+            self.last_action = f"{self.settings.experience_toggle_hotkey} {'經驗統計啟用' if enabled else '經驗統計停用'}"
+            print(f"{self.settings.experience_toggle_hotkey}：{'經驗統計已啟用' if enabled else '經驗統計已停用'}")
+            return
         if enabled:
             self._stop_experience_ocr_job()
             effective_now = self._resume_experience_clock(now)
             self.next_experience_capture_at = 0.0
+            if not getattr(self.experience_tracker, "samples", []):
+                self._reset_experience_baseline_calibration_attempts()
             self.experience_tracker.clear_transient_rejection()
             snapshot = self.experience_tracker.snapshot(effective_now)
             snapshot.status = "等待下一次 EXP 樣本" if snapshot.sample_count else "等待有效 EXP 樣本"
@@ -801,6 +1061,9 @@ class AutoPotionController:
             self.gui.set_status("總開關已啟用")
             self.gui.show_toggle_notice("總開關已啟用")
             self.last_action = f"{self.settings.emergency_stop_hotkey} 總開關啟用"
+            if self._runtime_processes_active():
+                self.runtime_control_state = None
+                self._send_runtime_controls_if_needed()
             print(f"{self.settings.emergency_stop_hotkey}：總開關已啟用")
             return
 
@@ -808,6 +1071,12 @@ class AutoPotionController:
         self.auto_drink_enabled = False
         self._release_pickup_key()
         self._release_all_potion_keys()
+        if self._runtime_processes_active():
+            runtime = getattr(self, "runtime_processes", None)
+            if runtime is not None:
+                runtime.send_potion_control(PotionControl(False, False, emergency_stop=True, release_all=True))
+                runtime.send_experience_control(ExperienceControl(False, pause=True))
+            self.runtime_control_state = None
         self.emergency_stop_requested = True
         self.last_hp_drink_at = now
         self.last_mp_drink_at = now
@@ -859,9 +1128,14 @@ class AutoPotionController:
                 if not self.gui.is_window_interaction_active():
                     self.gui.set_current_percentages(None, None)
             return
-        self._sync_registered_control_hotkeys()
+        if getattr(self, "control_hotkeys_enabled", True):
+            self._sync_registered_control_hotkeys()
         self.poll_control_hotkeys()
         self._save_settings_when_idle(now)
+
+        if self._runtime_processes_active():
+            self._update_runtime_processes(now)
+            return
 
         if self.is_key_capture_blocking_actions():
             self._release_pickup_key()
@@ -945,11 +1219,15 @@ class AutoPotionController:
                     self.gui.set_status("自動喝水監控中")
                     self.gui.refresh_bar_preview_once()
             if self.auto_drink_enabled and hp_percent is not None and mp_percent is not None:
+                self.potion_send_prevalidated_at = now
                 self._maybe_drink_hp(now, hp_percent)
                 self._maybe_drink_mp(now, mp_percent)
                 self._update_potion_effect_watch_cycles(now, hp_percent, mp_percent)
             if self.settings.exp_efficiency_enabled:
-                self._update_experience_efficiency(now)
+                if self._should_defer_experience_for_potion(now, hp_percent, mp_percent):
+                    self._defer_experience_for_potion_priority(now)
+                else:
+                    self._update_experience_efficiency(now)
             else:
                 self._stop_experience_ocr_job()
                 effective_now = self._pause_experience_clock(now)
@@ -973,9 +1251,21 @@ class AutoPotionController:
             self.next_settings_save_at = None
 
     def reset_experience_statistics(self) -> None:
+        if self._runtime_processes_active():
+            runtime = getattr(self, "runtime_processes", None)
+            if runtime is not None:
+                runtime.send_experience_control(
+                    ExperienceControl(
+                        enabled=bool(getattr(self.settings, "exp_efficiency_enabled", False)),
+                        reset=True,
+                    )
+                )
+            self.gui.set_experience_snapshot(ExperienceSnapshot(status="已重置"))
+            return
         self._stop_experience_ocr_job()
         self.experience_tracker.reset()
         self.next_experience_capture_at = 0.0
+        self._reset_experience_baseline_calibration_attempts()
 
     def _experience_effective_time(self, now: float) -> float:
         paused_total = float(getattr(self, "experience_total_paused_seconds", 0.0))
@@ -1056,7 +1346,7 @@ class AutoPotionController:
 
         for bar_type in ("mp", "hp"):
             try:
-                percent, _reason, _tail_clear = self._bar_percent_from_region_snapshot(
+                percent, reason, _tail_clear = self._bar_percent_from_region_snapshot(
                     regions[bar_type],
                     bar_type,
                     require_clear_tail=False,
@@ -1064,7 +1354,7 @@ class AutoPotionController:
                 )
             except Exception:
                 continue
-            if percent is not None:
+            if percent is not None and reason != "OK:EmptyTrack":
                 return True
         return False
 
@@ -1085,6 +1375,9 @@ class AutoPotionController:
 
     def _update_experience_efficiency(self, now: float) -> None:
         effective_now = self._resume_experience_clock(now)
+        if self._process_experience_baseline_calibration(now, effective_now=effective_now):
+            return
+
         if self._process_experience_ocr_job(now, effective_now=effective_now):
             return
 
@@ -1129,6 +1422,766 @@ class AutoPotionController:
         if not tracker_samples:
             return False
         return getattr(self, "last_failed_experience_ocr_signature", None) is None
+
+    def _process_experience_baseline_calibration(
+        self,
+        now: float,
+        *,
+        effective_now: float | None = None,
+    ) -> bool:
+        if effective_now is None:
+            effective_now = self._experience_effective_time(now)
+
+        if self._process_experience_baseline_ocr_job(now, effective_now=effective_now):
+            return True
+
+        state = getattr(self, "experience_baseline_calibration", None)
+        if state is None:
+            if not self._should_start_experience_baseline_calibration(now):
+                return False
+            state = ExperienceBaselineCalibration(
+                phase="opening_stats",
+                attempt=int(getattr(self, "experience_baseline_calibration_attempts", 0)) + 1,
+                started_at=now,
+                next_step_at=now,
+            )
+            self.experience_baseline_calibration = state
+            self.experience_baseline_calibration_attempts = state.attempt
+            snapshot = self.experience_tracker.snapshot(effective_now)
+            snapshot.status = "按能力值快捷鍵校準 EXP 基準"
+            self.gui.set_experience_snapshot(snapshot)
+            self._log_experience_baseline_calibration_event(
+                phase=state.phase,
+                decision="started",
+                completed_at=now,
+                effective_now=effective_now,
+                snapshot=snapshot,
+                click_step="character_stat_hotkey",
+            )
+
+        if now - state.started_at > EXPERIENCE_BASELINE_CALIBRATION_TIMEOUT_SECONDS:
+            self._fail_experience_baseline_calibration(
+                now,
+                effective_now,
+                "能力值 baseline 校準逾時",
+                close_ui=state.opened_ui,
+            )
+            return False
+        if now < state.next_step_at:
+            return True
+
+        if state.phase == "opening_stats":
+            return self._advance_experience_baseline_open_stats(state, now, effective_now)
+        if state.phase == "locating_stat_exp_roi":
+            return self._advance_experience_baseline_capture_roi(state, now, effective_now)
+        return False
+
+    def _process_experience_baseline_ocr_job(
+        self,
+        now: float,
+        *,
+        effective_now: float,
+    ) -> bool:
+        job = getattr(self, "experience_baseline_ocr_job", None)
+        if job is None:
+            return False
+        if self._experience_clock_is_paused():
+            self._cancel_experience_baseline_calibration(close_ui=True)
+            return True
+        if not job.future.done():
+            elapsed_seconds = max(0.0, now - job.submitted_at)
+            if elapsed_seconds >= EXPERIENCE_CAPTURE_INTERVAL_SECONDS:
+                snapshot = self.experience_tracker.snapshot(effective_now)
+                snapshot.status = f"能力值 EXP OCR 延遲：{elapsed_seconds:.1f}s"
+                self.gui.set_experience_snapshot(snapshot)
+            return True
+
+        self.experience_baseline_ocr_job = None
+        try:
+            reading = job.future.result()
+        except Exception as exc:
+            log_exception("能力值 EXP OCR 背景工作失敗")
+            reading = ExperienceTextReading(reason=f"能力值 EXP OCR 背景工作失敗：{exc}", source="stat_window")
+        job_elapsed_ms = max(0.0, now - job.submitted_at) * 1000.0
+        log_debug(
+            "EXP stat baseline OCR job "
+            f"elapsed_ms={job_elapsed_ms:.1f} result={'success' if reading.success else 'failure'} "
+            f"{self._experience_reading_log_fields(reading)} | reason={reading.reason}"
+        )
+
+        if reading.success and reading.current_exp is not None:
+            tracker_reading = self._stat_window_baseline_exp_only_reading(reading)
+            self.experience_tracker.record_ocr_result(True)
+            accepted = self.experience_tracker.add_reading(
+                effective_now,
+                tracker_reading.current_exp,
+                tracker_reading.percent,
+                confidence=tracker_reading.confidence,
+            )
+            snapshot = self.experience_tracker.snapshot(effective_now)
+            if accepted:
+                snapshot.status = "能力值 baseline 已校準"
+                self.next_experience_capture_at = now + BAR_CONFIRM_RETRY_DELAY_SECONDS
+                self._clear_failed_experience_ocr_signature()
+                self._log_experience_baseline_calibration_event(
+                    phase="ocr_baseline",
+                    decision="accepted",
+                    completed_at=now,
+                    effective_now=effective_now,
+                    snapshot=snapshot,
+                    reading=tracker_reading,
+                    roi_found=True,
+                    closed_by_esc=False,
+                    close_method="character_stat_hotkey",
+                    job_elapsed_ms=job_elapsed_ms,
+                )
+                self._clear_experience_baseline_calibration_state()
+                self.gui.set_experience_snapshot(snapshot)
+                return True
+
+            self._log_experience_sample_rejection(now, self.experience_tracker.last_status, tracker_reading)
+            snapshot.status = "能力值 baseline 已拒絕，改用底部 EXP OCR"
+            self._log_experience_baseline_calibration_event(
+                phase="ocr_baseline",
+                decision="rejected",
+                completed_at=now,
+                effective_now=effective_now,
+                snapshot=snapshot,
+                reading=tracker_reading,
+                roi_found=True,
+                closed_by_esc=False,
+                close_method="character_stat_hotkey",
+                fallback_reason=self.experience_tracker.last_status,
+                job_elapsed_ms=job_elapsed_ms,
+            )
+            self._finish_failed_experience_baseline_calibration(now)
+            self.gui.set_experience_snapshot(snapshot)
+            return False
+
+        self.experience_tracker.record_ocr_result(False)
+        self._log_experience_ocr_error(now, reading.reason, reading.text)
+        snapshot = self.experience_tracker.snapshot(effective_now)
+        if snapshot.sample_count == 0:
+            snapshot.status = "能力值 baseline OCR 失敗，改用底部 EXP OCR"
+        self._log_experience_baseline_calibration_event(
+            phase="ocr_baseline",
+            decision="ocr_failure",
+            completed_at=now,
+            effective_now=effective_now,
+            snapshot=snapshot,
+            reading=reading,
+            roi_found=True,
+            closed_by_esc=False,
+            close_method="character_stat_hotkey",
+            fallback_reason=reading.reason,
+            job_elapsed_ms=job_elapsed_ms,
+        )
+        self._finish_failed_experience_baseline_calibration(now)
+        self.gui.set_experience_snapshot(snapshot)
+        return False
+
+    def _stat_window_baseline_exp_only_reading(self, reading: ExperienceTextReading) -> ExperienceTextReading:
+        return ExperienceTextReading(
+            current_exp=reading.current_exp,
+            percent=None,
+            text=reading.text,
+            confidence=reading.confidence,
+            success=reading.success,
+            reason=reading.reason,
+            needs_bar_percent_guard=reading.needs_bar_percent_guard,
+            learning_case_id=reading.learning_case_id,
+            bar_percent=reading.bar_percent,
+            continuity_status=reading.continuity_status,
+            source=reading.source,
+        )
+
+    def _advance_experience_baseline_open_stats(
+        self,
+        state: ExperienceBaselineCalibration,
+        now: float,
+        effective_now: float,
+    ) -> bool:
+        self._move_cursor_for_experience_baseline_capture()
+        if not self._toggle_experience_stat_window():
+            self._restore_experience_baseline_cursor()
+            self._fail_experience_baseline_calibration(now, effective_now, "能力值快捷鍵設定無效", close_ui=False)
+            return False
+        state.opened_ui = True
+        state.phase = "locating_stat_exp_roi"
+        state.next_step_at = now + EXPERIENCE_BASELINE_CALIBRATION_STATS_SETTLE_SECONDS
+        snapshot = self.experience_tracker.snapshot(effective_now)
+        snapshot.status = "按能力值快捷鍵開啟視窗中"
+        self.gui.set_experience_snapshot(snapshot)
+        self._log_experience_baseline_calibration_event(
+            phase=state.phase,
+            decision="hotkey",
+            completed_at=now,
+            effective_now=effective_now,
+            snapshot=snapshot,
+            click_step="character_stat_hotkey",
+        )
+        return True
+
+    def _advance_experience_baseline_capture_roi(
+        self,
+        state: ExperienceBaselineCalibration,
+        now: float,
+        effective_now: float,
+    ) -> bool:
+        try:
+            image, _bounds = self._capture_foreground_client_image()
+            roi = self._locate_stat_window_exp_roi(image)
+        except Exception:
+            self._restore_experience_baseline_cursor()
+            raise
+        if roi is None:
+            self._fail_experience_baseline_calibration(now, effective_now, "找不到能力值 EXP ROI", close_ui=True)
+            return False
+
+        left, top, width, height = roi
+        crop = image[top : top + height, left : left + width].copy()
+        ocr_image = ExperienceOcrImage(crop, source_id="stat_window", roi_offset=roi)
+        image_signature = self._experience_ocr_image_signature([[ocr_image]])
+        self._close_experience_baseline_calibration_ui()
+        state.opened_ui = False
+        self._restore_experience_baseline_cursor()
+        future = self.experience_ocr_executor.submit(read_stat_window_exp_in_worker, ocr_image)
+        self.experience_baseline_ocr_job = ExperienceOcrJob(
+            submitted_at=now,
+            future=future,
+            image_signature=image_signature,
+            image_frames=[[ocr_image]],
+        )
+        state.phase = "ocr_baseline"
+        state.next_step_at = now
+        snapshot = self.experience_tracker.snapshot(effective_now)
+        snapshot.status = "讀取能力值 EXP baseline"
+        self.gui.set_experience_snapshot(snapshot)
+        self._log_experience_baseline_calibration_event(
+            phase=state.phase,
+            decision="captured",
+            completed_at=now,
+            effective_now=effective_now,
+            snapshot=snapshot,
+            roi_found=True,
+            closed_by_esc=False,
+            close_method="character_stat_hotkey",
+            click_step="stat_exp_roi",
+        )
+        return True
+
+    def _should_start_experience_baseline_calibration(self, now: float) -> bool:
+        if not getattr(self.settings, "exp_efficiency_enabled", False):
+            return False
+        if self._experience_clock_is_paused():
+            return False
+        if not getattr(self, "gameplay_hud_active", False):
+            return False
+        samples = getattr(self.experience_tracker, "samples", [])
+        if not isinstance(samples, list) or samples:
+            return False
+        if getattr(self, "experience_ocr_job", None) is not None:
+            return False
+        if getattr(self, "experience_ocr_burst", None) is not None:
+            return False
+        if getattr(self, "experience_baseline_ocr_job", None) is not None:
+            return False
+        if int(getattr(self, "experience_baseline_calibration_attempts", 0)) >= EXPERIENCE_BASELINE_CALIBRATION_MAX_ATTEMPTS:
+            return False
+        if now < float(getattr(self, "next_experience_baseline_calibration_at", 0.0)):
+            return False
+        return True
+
+    def _capture_foreground_client_image(self) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+        bounds = self._foreground_client_bounds()
+        left, top, width, height = bounds
+        image = np.asarray(
+            self.sct.grab({"left": left, "top": top, "width": width, "height": height})
+        ).copy()
+        return image, bounds
+
+    def _locate_experience_menu_button(self, image: np.ndarray) -> tuple[int, int] | None:
+        height, width = image.shape[:2]
+        if width <= 0 or height <= 0:
+            return None
+        crop_left = round(width * 0.45)
+        crop_top = round(height * 0.88)
+        crop_right = round(width * 0.88)
+        crop_bottom = round(height * 0.995)
+        candidates = self._blue_button_components(
+            image[crop_top:crop_bottom, crop_left:crop_right],
+            offset=(crop_left, crop_top),
+            min_width=max(48, round(width * 0.035)),
+            min_height=max(22, round(height * 0.025)),
+        )
+        if not candidates:
+            return None
+        target_x = width * 0.665
+        target_y = height * 0.955
+        best = min(
+            candidates,
+            key=lambda rect: (
+                abs((rect[0] + rect[2] / 2.0) - target_x) / max(1.0, width)
+                + abs((rect[1] + rect[3] / 2.0) - target_y) / max(1.0, height),
+                -rect[2] * rect[3],
+            ),
+        )
+        return self._rect_center(best)
+
+    def _locate_experience_ability_button(self, image: np.ndarray) -> tuple[int, int] | None:
+        height, width = image.shape[:2]
+        if width <= 0 or height <= 0:
+            return None
+        crop_left = round(width * 0.55)
+        crop_top = round(height * 0.45)
+        crop_right = round(width * 0.82)
+        crop_bottom = round(height * 0.93)
+        candidates = self._blue_button_components(
+            image[crop_top:crop_bottom, crop_left:crop_right],
+            offset=(crop_left, crop_top),
+            min_width=max(54, round(width * 0.04)),
+            min_height=max(24, round(height * 0.025)),
+        )
+        if len(candidates) < 3:
+            return None
+        candidates.sort(key=lambda rect: (rect[1], rect[0]))
+        stack = self._largest_vertical_button_stack(candidates)
+        if len(stack) < 3:
+            return None
+        return self._rect_center(sorted(stack, key=lambda rect: rect[1])[2])
+
+    def _locate_stat_window_exp_roi(self, image: np.ndarray) -> tuple[int, int, int, int] | None:
+        height, width = image.shape[:2]
+        if width <= 0 or height <= 0:
+            return None
+        crop_left = 0
+        crop_top = 0
+        crop_right = width
+        crop_bottom = height
+        crop = image[crop_top:crop_bottom, crop_left:crop_right]
+        exp_label = self._locate_stat_window_exp_label_by_fixed_template(image)
+        if exp_label is None:
+            labels = self._stat_window_green_label_components(crop, offset=(crop_left, crop_top))
+            exp_label = self._locate_stat_window_exp_label_by_template(image, labels)
+            if exp_label is None:
+                label_stack = self._largest_vertical_button_stack(labels, x_tolerance=max(24, round(width * 0.02)))
+                if len(label_stack) < 7:
+                    return None
+                exp_label = sorted(label_stack, key=lambda rect: rect[1])[6]
+        return self._stat_window_value_roi_from_label(image, exp_label)
+
+    def _stat_window_value_roi_from_label(
+        self,
+        image: np.ndarray,
+        exp_label: tuple[int, int, int, int],
+    ) -> tuple[int, int, int, int] | None:
+        height, width = image.shape[:2]
+        row_top = max(0, exp_label[1] - max(2, round(exp_label[3] * 0.12)))
+        row_bottom = min(height, exp_label[1] + exp_label[3] + max(2, round(exp_label[3] * 0.12)))
+        value_left = min(width - 1, exp_label[0] + exp_label[2] + max(4, round(exp_label[3] * 0.25)))
+        value_right = self._stat_window_white_value_row_right(image, value_left, row_top, row_bottom)
+        if value_right is None:
+            value_right = min(width, value_left + max(120, round(width * 0.14)))
+        roi_width = max(1, value_right - value_left)
+        roi_height = max(1, row_bottom - row_top)
+        if roi_width < max(60, round(width * 0.04)) or roi_height < 8:
+            return None
+        return value_left, row_top, roi_width, roi_height
+
+    def _locate_stat_window_exp_label_by_fixed_template(
+        self,
+        image: np.ndarray,
+    ) -> tuple[int, int, int, int] | None:
+        template = self._stat_window_fixed_exp_label_template()
+        if template is None or image.size == 0:
+            return None
+        search = image[:, :, :3]
+        template_height, template_width = template.shape[:2]
+        if search.shape[0] < template_height or search.shape[1] < template_width:
+            return None
+        match = cv2.matchTemplate(search, template, cv2.TM_CCOEFF_NORMED)
+        if match.size == 0:
+            return None
+        _min_value, max_value, _min_location, max_location = cv2.minMaxLoc(match)
+        if max_value < STAT_WINDOW_EXP_LABEL_TEMPLATE_MATCH_THRESHOLD:
+            return None
+        x, y = max_location
+        return int(x), int(y), int(template_width), int(template_height)
+
+    def _stat_window_fixed_exp_label_template(self) -> np.ndarray | None:
+        global _STAT_WINDOW_EXP_LABEL_TEMPLATE
+        if _STAT_WINDOW_EXP_LABEL_TEMPLATE is not None:
+            return _STAT_WINDOW_EXP_LABEL_TEMPLATE
+        try:
+            decoded = cv2.imread(str(STAT_WINDOW_EXP_LABEL_TEMPLATE_PATH), cv2.IMREAD_COLOR)
+        except Exception:
+            return None
+        if decoded is None or decoded.size == 0:
+            return None
+        _STAT_WINDOW_EXP_LABEL_TEMPLATE = decoded
+        return _STAT_WINDOW_EXP_LABEL_TEMPLATE
+
+    def _locate_stat_window_exp_label_by_template(
+        self,
+        image: np.ndarray,
+        labels: list[tuple[int, int, int, int]],
+    ) -> tuple[int, int, int, int] | None:
+        best: tuple[float, tuple[int, int, int, int] | None] = (0.0, None)
+        second_best = 0.0
+        for rect in labels:
+            x, y, width, height = rect
+            crop = image[y : y + height, x : x + width]
+            score = self._stat_window_exp_label_template_score(crop)
+            if score > best[0]:
+                second_best = best[0]
+                best = (score, rect)
+            elif score > second_best:
+                second_best = score
+        if best[0] < 0.55:
+            return None
+        if best[0] < 0.85 and best[0] - second_best < 0.12:
+            return None
+        return best[1]
+
+    def _stat_window_exp_label_template_score(self, crop: np.ndarray) -> float:
+        if crop.size == 0:
+            return 0.0
+        height, width = crop.shape[:2]
+        if width < 24 or height < 12:
+            return 0.0
+        text_mask = self._stat_window_label_text_mask(crop)
+        if text_mask.mean() < 0.01:
+            return 0.0
+        ys, xs = np.where(text_mask > 0)
+        if xs.size == 0 or ys.size == 0:
+            return 0.0
+        text_width_ratio = (int(xs.max()) - int(xs.min()) + 1) / max(1, width)
+        if text_width_ratio < 0.34:
+            return 0.0
+        match_score = 0.0
+        for template in self._stat_window_exp_label_templates(width, height):
+            match = cv2.matchTemplate(
+                text_mask.astype(np.float32),
+                template.astype(np.float32),
+                cv2.TM_CCOEFF_NORMED,
+            )
+            if match.size:
+                match_score = max(match_score, float(match[0, 0]))
+        count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(text_mask, connectivity=8)
+        component_count = 0
+        for index in range(1, count):
+            area = int(stats[index, cv2.CC_STAT_AREA])
+            if area >= max(2, height // 8):
+                component_count += 1
+        feature_bonus = 0.0
+        if 0.42 <= text_width_ratio <= 0.86:
+            feature_bonus += 0.12
+        if 2 <= component_count <= 5:
+            feature_bonus += 0.08
+        return max(0.0, match_score) * 0.8 + feature_bonus
+
+    def _stat_window_label_text_mask(self, crop: np.ndarray) -> np.ndarray:
+        bgr = crop[:, :, :3].astype(np.float32)
+        luminance = bgr[:, :, 2] * 0.299 + bgr[:, :, 1] * 0.587 + bgr[:, :, 0] * 0.114
+        chroma = np.max(bgr, axis=2) - np.min(bgr, axis=2)
+        mask = ((luminance > 170.0) & (chroma < 95.0)).astype(np.uint8) * 255
+        return cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), dtype=np.uint8))
+
+    def _stat_window_exp_label_templates(self, width: int, height: int) -> list[np.ndarray]:
+        templates: list[np.ndarray] = []
+        base = min(width / 70.0, height / 28.0)
+        for scale_factor in (0.56, 0.62, 0.70):
+            for y_ratio in (0.74, 0.80, 0.88):
+                template = np.zeros((height, width), dtype=np.uint8)
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                scale = max(0.35, base * scale_factor)
+                thickness = max(1, round(height / 16))
+                text_width, text_height = cv2.getTextSize("EXP", font, scale, thickness)[0]
+                x = max(0, round((width - text_width) * 0.18))
+                y = min(height - 2, max(text_height + 1, round(height * y_ratio)))
+                cv2.putText(template, "EXP", (x, y), font, scale, 255, thickness, cv2.LINE_AA)
+                templates.append(template)
+        return templates
+
+    def _blue_button_components(
+        self,
+        image: np.ndarray,
+        *,
+        offset: tuple[int, int],
+        min_width: int,
+        min_height: int,
+    ) -> list[tuple[int, int, int, int]]:
+        if image.size == 0:
+            return []
+        bgr = image[:, :, :3].astype(np.int16)
+        blue = bgr[:, :, 0]
+        green = bgr[:, :, 1]
+        red = bgr[:, :, 2]
+        mask = (blue > 105) & (green > 85) & (red < 150) & (blue > red + 35)
+        kernel = np.ones((max(3, min_height // 3), max(9, min_width // 4)), dtype=np.uint8)
+        return self._mask_components(mask, offset=offset, kernel=kernel, min_width=min_width, min_height=min_height)
+
+    def _stat_window_green_label_components(
+        self,
+        image: np.ndarray,
+        *,
+        offset: tuple[int, int],
+    ) -> list[tuple[int, int, int, int]]:
+        if image.size == 0:
+            return []
+        bgr = image[:, :, :3].astype(np.int16)
+        blue = bgr[:, :, 0]
+        green = bgr[:, :, 1]
+        red = bgr[:, :, 2]
+        mask = (green > 135) & (red > 70) & (blue < 145) & (green > blue + 35)
+        min_width = max(34, round(image.shape[1] * 0.025))
+        min_height = max(14, round(image.shape[0] * 0.02))
+        kernel = np.ones((max(3, min_height // 3), max(8, min_width // 4)), dtype=np.uint8)
+        return self._mask_components(mask, offset=offset, kernel=kernel, min_width=min_width, min_height=min_height)
+
+    def _mask_components(
+        self,
+        mask: np.ndarray,
+        *,
+        offset: tuple[int, int],
+        kernel: np.ndarray,
+        min_width: int,
+        min_height: int,
+    ) -> list[tuple[int, int, int, int]]:
+        if mask.size == 0:
+            return []
+        prepared = (mask.astype(np.uint8) * 255)
+        prepared = cv2.morphologyEx(prepared, cv2.MORPH_CLOSE, kernel)
+        count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(prepared, connectivity=8)
+        components: list[tuple[int, int, int, int]] = []
+        offset_x, offset_y = offset
+        for index in range(1, count):
+            x = int(stats[index, cv2.CC_STAT_LEFT])
+            y = int(stats[index, cv2.CC_STAT_TOP])
+            width = int(stats[index, cv2.CC_STAT_WIDTH])
+            height = int(stats[index, cv2.CC_STAT_HEIGHT])
+            area = int(stats[index, cv2.CC_STAT_AREA])
+            if width < min_width or height < min_height:
+                continue
+            if area < max(1, width * height // 5):
+                continue
+            components.append((offset_x + x, offset_y + y, width, height))
+        return components
+
+    def _largest_vertical_button_stack(
+        self,
+        rects: list[tuple[int, int, int, int]],
+        *,
+        x_tolerance: int = 48,
+    ) -> list[tuple[int, int, int, int]]:
+        if not rects:
+            return []
+        best: list[tuple[int, int, int, int]] = []
+        for anchor in rects:
+            anchor_center = anchor[0] + anchor[2] / 2.0
+            group = [
+                rect
+                for rect in rects
+                if abs((rect[0] + rect[2] / 2.0) - anchor_center) <= x_tolerance
+            ]
+            if len(group) > len(best):
+                best = group
+        return best
+
+    def _stat_window_white_value_row_right(
+        self,
+        image: np.ndarray,
+        value_left: int,
+        row_top: int,
+        row_bottom: int,
+    ) -> int | None:
+        row = image[row_top:row_bottom, value_left:]
+        if row.size == 0:
+            return None
+        bgr = row[:, :, :3].astype(np.float32)
+        luminance = bgr[:, :, 2] * 0.299 + bgr[:, :, 1] * 0.587 + bgr[:, :, 0] * 0.114
+        chroma = np.max(bgr, axis=2) - np.min(bgr, axis=2)
+        mask = (luminance > 170.0) & (chroma < 70.0)
+        column_hits = mask.mean(axis=0) >= 0.35
+        runs = self._boolean_runs(column_hits)
+        if not runs:
+            return None
+        valid_runs = [run for run in runs if run[1] - run[0] >= 40]
+        if not valid_runs:
+            return None
+        run = valid_runs[0]
+        return value_left + int(run[1])
+
+    def _rect_center(self, rect: tuple[int, int, int, int]) -> tuple[int, int]:
+        return int(rect[0] + rect[2] / 2.0), int(rect[1] + rect[3] / 2.0)
+
+    def _boolean_runs(self, values: np.ndarray) -> list[tuple[int, int]]:
+        if values.size == 0:
+            return []
+        padded = np.concatenate(([False], values.astype(bool), [False]))
+        changes = np.flatnonzero(padded[1:] != padded[:-1])
+        return [(int(start), int(end)) for start, end in zip(changes[::2], changes[1::2])]
+
+    def _click_experience_baseline_client_point(self, x: int, y: int) -> None:
+        hwnd = user32.GetForegroundWindow()
+        click_client_point(int(hwnd), int(x), int(y), preserve_cursor_position=True)
+
+    def _move_cursor_for_experience_baseline_capture(self) -> None:
+        if getattr(self, "experience_baseline_cursor_position", None) is not None:
+            return
+        try:
+            original_position = get_cursor_position()
+            hwnd = self._experience_baseline_target_hwnd()
+            width, height = window_client_size(hwnd)
+            if width <= 0 or height <= 0:
+                return
+            screen_x, screen_y = client_to_screen_point(
+                hwnd,
+                max(0, min(width - 1, 8)),
+                max(0, height - 8),
+            )
+            set_cursor_position(screen_x, screen_y)
+            self.experience_baseline_cursor_position = original_position
+        except Exception as exc:
+            log_debug(f"EXP baseline cursor move skipped: {exc}")
+
+    def _experience_baseline_target_hwnd(self) -> int:
+        target_provider = getattr(self, "target_window_provider", None)
+        if target_provider is not None:
+            try:
+                hwnd = int(target_provider() or 0)
+                if hwnd:
+                    self.last_target_hwnd = hwnd
+                    return hwnd
+            except Exception:
+                pass
+        hwnd = int(getattr(self, "last_target_hwnd", 0) or 0)
+        if hwnd:
+            return hwnd
+        return int(user32.GetForegroundWindow() or 0)
+
+    def _restore_experience_baseline_cursor(self) -> None:
+        original_position = getattr(self, "experience_baseline_cursor_position", None)
+        self.experience_baseline_cursor_position = None
+        if original_position is None:
+            return
+        with contextlib.suppress(Exception):
+            set_cursor_position(*original_position)
+
+    def _close_experience_baseline_calibration_ui(self) -> None:
+        self._toggle_experience_stat_window()
+
+    def _toggle_experience_stat_window(self) -> bool:
+        hotkey = getattr(self.settings, "character_stat_hotkey", "").strip()
+        if not hotkey:
+            return False
+        try:
+            tap_hotkey(hotkey)
+        except Exception:
+            return False
+        return True
+
+    def _fail_experience_baseline_calibration(
+        self,
+        now: float,
+        effective_now: float,
+        reason: str,
+        *,
+        close_ui: bool,
+    ) -> None:
+        if close_ui:
+            with contextlib.suppress(Exception):
+                self._close_experience_baseline_calibration_ui()
+        snapshot = self.experience_tracker.snapshot(effective_now)
+        if snapshot.sample_count == 0:
+            snapshot.status = f"{reason}，改用底部 EXP OCR"
+        self._log_experience_baseline_calibration_event(
+            phase=getattr(getattr(self, "experience_baseline_calibration", None), "phase", "failed"),
+            decision="fallback",
+            completed_at=now,
+            effective_now=effective_now,
+            snapshot=snapshot,
+            fallback_reason=reason,
+            closed_by_esc=close_ui,
+            close_method="character_stat_hotkey" if close_ui else "",
+        )
+        self._finish_failed_experience_baseline_calibration(now)
+        self.gui.set_experience_snapshot(snapshot)
+
+    def _finish_failed_experience_baseline_calibration(self, now: float) -> None:
+        self._clear_experience_baseline_calibration_state()
+        self.next_experience_baseline_calibration_at = now + EXPERIENCE_BASELINE_CALIBRATION_COOLDOWN_SECONDS
+        self.next_experience_capture_at = 0.0
+
+    def _clear_experience_baseline_calibration_state(self) -> None:
+        self._restore_experience_baseline_cursor()
+        self.experience_baseline_calibration = None
+
+    def _cancel_experience_baseline_calibration(self, *, close_ui: bool) -> None:
+        job = getattr(self, "experience_baseline_ocr_job", None)
+        if job is not None:
+            job.future.cancel()
+            self.experience_baseline_ocr_job = None
+        state = getattr(self, "experience_baseline_calibration", None)
+        if close_ui and state is not None and state.opened_ui:
+            with contextlib.suppress(Exception):
+                self._close_experience_baseline_calibration_ui()
+        self._clear_experience_baseline_calibration_state()
+
+    def _reset_experience_baseline_calibration_attempts(self) -> None:
+        self._cancel_experience_baseline_calibration(close_ui=True)
+        self.experience_baseline_calibration_attempts = 0
+        self.next_experience_baseline_calibration_at = 0.0
+
+    def _log_experience_baseline_calibration_event(
+        self,
+        *,
+        phase: str,
+        decision: str,
+        completed_at: float,
+        effective_now: float,
+        snapshot: ExperienceSnapshot,
+        reading: ExperienceTextReading | None = None,
+        roi_found: bool = False,
+        closed_by_esc: bool = False,
+        click_step: str = "",
+        fallback_reason: str = "",
+        close_method: str = "",
+        job_elapsed_ms: float | None = None,
+    ) -> None:
+        log_experience_debug(
+            {
+                "event": "experience_baseline_calibration",
+                "phase": phase,
+                "source": "stat_window",
+                "roi_found": bool(roi_found),
+                "click_step": click_step,
+                "closed_by_esc": bool(closed_by_esc),
+                "close_method": close_method,
+                "decision": decision,
+                "fallback_reason": fallback_reason,
+                "completed_at": self._experience_debug_number(completed_at),
+                "effective_now": self._experience_debug_number(effective_now),
+                "job_elapsed_ms": self._experience_debug_number(job_elapsed_ms),
+                "success": bool(reading.success) if reading is not None else False,
+                "text": reading.text if reading is not None else "",
+                "current_exp": reading.current_exp if reading is not None else None,
+                "percent": self._experience_debug_number(reading.percent if reading is not None else None),
+                "confidence": self._experience_debug_number(reading.confidence if reading is not None else None),
+                "reason": reading.reason if reading is not None else fallback_reason,
+                "tracker_status": str(getattr(self.experience_tracker, "last_status", snapshot.status)),
+                "sample_count": self._experience_debug_number(snapshot.sample_count),
+                "sample_attempt_count": self._experience_debug_number(snapshot.sample_attempt_count),
+                "sample_accept_count": self._experience_debug_number(snapshot.sample_accept_count),
+                "ocr_attempt_count": self._experience_debug_number(snapshot.ocr_attempt_count),
+                "ocr_success_count": self._experience_debug_number(snapshot.ocr_success_count),
+                "xp_per_5m": self._experience_debug_number(snapshot.xp_per_5m),
+                "xp_per_10m": self._experience_debug_number(snapshot.xp_per_10m),
+                "xp_per_hour": self._experience_debug_number(snapshot.xp_per_hour),
+                "eta_seconds": self._experience_debug_number(snapshot.eta_seconds),
+                "rate_confidence": self._experience_debug_number(snapshot.rate_confidence),
+            }
+        )
 
     def _continue_experience_ocr_burst(self, now: float, *, effective_now: float | None = None) -> bool:
         burst = getattr(self, "experience_ocr_burst", None)
@@ -1229,14 +2282,14 @@ class AutoPotionController:
         copied_frames = [[self._copy_experience_ocr_image(image) for image in images] for images in image_frames]
         if continuity_hint is None:
             future = self.experience_ocr_executor.submit(
-                self.experience_reader.read_burst_frames,
+                read_experience_burst_frames_in_worker,
                 copied_frames,
             )
         else:
             future = self.experience_ocr_executor.submit(
-                self.experience_reader.read_burst_frames,
+                read_experience_burst_frames_in_worker,
                 copied_frames,
-                continuity_hint=continuity_hint,
+                continuity_hint,
             )
         self.experience_ocr_job = ExperienceOcrJob(
             submitted_at=now,
@@ -1405,7 +2458,6 @@ class AutoPotionController:
         )
 
         self._log_experience_ocr_reading(reading)
-        self._log_experience_learning_case(reading)
         if reading.success and reading.current_exp is not None:
             tracker_samples = getattr(self.experience_tracker, "samples", None)
             has_tracker_samples = not isinstance(tracker_samples, list) or bool(tracker_samples)
@@ -1454,7 +2506,6 @@ class AutoPotionController:
                     return True
                 self._remember_failed_experience_ocr_signature(job)
                 self._log_experience_sample_rejection(now, self.experience_tracker.last_status, reading)
-                self._save_rejected_experience_learning_case(job, reading, trigger="tracker_rejected")
                 snapshot = self.experience_tracker.snapshot(effective_now)
                 snapshot.status = "樣本已拒絕，詳見 Console"
                 self._log_experience_debug_reading(
@@ -1489,8 +2540,6 @@ class AutoPotionController:
 
         self._remember_failed_experience_ocr_signature(job)
         self.experience_tracker.record_ocr_result(False)
-        if self._experience_reading_is_continuity_rejected(reading):
-            self._save_rejected_experience_learning_case(job, reading, trigger="ocr_continuity_rejected")
         self._log_experience_ocr_error(now, reading.reason, reading.text)
         snapshot = self.experience_tracker.snapshot(effective_now)
         if snapshot.sample_count == 0:
@@ -1568,34 +2617,6 @@ class AutoPotionController:
             return None
         return value if isinstance(value, (int, float)) else None
 
-    def _experience_reading_is_continuity_rejected(self, reading: ExperienceTextReading) -> bool:
-        return reading.continuity_status == "incompatible" or reading.reason == "EXP OCR 連續性不可信"
-
-    def _save_rejected_experience_learning_case(
-        self,
-        job: ExperienceOcrJob,
-        reading: ExperienceTextReading,
-        *,
-        trigger: str,
-    ) -> None:
-        if reading.learning_case_id:
-            return
-        image_frames = job.image_frames
-        if not image_frames:
-            return
-        case_id = save_experience_ocr_learning_case(
-            image_frames,
-            trigger=trigger,
-            pixel_reading=None,
-            paddle_reading=None,
-            final_reading=reading,
-            bar_percent=reading.bar_percent,
-        )
-        if not case_id:
-            return
-        reading.learning_case_id = case_id
-        self._log_experience_learning_case(reading)
-
     def _experience_debug_number(self, value: object) -> int | float | None:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
@@ -1605,6 +2626,7 @@ class AutoPotionController:
         return value
 
     def _stop_experience_ocr_job(self) -> None:
+        self._cancel_experience_baseline_calibration(close_ui=True)
         self.experience_ocr_burst = None
         self._clear_failed_experience_ocr_signature()
         self._clear_completed_experience_ocr_signature()
@@ -1633,10 +2655,6 @@ class AutoPotionController:
             f"result={result} | {self._experience_reading_log_fields(reading)} | reason={reading.reason}"
         )
 
-    def _log_experience_learning_case(self, reading: ExperienceTextReading) -> None:
-        if reading.learning_case_id:
-            print(f"EXP OCR learning case: {reading.learning_case_id}")
-
     def _log_experience_sample_rejection(
         self,
         now: float,
@@ -1663,17 +2681,43 @@ class AutoPotionController:
         )
 
     def _experience_text_regions(self) -> list[tuple[int, int, int, int]]:
-        primary = self._experience_text_region()
-        if primary is None:
-            return []
+        regions: list[tuple[int, int, int, int]] = []
+        ratios: list[float] = []
+        layout = getattr(self, "bottom_hud_layout", None)
+        if layout is not None and layout.exp_text_region is not None:
+            regions.append(layout.exp_text_region)
+            if layout.exp_track_region is not None and layout.exp_track_region[2] > 0:
+                ratios.append(
+                    max(
+                        0.0,
+                        min(
+                            0.98,
+                            (layout.exp_text_region[0] - layout.exp_track_region[0])
+                            / layout.exp_track_region[2],
+                        ),
+                    )
+                )
+            else:
+                ratios.append(0.0)
+            self.experience_text_region_bar_crop_left_ratios = ratios
+            return regions
 
-        regions = [primary]
+        primary = self._experience_text_region()
+        if primary is not None and primary not in regions:
+            regions.append(primary)
+            ratios.append(EXPERIENCE_TEXT_LEFT_RATIO)
+
         wide = self._wide_experience_text_region()
         if wide is not None and wide not in regions:
             regions.append(wide)
+            ratios.append(EXPERIENCE_WIDE_TEXT_LEFT_RATIO)
+        self.experience_text_region_bar_crop_left_ratios = ratios
         return regions
 
     def _experience_text_region_bar_crop_left_ratio(self, region_index: int) -> float:
+        ratios = getattr(self, "experience_text_region_bar_crop_left_ratios", [])
+        if 0 <= region_index < len(ratios):
+            return ratios[region_index]
         return EXPERIENCE_WIDE_TEXT_LEFT_RATIO if region_index == 1 else EXPERIENCE_TEXT_LEFT_RATIO
 
     def _experience_text_region(self) -> tuple[int, int, int, int] | None:
@@ -1787,18 +2831,18 @@ class AutoPotionController:
             self._release_potion_key(bar_type)
             self._clear_potion_attempt_state(bar_type)
             return
-        if (
-            not continuous_enabled
-            and now - self._last_potion_drink_at(bar_type) + POTION_TIME_EPSILON_SECONDS
-            < self._potion_cooldown_seconds(bar_type)
-        ):
+        if not continuous_enabled and abs(now - self._last_potion_drink_at(bar_type)) <= POTION_TIME_EPSILON_SECONDS:
             return
         if not self._is_target_window_active_before_send(label, now):
             if continuous_enabled:
                 self._release_potion_key(bar_type)
             return
 
-        percent = self._capture_confirmed_bar_percent(bar_type, percent)
+        if self._can_use_fast_repeat_potion_sample(bar_type):
+            confirmed_percent = percent
+        else:
+            confirmed_percent = self._capture_confirmed_bar_percent(bar_type, percent)
+        percent = confirmed_percent
         if percent is None:
             if continuous_enabled:
                 self._release_potion_key(bar_type)
@@ -1814,17 +2858,72 @@ class AutoPotionController:
             return
 
         if continuous_enabled:
+            previous_at = self._last_potion_drink_at(bar_type)
+            was_held = self._potion_held_vk(bar_type) != 0
             if not self._hold_potion_key(bar_type, label, key_name):
                 return
+            if not was_held:
+                self._log_potion_key_trigger_interval(label, key_name, previous_at, now)
             self._set_last_potion_drink_at(bar_type, now)
             self._record_continuous_potion_effect_attempt(bar_type, now, percent)
             self.last_action = f"{label} 連續喝水：{key_name}"
             return
 
+        previous_at = self._last_potion_drink_at(bar_type)
         self._tap_potion_key(bar_type, key_name)
+        self._log_potion_key_trigger_interval(label, key_name, previous_at, now)
         self._set_last_potion_drink_at(bar_type, now)
         self._record_potion_effect_attempt(bar_type, now, percent)
         self.last_action = f"{label} 喝水：{key_name}"
+
+    def _can_use_fast_repeat_potion_sample(self, bar_type: str) -> bool:
+        return self._last_potion_drink_at(bar_type) > -100.0
+
+    def _should_defer_experience_for_potion(
+        self,
+        now: float,
+        hp_percent: float | None,
+        mp_percent: float | None,
+    ) -> bool:
+        if not self.auto_drink_enabled:
+            return False
+        return self._should_defer_experience_for_potion_bar(
+            "hp",
+            hp_percent,
+            self.settings.hp_enabled,
+            self.settings.hp_threshold_percent,
+            now,
+        ) or self._should_defer_experience_for_potion_bar(
+            "mp",
+            mp_percent,
+            self.settings.mp_enabled,
+            self.settings.mp_threshold_percent,
+            now,
+        )
+
+    def _should_defer_experience_for_potion_bar(
+        self,
+        bar_type: str,
+        percent: float | None,
+        enabled: bool,
+        threshold_percent: float,
+        now: float,
+    ) -> bool:
+        if not enabled or self._out_of_potion_hold(bar_type) is not None:
+            return False
+        if self._potion_held_vk(bar_type):
+            return True
+        if percent is not None and should_drink_for_threshold(percent, threshold_percent):
+            return True
+        return now - self._last_potion_drink_at(bar_type) < POTION_EXPERIENCE_DEFER_SECONDS
+
+    def _defer_experience_for_potion_priority(self, now: float) -> None:
+        if self.experience_ocr_burst is not None:
+            self.experience_ocr_burst = None
+        self.next_experience_capture_at = max(
+            self.next_experience_capture_at,
+            now + POTION_EXPERIENCE_DEFER_SECONDS,
+        )
 
     def _update_potion_effect_watch_cycles(self, now: float, hp_percent: float, mp_percent: float) -> bool:
         if self.settings.hp_enabled:
@@ -2186,8 +3285,13 @@ class AutoPotionController:
         print(f"{label} 連續 {POTION_EFFECT_NO_EFFECT_LIMIT} 次喝水未見回升，已停止 {label} 喝水：{current_percent:.0f}%")
 
     def _is_target_window_active_before_send(self, label: str, now: float | None = None) -> bool:
+        check_at = time.monotonic() if now is None else now
+        if (
+            getattr(self, "gameplay_hud_active", False)
+            and abs(check_at - getattr(self, "potion_send_prevalidated_at", -999.0)) <= POTION_TIME_EPSILON_SECONDS
+        ):
+            return True
         if self.is_target_window_active():
-            check_at = time.monotonic() if now is None else now
             if self._refresh_gameplay_hud_state(check_at):
                 return True
             self.gui.set_status("未偵測到遊戲 HUD，暫停自動喝水")
@@ -2279,10 +3383,12 @@ class AutoPotionController:
 
         old_regions = dict(getattr(self, "bottom_bar_regions", {}))
         old_track_regions = dict(getattr(self, "bottom_bar_track_regions", {}))
+        old_layout = getattr(self, "bottom_hud_layout", None)
         self.bottom_bar_client_bounds = client_bounds
         self.bottom_bar_regions_at = now
 
         regions: dict[str, tuple[int, int, int, int]] = {}
+        detected_layout: BottomHudLayout | None = None
         for search_area in self._bottom_bar_search_areas(client_bounds):
             image = np.asarray(
                 self.sct.grab(
@@ -2296,6 +3402,25 @@ class AutoPotionController:
             )
             hp_mask = self._bar_color_mask(image, "hp")
             mp_mask = self._bar_color_mask(image, "mp")
+            exp_mask = self._bar_color_mask(image, "exp")
+            detected_layout = self._bottom_hud_layout_from_labels(
+                image,
+                hp_mask=hp_mask,
+                mp_mask=mp_mask,
+                exp_mask=exp_mask,
+                search_area=search_area,
+            )
+            if detected_layout is not None:
+                regions = {
+                    "hp": detected_layout.hp_region,
+                    "mp": detected_layout.mp_region,
+                }
+                self.pending_bottom_bar_track_regions = {
+                    "hp": detected_layout.hp_track_region,
+                    "mp": detected_layout.mp_track_region,
+                }
+                break
+
             hp_candidates = self._bar_run_candidates(hp_mask, search_area.reference_width)
             mp_candidates = self._bar_run_candidates(mp_mask, search_area.reference_width)
 
@@ -2318,12 +3443,15 @@ class AutoPotionController:
         if regions:
             self.bottom_bar_regions = regions
             self.bottom_bar_track_regions = getattr(self, "pending_bottom_bar_track_regions", {})
+            self.bottom_hud_layout = detected_layout
         elif allow_stale_on_failure and cached_client_bounds == client_bounds and old_regions:
             self.bottom_bar_regions = old_regions
             self.bottom_bar_track_regions = old_track_regions
+            self.bottom_hud_layout = old_layout
         else:
             self.bottom_bar_regions = {}
             self.bottom_bar_track_regions = {}
+            self.bottom_hud_layout = None
         return self.bottom_bar_regions
 
     def _bottom_bar_search_areas(self, client_bounds: tuple[int, int, int, int]) -> list[HudSearchArea]:
@@ -2396,6 +3524,530 @@ class AutoPotionController:
             max(1, fit_height),
         )
 
+    def _bottom_hud_layout_from_labels(
+        self,
+        image: np.ndarray,
+        *,
+        hp_mask: np.ndarray,
+        mp_mask: np.ndarray,
+        exp_mask: np.ndarray,
+        search_area: HudSearchArea,
+    ) -> BottomHudLayout | None:
+        matches = self._hud_label_matches(image)
+        if not {"hp", "mp", "exp"}.issubset(matches):
+            return None
+        hp_rect, hp_scale, hp_confidence = matches["hp"]
+        mp_rect, mp_scale, mp_confidence = matches["mp"]
+        exp_rect, exp_scale, exp_confidence = matches["exp"]
+        if max(hp_scale, mp_scale, exp_scale) - min(hp_scale, mp_scale, exp_scale) > HUD_LABEL_SCALE_TOLERANCE:
+            return None
+        if not self._bottom_hud_label_geometry_is_valid(hp_rect, mp_rect, exp_rect, search_area.width):
+            return None
+
+        hp_track = self._bar_track_right_of_label(
+            image,
+            hp_mask,
+            hp_rect,
+            search_area.reference_width,
+            search_area.reference_height,
+            "hp",
+        )
+        mp_track = self._bar_track_right_of_label(
+            image,
+            mp_mask,
+            mp_rect,
+            search_area.reference_width,
+            search_area.reference_height,
+            "mp",
+        )
+        exp_track = self._bar_track_right_of_label(
+            image,
+            exp_mask,
+            exp_rect,
+            search_area.reference_width,
+            search_area.reference_height,
+            "exp",
+        )
+        if hp_track is None or mp_track is None or exp_track is None:
+            return None
+
+        hp_left, hp_top, hp_width, hp_height = hp_track
+        mp_left, mp_top, mp_width, mp_height = mp_track
+        exp_left, exp_top, exp_width, exp_height = exp_track
+        if mp_left <= hp_left or exp_left < hp_left - max(8, round(hp_rect[3] * 0.5)):
+            return None
+
+        min_width = max(48, round(search_area.reference_width * 0.07))
+        max_hp_mp_height = max(10, round(max(hp_rect[3], mp_rect[3]) * 0.95))
+        hp_height = min(hp_height, max_hp_mp_height)
+        mp_height = min(mp_height, max_hp_mp_height)
+        hp_right_limit = mp_rect[0] - max(3, round(hp_rect[3] * 0.15))
+        if hp_right_limit > hp_left + min_width:
+            hp_width = min(hp_width, hp_right_limit - hp_left)
+        if hp_width >= min_width and mp_width >= min_width:
+            if hp_width > mp_width * 1.08:
+                hp_width = mp_width
+            elif mp_width > hp_width * 1.08:
+                mp_width = hp_width
+        combined_right = max(hp_left + hp_width, mp_left + mp_width)
+        exp_width = max(exp_width, combined_right - exp_left)
+        exp_width = min(search_area.width - exp_left, exp_width)
+        if hp_width < min_width or mp_width < min_width or exp_width < min_width:
+            return None
+        hp_region, hp_track_region = self._full_bar_region_and_track(
+            search_area.left,
+            search_area.top,
+            search_area.width,
+            search_area.height,
+            hp_left,
+            hp_top,
+            hp_width,
+            hp_height,
+        )
+        mp_region, mp_track_region = self._full_bar_region_and_track(
+            search_area.left,
+            search_area.top,
+            search_area.width,
+            search_area.height,
+            mp_left,
+            mp_top,
+            mp_width,
+            mp_height,
+        )
+
+        exp_bar_region, exp_track_region = self._full_bar_region_and_track(
+            search_area.left,
+            search_area.top,
+            search_area.width,
+            search_area.height,
+            exp_left,
+            exp_top,
+            exp_width,
+            exp_height,
+        )
+        exp_text_region = self._experience_text_region_from_exp_track(
+            image,
+            search_area.left,
+            search_area.top,
+            (exp_left, exp_top, exp_width, exp_height),
+        )
+        confidence = min(hp_confidence, mp_confidence, exp_confidence)
+        scale = (hp_scale + mp_scale + exp_scale) / 3.0
+        return BottomHudLayout(
+            hp_label_rect=self._offset_rect(hp_rect, search_area.left, search_area.top),
+            mp_label_rect=self._offset_rect(mp_rect, search_area.left, search_area.top),
+            exp_label_rect=self._offset_rect(exp_rect, search_area.left, search_area.top),
+            hp_region=hp_region,
+            mp_region=mp_region,
+            exp_bar_region=exp_bar_region,
+            exp_text_region=exp_text_region,
+            hp_track_region=hp_track_region,
+            mp_track_region=mp_track_region,
+            exp_track_region=exp_track_region,
+            scale=scale,
+            confidence=confidence,
+        )
+
+    def _hud_label_matches(
+        self,
+        image: np.ndarray,
+    ) -> dict[str, tuple[tuple[int, int, int, int], float, float]]:
+        mask = self._hud_label_text_mask(image)
+        matches: dict[str, tuple[tuple[int, int, int, int], float, float]] = {}
+        for label in ("hp", "mp", "exp"):
+            match = self._hud_label_match(mask, label)
+            if match is None:
+                continue
+            rect, scale, confidence = match
+            if confidence >= HUD_LABEL_MATCH_THRESHOLD:
+                matches[label] = (rect, scale, confidence)
+        return matches
+
+    def _hud_label_match(
+        self,
+        mask: np.ndarray,
+        label: str,
+    ) -> tuple[tuple[int, int, int, int], float, float] | None:
+        if mask.size == 0:
+            return None
+        best: tuple[tuple[int, int, int, int], float, float] | None = None
+        scale = HUD_LABEL_SCALE_MIN
+        while scale <= HUD_LABEL_SCALE_MAX + 1e-9:
+            template = self._hud_label_template(label, scale)
+            template_height, template_width = template.shape[:2]
+            if template_height <= mask.shape[0] and template_width <= mask.shape[1]:
+                result = cv2.matchTemplate(
+                    mask.astype(np.float32),
+                    template.astype(np.float32),
+                    cv2.TM_CCOEFF_NORMED,
+                )
+                _min_value, max_value, _min_loc, max_loc = cv2.minMaxLoc(result)
+                rect = (int(max_loc[0]), int(max_loc[1]), int(template_width), int(template_height))
+                if best is None or float(max_value) > best[2]:
+                    best = (rect, float(scale), float(max_value))
+            scale += HUD_LABEL_SCALE_STEP
+        return best
+
+    def _hud_label_template(self, label: str, scale: float = 1.0) -> np.ndarray:
+        key = f"{label}:{scale:.2f}"
+        cached = _HUD_LABEL_TEMPLATE_CACHE.get(key)
+        if cached is not None:
+            return cached
+        canvas = self._hud_label_template_source(label)
+        if abs(scale - 1.0) > 1e-9:
+            width = max(1, round(canvas.shape[1] * scale))
+            height = max(1, round(canvas.shape[0] * scale))
+            canvas = cv2.resize(canvas, (width, height), interpolation=cv2.INTER_AREA)
+        _HUD_LABEL_TEMPLATE_CACHE[key] = canvas
+        return canvas
+
+    def _hud_label_template_source(self, label: str) -> np.ndarray:
+        asset_path = HUD_LABEL_TEMPLATE_PATHS.get(label)
+        if asset_path is not None and asset_path.exists():
+            image = cv2.imread(str(asset_path), cv2.IMREAD_GRAYSCALE)
+            if image is not None and image.size:
+                return image
+        return self._generated_hud_label_template(label)
+
+    def _generated_hud_label_template(self, label: str) -> np.ndarray:
+        text = {"hp": "HP.", "mp": "MP.", "exp": "EXP."}[label]
+        font_scale = 0.62
+        thickness = 2
+        (text_width, text_height), baseline = cv2.getTextSize(
+            text,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            thickness,
+        )
+        canvas = np.zeros((text_height + baseline + 8, text_width + 8), dtype=np.uint8)
+        cv2.putText(
+            canvas,
+            text,
+            (3, text_height + 3),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            255,
+            thickness,
+            cv2.LINE_AA,
+        )
+        ys, xs = np.nonzero(canvas)
+        if xs.size and ys.size:
+            top = max(0, int(ys.min()) - 1)
+            bottom = min(canvas.shape[0], int(ys.max()) + 2)
+            left = max(0, int(xs.min()) - 1)
+            right = min(canvas.shape[1], int(xs.max()) + 2)
+            canvas = canvas[top:bottom, left:right]
+        return canvas
+
+    def _hud_label_text_mask(self, image: np.ndarray) -> np.ndarray:
+        bgr = image[:, :, :3].astype(np.float32)
+        blue = bgr[:, :, 0]
+        green = bgr[:, :, 1]
+        red = bgr[:, :, 2]
+        luminance = red * 0.299 + green * 0.587 + blue * 0.114
+        chroma = np.maximum.reduce([red, green, blue]) - np.minimum.reduce([red, green, blue])
+        mask = (luminance >= 135.0) & (chroma <= 95.0)
+        return mask.astype(np.uint8) * 255
+
+    def _bottom_hud_label_geometry_is_valid(
+        self,
+        hp_rect: tuple[int, int, int, int],
+        mp_rect: tuple[int, int, int, int],
+        exp_rect: tuple[int, int, int, int],
+        search_width: int,
+    ) -> bool:
+        hp_cx = hp_rect[0] + hp_rect[2] / 2.0
+        hp_cy = hp_rect[1] + hp_rect[3] / 2.0
+        mp_cx = mp_rect[0] + mp_rect[2] / 2.0
+        mp_cy = mp_rect[1] + mp_rect[3] / 2.0
+        exp_cx = exp_rect[0] + exp_rect[2] / 2.0
+        exp_cy = exp_rect[1] + exp_rect[3] / 2.0
+        y_tolerance = max(hp_rect[3], mp_rect[3]) * HUD_LABEL_GEOMETRY_Y_TOLERANCE_RATIO
+        if abs(hp_cy - mp_cy) > y_tolerance:
+            return False
+        if mp_cx <= hp_cx + max(hp_rect[2], round(search_width * 0.06)):
+            return False
+        if exp_cy <= hp_cy + max(4, hp_rect[3] * 0.35):
+            return False
+        if exp_cy - hp_cy > max(28, hp_rect[3] * 2.8):
+            return False
+        if abs(exp_cx - hp_cx) > max(hp_rect[2] * 1.4, round(search_width * 0.05)):
+            return False
+        return True
+
+    def _bar_run_right_of_label(
+        self,
+        mask: np.ndarray,
+        label_rect: tuple[int, int, int, int],
+        client_width: int,
+    ) -> tuple[int, int, int] | None:
+        if mask.size == 0:
+            return None
+        label_left, label_top, label_width, label_height = label_rect
+        label_right = label_left + label_width
+        row_top = max(0, round(label_top - label_height * 0.45))
+        row_bottom = min(mask.shape[0], round(label_top + label_height * 1.55))
+        if row_bottom <= row_top:
+            return None
+        sample = mask[row_top:row_bottom, :]
+        column_filled = sample.mean(axis=0) >= max(0.10, BAR_COLUMN_FILL_MIN_RATIO * 0.55)
+        runs = np.flatnonzero(np.diff(np.concatenate(([False], column_filled, [False]))))
+        candidates: list[tuple[int, int, int, float]] = []
+        min_length = max(4, round(client_width * 0.004))
+        max_left_slack = max(6, round(label_height * 0.60))
+        max_search_right = min(mask.shape[1], label_right + round(mask.shape[1] * HUD_LABEL_BAR_SEARCH_RIGHT_RATIO))
+        for start, end in zip(runs[::2], runs[1::2]):
+            run_length = int(end - start)
+            if run_length < min_length:
+                continue
+            if start < label_right - max_left_slack or start >= max_search_right:
+                continue
+            run_sample = sample[:, start:end]
+            row_densities = run_sample.mean(axis=1)
+            row = row_top + int(np.argmax(row_densities))
+            distance = max(0, int(start) - label_right)
+            score = run_length - distance * 1.5 + float(row_densities.max()) * 20.0
+            candidates.append((int(start), row, run_length, score))
+        if not candidates:
+            return None
+        best = max(candidates, key=lambda item: item[3])
+        return best[0], best[1], best[2]
+
+    def _bar_track_right_of_label(
+        self,
+        image: np.ndarray,
+        mask: np.ndarray,
+        label_rect: tuple[int, int, int, int],
+        client_width: int,
+        client_height: int,
+        bar_type: str,
+    ) -> tuple[int, int, int, int] | None:
+        color_run = self._bar_run_right_of_label(mask, label_rect, client_width)
+        if color_run is None:
+            return None
+
+        run_start, run_row, run_length = color_run
+        fallback_height = max(10, min(22, round(client_height * 0.015)))
+        track_top, track_height = self._bar_vertical_bounds(
+            mask,
+            run_start,
+            run_length,
+            run_row,
+            image.shape[0],
+            fallback_height,
+        )
+
+        sample_top = max(0, track_top - 1)
+        sample_bottom = min(image.shape[0], track_top + track_height + 1)
+        if sample_bottom <= sample_top:
+            return None
+
+        track_like = self._bar_track_like_mask(image, mask, bar_type)
+        column_like = track_like[sample_top:sample_bottom, :].mean(axis=0) >= 0.35
+        column_like = self._close_column_gaps(column_like, max(2, round(client_width * 0.003)))
+        if not bool(column_like.any()):
+            return None
+
+        label_left, _label_top, label_width, label_height = label_rect
+        label_right = label_left + label_width
+        max_left_slack = max(6, round(label_height * 0.60))
+        max_search_right = min(
+            image.shape[1],
+            label_right + round(image.shape[1] * HUD_LABEL_BAR_SEARCH_RIGHT_RATIO),
+        )
+        min_width = max(48, round(client_width * 0.07))
+        max_width = max(min_width + 1, round(client_width * 0.20))
+        left_expansion = max(1, round(client_width * 0.0015))
+
+        run_edges = np.flatnonzero(np.diff(np.concatenate(([False], column_like, [False]))))
+        candidates: list[tuple[int, int, float]] = []
+        for start, end in zip(run_edges[::2], run_edges[1::2]):
+            if end <= label_right - max_left_slack or start >= max_search_right:
+                continue
+            if run_start < start - max_left_slack or run_start >= end + max_left_slack:
+                continue
+            track_left = max(int(start), run_start - left_expansion)
+            track_right = min(int(end), track_left + max_width)
+            track_width = track_right - track_left
+            if track_width < min_width:
+                continue
+            color_coverage = float(mask[sample_top:sample_bottom, track_left:track_right].mean())
+            distance = max(0, track_left - label_right)
+            score = track_width - distance * 0.4 + color_coverage * 120.0
+            candidates.append((track_left, track_width, score))
+
+        if not candidates:
+            return None
+        track_left, track_width, _score = max(candidates, key=lambda item: item[2])
+        track_top, track_height = self._track_vertical_bounds_from_track_mask(
+            track_like,
+            track_left,
+            track_width,
+            track_top,
+            track_height,
+            client_height,
+        )
+        return track_left, track_top, track_width, track_height
+
+    def _bar_track_like_mask(self, image: np.ndarray, color_mask: np.ndarray, bar_type: str) -> np.ndarray:
+        bgr = image[:, :, :3].astype(np.float32)
+        blue = bgr[:, :, 0]
+        green = bgr[:, :, 1]
+        red = bgr[:, :, 2]
+        luminance = red * 0.299 + green * 0.587 + blue * 0.114
+        chroma = np.maximum.reduce([red, green, blue]) - np.minimum.reduce([red, green, blue])
+        neutral_track = (luminance >= 35.0) & (luminance <= 145.0) & (chroma <= 70.0)
+        red_body = (red >= 115.0) & (red > green + 25.0) & (red > blue + 25.0)
+        blue_body = (blue >= 115.0) & (blue > red + 20.0) & (green >= 45.0)
+        green_body = (green >= 110.0) & (green > blue + 20.0) & (red <= 230.0)
+        if bar_type == "hp":
+            loose_bar_body = red_body
+        elif bar_type == "mp":
+            loose_bar_body = blue_body
+        elif bar_type == "exp":
+            loose_bar_body = green_body
+        else:
+            loose_bar_body = red_body | blue_body | green_body
+        if color_mask.shape == neutral_track.shape:
+            return neutral_track | loose_bar_body | color_mask
+        return neutral_track | loose_bar_body
+
+    def _track_vertical_bounds_from_track_mask(
+        self,
+        track_like: np.ndarray,
+        track_left: int,
+        track_width: int,
+        current_top: int,
+        current_height: int,
+        client_height: int,
+    ) -> tuple[int, int]:
+        if track_like.size == 0 or track_width <= 0 or current_height <= 0:
+            return current_top, current_height
+
+        sample_left = max(0, min(track_like.shape[1] - 1, track_left))
+        sample_right = max(sample_left + 1, min(track_like.shape[1], track_left + track_width))
+        row_like = track_like[:, sample_left:sample_right].mean(axis=1) >= 0.28
+        row_like = self._close_column_gaps(row_like, max(1, round(client_height * 0.002)))
+
+        center = max(0, min(row_like.size - 1, current_top + current_height // 2))
+        if not bool(row_like[center]):
+            search_top = max(0, current_top - current_height)
+            search_bottom = min(row_like.size, current_top + current_height * 2)
+            nearby = np.flatnonzero(row_like[search_top:search_bottom])
+            if nearby.size == 0:
+                return current_top, current_height
+            center = search_top + int(nearby[np.argmin(np.abs(nearby - (center - search_top)))])
+
+        top = center
+        while top > 0 and row_like[top - 1]:
+            top -= 1
+        bottom = center
+        while bottom + 1 < row_like.size and row_like[bottom + 1]:
+            bottom += 1
+
+        expanded_height = bottom - top + 1
+        max_height = max(current_height + 6, round(client_height * 0.035))
+        if expanded_height > max_height:
+            return current_top, current_height
+        return top, max(current_height, expanded_height)
+
+    def _close_column_gaps(self, columns: np.ndarray, max_gap: int) -> np.ndarray:
+        if columns.size == 0 or max_gap <= 0:
+            return columns
+        closed = columns.copy()
+        edges = np.flatnonzero(np.diff(np.concatenate(([False], columns, [False]))))
+        for gap_start, gap_end in zip(edges[1::2], edges[2::2]):
+            if gap_end - gap_start <= max_gap:
+                closed[gap_start:gap_end] = True
+        return closed
+
+    def _experience_text_region_from_exp_track(
+        self,
+        image: np.ndarray,
+        search_left: int,
+        search_top: int,
+        exp_track: tuple[int, int, int, int],
+    ) -> tuple[int, int, int, int] | None:
+        track_left, track_top, track_width, track_height = exp_track
+        if track_width <= 0 or track_height <= 0:
+            return None
+        horizontal_padding = max(6, round(track_height * 0.50))
+        vertical_padding = max(3, round(track_height * 0.45))
+        text_search_left = min(
+            image.shape[1] - 1,
+            max(0, track_left + round(track_width * 0.35)),
+        )
+        text_search_right = min(
+            image.shape[1],
+            track_left + track_width,
+        )
+        left = max(0, track_left)
+        top = max(0, track_top - vertical_padding)
+        right = text_search_right
+        bottom = min(image.shape[0], track_top + track_height + vertical_padding)
+        base_top = top
+        if right <= text_search_left or bottom <= top:
+            return None
+
+        crop = image[top:bottom, text_search_left:text_search_right, :3].astype(np.float32)
+        blue = crop[:, :, 0]
+        green = crop[:, :, 1]
+        red = crop[:, :, 2]
+        luminance = red * 0.299 + green * 0.587 + blue * 0.114
+        chroma = np.maximum.reduce([red, green, blue]) - np.minimum.reduce([red, green, blue])
+        text_mask = (luminance >= 190.0) & (chroma <= 60.0)
+        text_mask = self._exp_text_glyph_mask(text_mask, track_height)
+        ys, xs = np.nonzero(text_mask)
+        if not xs.size or not ys.size:
+            return None
+
+        glyph_left = text_search_left + int(xs.min())
+        glyph_right = text_search_left + int(xs.max()) + 1
+        left_padding = max(horizontal_padding * 2, round(track_height * 1.20))
+        left = max(track_left, glyph_left - left_padding)
+        right = min(text_search_right, glyph_right + horizontal_padding)
+        glyph_top = top + int(ys.min())
+        glyph_bottom = top + int(ys.max()) + 1
+        text_vertical_padding = max(2, round(track_height * 0.20))
+        top = max(base_top, glyph_top - text_vertical_padding)
+        bottom = min(image.shape[0], glyph_bottom + text_vertical_padding)
+        if right - left < 20 or bottom - top < 8:
+            return None
+        return (
+            search_left + left,
+            search_top + top,
+            right - left,
+            bottom - top,
+        )
+
+    def _exp_text_glyph_mask(self, text_mask: np.ndarray, track_height: int) -> np.ndarray:
+        if text_mask.size == 0:
+            return text_mask
+        component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            text_mask.astype(np.uint8),
+            connectivity=8,
+        )
+        glyph_mask = np.zeros_like(text_mask, dtype=bool)
+        min_height = max(3, round(track_height * 0.25))
+        min_area = max(3, round(track_height * 0.12))
+        thin_line_height = max(5, round(track_height * 0.55))
+        for label in range(1, component_count):
+            left, top, width, height, area = (int(value) for value in stats[label])
+            if area < min_area or height < min_height:
+                continue
+            if width <= 2 and height >= thin_line_height:
+                continue
+            glyph_mask[labels == label] = True
+        return glyph_mask
+
+    def _offset_rect(
+        self,
+        rect: tuple[int, int, int, int],
+        offset_x: int,
+        offset_y: int,
+    ) -> tuple[int, int, int, int]:
+        return rect[0] + offset_x, rect[1] + offset_y, rect[2], rect[3]
+
     def _bottom_bar_pair_regions_from_candidates(
         self,
         hp_candidates: list[tuple[int, int, int]],
@@ -2439,6 +4091,24 @@ class AutoPotionController:
                     best_pair = ((hp_start, hp_row, hp_length), (mp_start, mp_row, mp_length), score)
 
         if best_pair is None:
+            inferred_regions = self._infer_bottom_bar_pair_regions_from_hp_candidate(
+                hp_candidates,
+                hp_mask=hp_mask,
+                mp_mask=mp_mask,
+                search_left=search_left,
+                search_top=search_top,
+                search_width=search_width,
+                search_height=search_height,
+                client_width=client_width,
+                client_height=client_height,
+                reference_left=reference_left,
+                min_gap=min_gap,
+                max_gap=max_gap,
+                max_hp_left=max_hp_left,
+                min_pair_row=min_pair_row,
+            )
+            if inferred_regions:
+                return inferred_regions
             return {}
 
         hp_start, hp_row, _hp_length = best_pair[0]
@@ -2497,6 +4167,100 @@ class AutoPotionController:
             "mp": mp_region,
         }
 
+    def _infer_bottom_bar_pair_regions_from_hp_candidate(
+        self,
+        hp_candidates: list[tuple[int, int, int]],
+        *,
+        hp_mask: np.ndarray | None,
+        mp_mask: np.ndarray | None,
+        search_left: int,
+        search_top: int,
+        search_width: int,
+        search_height: int,
+        client_width: int,
+        client_height: int,
+        reference_left: int,
+        min_gap: int,
+        max_gap: int,
+        max_hp_left: int,
+        min_pair_row: int,
+    ) -> dict[str, tuple[int, int, int, int]]:
+        min_infer_length = max(BAR_SEARCH_MIN_RUN_PIXELS * 2, round(client_width * 0.06))
+        eligible_hp = [
+            candidate
+            for candidate in hp_candidates
+            if candidate[1] >= min_pair_row
+            and candidate[2] >= min_infer_length
+            and search_left - reference_left + candidate[0] <= max_hp_left
+        ]
+        if not eligible_hp:
+            return {}
+
+        hp_start, hp_row, hp_length = max(
+            eligible_hp,
+            key=lambda candidate: (candidate[2], candidate[1], -candidate[0]),
+        )
+        expected_gap = max(min_gap, min(max_gap, round(client_width * 0.16)))
+        mp_start = hp_start + expected_gap
+        if mp_start <= hp_start or mp_start >= search_width:
+            return {}
+
+        min_width = max(48, round(client_width * 0.07))
+        max_width = max(min_width + 1, round(client_width * 0.20))
+        region_width = max(min_width, min(max_width, round(expected_gap * 0.82), hp_length))
+        if mp_start + max(1, round(region_width * 0.35)) > search_width:
+            return {}
+
+        margin_left = max(2, round(region_width * 0.015))
+        fallback_height = max(10, min(22, round(client_height * 0.015)))
+        hp_top, hp_height = self._bar_vertical_bounds(
+            hp_mask,
+            hp_start,
+            hp_length,
+            hp_row,
+            search_height,
+            fallback_height,
+        )
+        mp_top, mp_height = self._bar_vertical_bounds(
+            mp_mask,
+            mp_start,
+            region_width,
+            hp_row,
+            search_height,
+            fallback_height,
+        )
+        hp_left = max(0, min(search_width - region_width, hp_start - margin_left))
+        mp_left = max(0, min(search_width - region_width, mp_start - margin_left))
+        hp_region, hp_track_region = self._full_bar_region_and_track(
+            search_left,
+            search_top,
+            search_width,
+            search_height,
+            hp_left,
+            hp_top,
+            region_width,
+            hp_height,
+        )
+        mp_region, mp_track_region = self._full_bar_region_and_track(
+            search_left,
+            search_top,
+            search_width,
+            search_height,
+            mp_left,
+            mp_top,
+            region_width,
+            mp_height,
+        )
+        self.pending_bottom_bar_track_regions = {
+            "hp": hp_track_region,
+            "mp": mp_track_region,
+        }
+        self.bottom_bar_track_regions = dict(self.pending_bottom_bar_track_regions)
+        return {
+            "hp": hp_region,
+            "mp": mp_region,
+        }
+
     def _full_bar_region_and_track(
         self,
         search_left: int,
@@ -2510,7 +4274,7 @@ class AutoPotionController:
     ) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
         left_padding = max(2, round(track_width * BAR_FULL_REGION_LEFT_PADDING_RATIO))
         right_padding = max(6, round(track_width * BAR_FULL_REGION_RIGHT_PADDING_RATIO))
-        vertical_padding = max(2, round(track_height * BAR_FULL_REGION_VERTICAL_PADDING_RATIO))
+        vertical_padding = max(2, min(3, round(track_height * BAR_FULL_REGION_VERTICAL_PADDING_RATIO)))
 
         full_left = max(0, track_left - left_padding)
         full_top = max(0, track_top - vertical_padding)
@@ -2615,11 +4379,19 @@ class AutoPotionController:
         image = np.asarray(self.sct.grab({"left": left, "top": top, "width": width, "height": height}))
         mask = self._bar_color_mask(image, bar_type)
         percent_mask, percent_image = self._bar_percent_inputs(region, mask, image, track_region)
-        return self._percent_from_bar_mask_result(
+        percent, reason, tail_clear = self._percent_from_bar_mask_result(
             percent_mask,
             percent_image,
             require_clear_tail,
         )
+        if (
+            percent is None
+            and track_region is not None
+            and reason == "找不到符合顏色的填滿欄位"
+            and self._bar_track_looks_empty(percent_mask, percent_image)
+        ):
+            return 0.0, "OK:EmptyTrack", True if require_clear_tail and percent_image is not None else tail_clear
+        return percent, reason, tail_clear
 
     def _bar_percent_inputs(
         self,
@@ -2737,6 +4509,19 @@ class AutoPotionController:
                 return None, "尾段疑似被遮擋", tail_clear
 
         return normalize_bar_percent(float((end + 1) / width * 100.0)), "OK", tail_clear
+
+    def _bar_track_looks_empty(self, mask: np.ndarray, image: np.ndarray | None) -> bool:
+        if mask.size == 0:
+            return False
+        if bool(mask.any()):
+            return False
+        if image is None or image.size == 0:
+            return True
+        bgr = image[:, :, :3].astype(np.float32)
+        luminance = bgr[:, :, 2] * 0.299 + bgr[:, :, 1] * 0.587 + bgr[:, :, 0] * 0.114
+        chroma = np.max(bgr, axis=2) - np.min(bgr, axis=2)
+        dark_or_gray_ratio = float(((luminance < 150.0) & (chroma < 90.0)).mean())
+        return dark_or_gray_ratio >= 0.45
 
     def _set_bar_detection_debug(
         self,
@@ -2931,7 +4716,16 @@ class AutoPotionController:
                         continue
                     candidates.append((int(start), int(row_index), run_length))
         candidates.sort(key=lambda item: item[2], reverse=True)
-        return candidates[:80]
+        primary = candidates[:80]
+        primary_keys = set(primary)
+        bottom_row_min = round(mask.shape[0] * 0.65)
+        bottom_candidates = [
+            candidate
+            for candidate in candidates[80:]
+            if candidate not in primary_keys and candidate[1] >= bottom_row_min
+        ]
+        bottom_candidates.sort(key=lambda item: (item[1], item[2]), reverse=True)
+        return primary + bottom_candidates[:80]
 
     def _bar_color_mask(self, image: np.ndarray, bar_type: str) -> np.ndarray:
         bgra = image[:, :, :3]
@@ -2941,7 +4735,9 @@ class AutoPotionController:
 
         if bar_type == "hp":
             return (red > 150) & (green < 120) & (blue < 150) & (red > green + 40) & (red > blue + 40)
-        return (blue > 140) & (green > 75) & (red < 140) & (blue > red + 35)
+        if bar_type == "mp":
+            return (blue > 140) & (green > 75) & (red < 140) & (blue > red + 35)
+        return (green > 130) & (red < 170) & (blue < 170) & (green > red + 25) & (green > blue + 25)
 
     def _is_transition_fade_active(self) -> bool:
         gameplay_left, gameplay_top, gameplay_width, gameplay_height = self._gameplay_content_bounds(
@@ -3018,6 +4814,8 @@ class AutoPotionController:
     def _foreground_client_bounds(self) -> tuple[int, int, int, int]:
         hwnd = user32.GetForegroundWindow()
         if not hwnd:
+            hwnd = self._target_window_handle()
+        if not hwnd:
             raise RuntimeError("找不到前景視窗")
         self.last_target_hwnd = int(hwnd)
 
@@ -3039,6 +4837,10 @@ class AutoPotionController:
     def cleanup(self) -> None:
         self._release_pickup_key()
         self._release_all_potion_keys()
+        runtime = getattr(self, "runtime_processes", None)
+        if runtime is not None:
+            runtime.stop()
+            self.runtime_processes = None
         self._unregister_toggle_hotkey()
         worker = getattr(self, "control_hotkey_worker", None)
         if worker is not None:
@@ -3050,10 +4852,11 @@ class AutoPotionController:
             self.experience_ocr_executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
-        try:
-            save_settings(self.settings)
-        except Exception as exc:
-            print(f"儲存設定失敗：{exc}")
+        if getattr(self, "save_settings_on_cleanup", True):
+            try:
+                save_settings(self.settings)
+            except Exception as exc:
+                print(f"儲存設定失敗：{exc}")
         try:
             self.sct.close()
         except Exception:

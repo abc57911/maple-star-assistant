@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,14 +27,69 @@ from maple_star.constants import (
     POTION_EFFECT_NO_EFFECT_LIMIT,
     POTION_EFFECT_OBSERVATION_SECONDS,
 )
-from maple_star.experience import ExperienceEfficiencyTracker, ExperienceOcrImage, ExperienceSnapshot, ExperienceTextReading
-from maple_star.models.controller_state import BarDetectionDebug, OutOfPotionHold, PotionEffectAttempt
+from maple_star.experience import (
+    ExperienceEfficiencyTracker,
+    ExperienceOcrImage,
+    ExperienceSnapshot,
+    ExperienceTextReading,
+    read_experience_burst_frames_in_worker,
+)
+from maple_star.models.controller_state import BarDetectionDebug, HudSearchArea, OutOfPotionHold, PotionEffectAttempt
 from maple_star.services.control_hotkey_worker import CONTROL_HOTKEY_EXPERIENCE_TOGGLE, CONTROL_HOTKEY_PICKUP_TOGGLE
 from maple_star.services.potion_action_worker import PotionAction, PotionActionWorker, _apply_potion_action
+from maple_star.services.runtime_processes import (
+    ExperienceStatus,
+    PotionControl,
+    PotionStatus,
+    WorkerCrashed,
+)
 from maple_star.settings import AutoPotionSettings
 
 
 class AutoPotionForegroundGuardTests(unittest.TestCase):
+    class FakeRuntime:
+        def __init__(self):
+            self.settings_sent = []
+            self.targets_sent = []
+            self.potion_controls = []
+            self.experience_controls = []
+            self.potion_statuses = []
+            self.experience_statuses = []
+            self.stopped = False
+            self._potion_alive = True
+            self._experience_alive = True
+
+        def send_settings(self, settings):
+            self.settings_sent.append(settings.snapshot())
+
+        def send_target_window(self, hwnd):
+            self.targets_sent.append(hwnd)
+
+        def send_potion_control(self, command):
+            self.potion_controls.append(command)
+
+        def send_experience_control(self, command):
+            self.experience_controls.append(command)
+
+        def drain_potion_statuses(self):
+            statuses = list(self.potion_statuses)
+            self.potion_statuses.clear()
+            return statuses
+
+        def drain_experience_statuses(self):
+            statuses = list(self.experience_statuses)
+            self.experience_statuses.clear()
+            return statuses
+
+        def potion_alive(self):
+            return self._potion_alive
+
+        def experience_alive(self):
+            return self._experience_alive
+
+        def stop(self):
+            self.stopped = True
+
     def make_controller(self, active_sequence):
         controller = AutoPotionController.__new__(AutoPotionController)
         controller.settings = AutoPotionSettings(
@@ -53,6 +109,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.gui.is_key_detection_release_pending.return_value = False
         controller.last_hp_drink_at = -999.0
         controller.last_mp_drink_at = -999.0
+        controller.potion_send_prevalidated_at = -999.0
         controller.hp_potion_effect_attempts = []
         controller.mp_potion_effect_attempts = []
         controller.hp_potion_no_effect_count = 0
@@ -105,8 +162,17 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.last_action = "啟動"
         controller.experience_ocr_job = None
         controller.experience_ocr_burst = None
+        controller.experience_baseline_cursor_position = None
         controller.experience_pause_started_at = None
         controller.experience_total_paused_seconds = 0.0
+        controller.runtime_processes_enabled = False
+        controller.runtime_processes = None
+        controller.runtime_settings_snapshot = None
+        controller.runtime_target_hwnd = 0
+        controller.runtime_control_state = None
+        controller.runtime_potion_crash_reported = False
+        controller.runtime_experience_crash_reported = False
+        controller.last_runtime_potion_status_at = -999.0
         controller._log_unstable_bar = Mock()
         controller._play_toggle_beep = Mock()
         controller._capture_bar_percent = Mock(return_value=25.0)
@@ -143,6 +209,97 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         else:
             controller.mp_potion_recent_samples = samples
 
+    def build_synthetic_bottom_hud(
+        self,
+        controller,
+        *,
+        scale=1.0,
+        hp_fill=1.0,
+        mp_fill=1.0,
+        exp_fill=0.62,
+        wrong_mp_color=False,
+        bar_body_vertical_inset=0,
+        exp_yellow_green_top=False,
+        neutral_hp_mp_gap=False,
+        exp_bright_dividers=False,
+    ):
+        image = np.zeros((180, 980, 4), dtype=np.uint8)
+        image[:, :, 3] = 255
+        image[:, :, :3] = (22, 22, 22)
+        label_x = 50
+        hp_y = 78
+        exp_y = round(hp_y + 31 * scale)
+        bar_gap = max(8, round(10 * scale))
+        hp_bar_width = round(230 * scale)
+        bar_height = max(9, round(14 * scale))
+        hp_template = controller._hud_label_template("hp", scale)
+        mp_template = controller._hud_label_template("mp", scale)
+        exp_template = controller._hud_label_template("exp", scale)
+        hp_bar_left = label_x + hp_template.shape[1] + bar_gap
+        mp_label_x = hp_bar_left + hp_bar_width + round(34 * scale)
+        mp_bar_left = mp_label_x + mp_template.shape[1] + bar_gap
+        exp_bar_left = label_x + exp_template.shape[1] + bar_gap
+        exp_bar_width = mp_bar_left + hp_bar_width - exp_bar_left
+
+        def paste_label(template, left, top):
+            mask = template > 0
+            patch = image[top : top + template.shape[0], left : left + template.shape[1], :3]
+            patch[mask] = (235, 235, 235)
+
+        paste_label(hp_template, label_x, hp_y)
+        paste_label(mp_template, mp_label_x, hp_y)
+        paste_label(exp_template, label_x, exp_y)
+
+        hp_bar_top = hp_y + max(2, round((hp_template.shape[0] - bar_height) / 2))
+        mp_bar_top = hp_bar_top
+        exp_bar_top = exp_y + max(2, round((exp_template.shape[0] - bar_height) / 2))
+        image[hp_bar_top : hp_bar_top + bar_height, hp_bar_left : hp_bar_left + hp_bar_width, :3] = (72, 72, 72)
+        image[mp_bar_top : mp_bar_top + bar_height, mp_bar_left : mp_bar_left + hp_bar_width, :3] = (72, 72, 72)
+        image[exp_bar_top : exp_bar_top + bar_height, exp_bar_left : exp_bar_left + exp_bar_width, :3] = (72, 72, 72)
+        if neutral_hp_mp_gap:
+            image[
+                hp_bar_top : hp_bar_top + bar_height,
+                hp_bar_left + hp_bar_width : mp_label_x,
+                :3,
+            ] = (72, 72, 72)
+        hp_fill_width = max(4, round(hp_bar_width * hp_fill))
+        mp_fill_width = max(4, round(hp_bar_width * mp_fill))
+        exp_fill_width = max(4, round(exp_bar_width * exp_fill))
+        body_inset = max(0, min(bar_height // 2 - 1, round(bar_body_vertical_inset * scale)))
+        body_top = hp_bar_top + body_inset
+        body_bottom = hp_bar_top + bar_height - body_inset
+        exp_body_top = exp_bar_top + body_inset
+        exp_body_bottom = exp_bar_top + bar_height - body_inset
+        image[body_top:body_bottom, hp_bar_left : hp_bar_left + hp_fill_width, :3] = (40, 60, 220)
+        mp_color = (40, 60, 220) if wrong_mp_color else (220, 110, 40)
+        image[body_top:body_bottom, mp_bar_left : mp_bar_left + mp_fill_width, :3] = mp_color
+        image[exp_body_top:exp_body_bottom, exp_bar_left : exp_bar_left + exp_fill_width, :3] = (45, 210, 95)
+        if exp_yellow_green_top:
+            exp_mid = exp_body_top + max(1, (exp_body_bottom - exp_body_top) // 2)
+            image[exp_body_top:exp_mid, exp_bar_left : exp_bar_left + exp_fill_width, :3] = (45, 210, 195)
+        if exp_bright_dividers:
+            for divider_ratio in (0.38, 0.48, 0.58):
+                divider_x = exp_bar_left + round(exp_bar_width * divider_ratio)
+                image[exp_bar_top : exp_bar_top + bar_height, divider_x : divider_x + 1, :3] = (210, 210, 210)
+        text = "16720794[33.11%]"
+        text_x = exp_bar_left + round(exp_bar_width * 0.58)
+        text_y = exp_bar_top + bar_height - 1
+        cv2.putText(image, text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.46 * scale, (240, 240, 240, 255), max(1, round(1.2 * scale)), cv2.LINE_AA)
+        text_width = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.46 * scale, max(1, round(1.2 * scale)))[0][0]
+        return image, HudSearchArea(0, 0, image.shape[1], image.shape[0], 0, 1920, 1080), text_x + text_width
+
+    def attach_synthetic_grab(self, controller, image):
+        controller.sct = Mock()
+
+        def grab(monitor):
+            left = int(monitor["left"])
+            top = int(monitor["top"])
+            width = int(monitor["width"])
+            height = int(monitor["height"])
+            return image[top : top + height, left : left + width].copy()
+
+        controller.sct.grab.side_effect = grab
+
     def test_experience_capture_submits_burst_reader_without_runtime_templates(self):
         class ImmediateExecutor:
             def submit(self, fn, *args, **kwargs):
@@ -170,7 +327,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         self.assertEqual(controller.experience_ocr_executor.call[2], {})
         submitted_fn, submitted_args, _submitted_kwargs = controller.experience_ocr_executor.call
-        self.assertEqual(submitted_fn, controller.experience_reader.read_burst_frames)
+        self.assertEqual(submitted_fn, read_experience_burst_frames_in_worker)
         self.assertEqual(len(submitted_args[0]), EXPERIENCE_BURST_CAPTURE_ATTEMPTS)
         self.assertTrue(all(len(frame) == 1 for frame in submitted_args[0]))
 
@@ -201,7 +358,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             controller._update_experience_efficiency(5.0 + EXPERIENCE_BURST_CAPTURE_INTERVAL_SECONDS * index)
 
         submitted_fn, submitted_args, _submitted_kwargs = controller.experience_ocr_executor.call
-        self.assertEqual(submitted_fn, controller.experience_reader.read_burst_frames)
+        self.assertEqual(submitted_fn, read_experience_burst_frames_in_worker)
         self.assertEqual(len(submitted_args[0]), EXPERIENCE_BURST_CAPTURE_ATTEMPTS)
         self.assertTrue(all(len(frame) == 2 for frame in submitted_args[0]))
         first_frame = submitted_args[0][0]
@@ -209,6 +366,258 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertAlmostEqual(first_frame[0].bar_crop_left_ratio, 0.44)
         self.assertAlmostEqual(first_frame[1].bar_crop_left_ratio, 0.34)
         self.assertEqual(controller.sct.grab.call_count, EXPERIENCE_BURST_CAPTURE_ATTEMPTS * 2)
+
+    def test_experience_stat_window_roi_locator_uses_seventh_green_label(self):
+        controller = self.make_controller([])
+        image = np.zeros((800, 1000, 4), dtype=np.uint8)
+        image[:, :, 3] = 255
+        for index in range(8):
+            y = 140 + index * 32
+            image[y : y + 24, 250:320, :3] = (45, 210, 130)
+            image[y : y + 24, 324:520, :3] = (235, 235, 235)
+
+        roi = controller._locate_stat_window_exp_roi(image)
+
+        self.assertIsNotNone(roi)
+        assert roi is not None
+        left, top, width, height = roi
+        self.assertGreaterEqual(left, 320)
+        self.assertLessEqual(top, 140 + 6 * 32)
+        self.assertGreaterEqual(top + height, 140 + 6 * 32 + 20)
+        self.assertGreater(width, 120)
+
+    def test_experience_stat_window_roi_locator_handles_shifted_window(self):
+        controller = self.make_controller([])
+        image = np.zeros((800, 1000, 4), dtype=np.uint8)
+        image[:, :, 3] = 255
+        for index in range(8):
+            y = 120 + index * 32
+            image[y : y + 24, 650:720, :3] = (45, 210, 130)
+            image[y : y + 24, 724:940, :3] = (235, 235, 235)
+
+        roi = controller._locate_stat_window_exp_roi(image)
+
+        self.assertIsNotNone(roi)
+        assert roi is not None
+        left, top, width, height = roi
+        self.assertGreaterEqual(left, 720)
+        self.assertLessEqual(top, 120 + 6 * 32)
+        self.assertGreaterEqual(top + height, 120 + 6 * 32 + 20)
+        self.assertGreater(width, 120)
+
+    def test_experience_stat_window_roi_locator_prefers_exp_label_template(self):
+        controller = self.make_controller([])
+        image = np.zeros((800, 1000, 4), dtype=np.uint8)
+        image[:, :, 3] = 255
+        labels = [("HP", 180), ("MP", 215), ("EXP", 250), ("STR", 285)]
+        for text, y in labels:
+            image[y : y + 28, 640:710, :3] = (45, 210, 130)
+            image[y : y + 28, 714:930, :3] = (235, 235, 235)
+            cv2.putText(image, text, (646, y + 21), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (245, 245, 245, 255), 2)
+
+        roi = controller._locate_stat_window_exp_roi(image)
+
+        self.assertIsNotNone(roi)
+        assert roi is not None
+        left, top, width, height = roi
+        self.assertGreaterEqual(left, 710)
+        self.assertLessEqual(top, 250)
+        self.assertGreaterEqual(top + height, 274)
+        self.assertGreater(width, 120)
+
+    def test_experience_stat_window_roi_locator_uses_fixed_exp_label_template(self):
+        controller = self.make_controller([])
+        template = controller._stat_window_fixed_exp_label_template()
+        self.assertIsNotNone(template)
+        assert template is not None
+        image = np.zeros((800, 1000, 4), dtype=np.uint8)
+        image[:, :, 3] = 255
+        label_top = 460
+        label_left = 620
+        label_height, label_width = template.shape[:2]
+        image[label_top : label_top + label_height, label_left : label_left + label_width, :3] = template
+        image[label_top : label_top + label_height, label_left + label_width + 8 : 930, :3] = (235, 235, 235)
+
+        roi = controller._locate_stat_window_exp_roi(image)
+
+        self.assertIsNotNone(roi)
+        assert roi is not None
+        left, top, width, height = roi
+        self.assertGreaterEqual(left, label_left + label_width)
+        self.assertLessEqual(top, label_top)
+        self.assertGreaterEqual(top + height, label_top + label_height)
+        self.assertGreater(width, 120)
+
+    def test_foreground_client_bounds_falls_back_to_target_window_when_foreground_is_temporarily_missing(self):
+        controller = self.make_controller([])
+        controller.target_window_provider = Mock(return_value=1234)
+
+        def fake_get_client_rect(hwnd, rect_pointer):
+            rect = rect_pointer._obj
+            rect.left = 0
+            rect.top = 0
+            rect.right = 1920
+            rect.bottom = 1080
+            return True
+
+        def fake_client_to_screen(hwnd, point_pointer):
+            point = point_pointer._obj
+            point.x = 11
+            point.y = 22
+            return True
+
+        with (
+            patch("maple_star.controllers.auto_potion_controller.user32.GetForegroundWindow", return_value=0),
+            patch("maple_star.controllers.auto_potion_controller.user32.GetClientRect", side_effect=fake_get_client_rect),
+            patch("maple_star.controllers.auto_potion_controller.user32.ClientToScreen", side_effect=fake_client_to_screen),
+        ):
+            bounds = controller._foreground_client_bounds()
+
+        self.assertEqual(bounds, (11, 22, 1920, 1080))
+        self.assertEqual(controller.last_target_hwnd, 1234)
+        controller.target_window_provider.assert_called_once()
+
+    def test_experience_baseline_calibration_uses_character_stat_hotkey_and_closes_before_ocr(self):
+        class DoneFuture:
+            def __init__(self, result):
+                self._result = result
+
+            def done(self):
+                return True
+
+            def result(self):
+                return self._result
+
+            def cancel(self):
+                return False
+
+        class ImmediateExecutor:
+            def submit(self, fn, *args, **kwargs):
+                return DoneFuture(fn(*args, **kwargs))
+
+        events = []
+        controller = self.make_controller([])
+        controller.settings.character_stat_hotkey = "V"
+        controller.settings.exp_efficiency_enabled = True
+        controller.gameplay_hud_active = True
+        controller.experience_tracker = ExperienceEfficiencyTracker()
+        stat_window_read = Mock(
+            side_effect=lambda _image: events.append("ocr")
+            or ExperienceTextReading(
+                current_exp=31595874,
+                percent=77.0,
+                text="31595874(77%)",
+                confidence=0.94,
+                success=True,
+                reason="OK:StatWindow",
+                source="stat_window",
+            )
+        )
+        controller.experience_ocr_executor = ImmediateExecutor()
+        controller._capture_foreground_client_image = Mock(
+            return_value=(np.full((800, 1000, 4), 255, dtype=np.uint8), (0, 0, 1000, 800))
+        )
+        controller._locate_stat_window_exp_roi = Mock(return_value=(330, 330, 180, 28))
+        controller._toggle_experience_stat_window = Mock(side_effect=lambda: events.append("stat_hotkey") or True)
+
+        with (
+            patch.object(controller, "_move_cursor_for_experience_baseline_capture"),
+            patch("maple_star.controllers.auto_potion_controller.log_experience_debug") as exp_debug_log,
+            patch("maple_star.controllers.auto_potion_controller.read_stat_window_exp_in_worker", stat_window_read),
+        ):
+            self.assertTrue(controller._process_experience_baseline_calibration(10.0, effective_now=10.0))
+            self.assertTrue(controller._process_experience_baseline_calibration(10.3, effective_now=10.3))
+            self.assertTrue(controller._process_experience_baseline_calibration(10.4, effective_now=10.4))
+
+        self.assertEqual(events, ["stat_hotkey", "stat_hotkey", "ocr"])
+        self.assertEqual(controller._toggle_experience_stat_window.call_count, 2)
+        self.assertEqual(controller.experience_tracker.samples[-1].current_exp, 31595874)
+        self.assertIsNone(controller.experience_tracker.samples[-1].percent)
+        self.assertIsNone(controller.experience_baseline_calibration)
+        self.assertIsNone(controller.experience_baseline_ocr_job)
+        payloads = [call.args[0] for call in exp_debug_log.call_args_list]
+        self.assertTrue(any(payload["decision"] == "accepted" for payload in payloads))
+        accepted = [payload for payload in payloads if payload["decision"] == "accepted"][-1]
+        self.assertEqual(accepted["event"], "experience_baseline_calibration")
+        self.assertEqual(accepted["source"], "stat_window")
+        self.assertEqual(accepted["close_method"], "character_stat_hotkey")
+        self.assertEqual(accepted["current_exp"], 31595874)
+        self.assertIsNone(accepted["percent"])
+
+        accepted_bottom = controller.experience_tracker.add_reading(
+            11.0,
+            31595874,
+            77.95,
+            confidence=0.92,
+        )
+        self.assertTrue(accepted_bottom)
+        self.assertEqual(controller.experience_tracker.samples[-1].percent, 77.95)
+
+    def test_experience_baseline_calibration_failure_closes_and_falls_back_to_bottom_ocr(self):
+        controller = self.make_controller([])
+        controller.settings.character_stat_hotkey = "V"
+        controller.settings.exp_efficiency_enabled = True
+        controller.gameplay_hud_active = True
+        controller.experience_tracker = ExperienceEfficiencyTracker()
+        controller._capture_foreground_client_image = Mock(
+            return_value=(np.full((800, 1000, 4), 255, dtype=np.uint8), (0, 0, 1000, 800))
+        )
+        controller._locate_stat_window_exp_roi = Mock(return_value=None)
+        controller._toggle_experience_stat_window = Mock(return_value=True)
+
+        with (
+            patch.object(controller, "_move_cursor_for_experience_baseline_capture"),
+            patch("maple_star.controllers.auto_potion_controller.log_experience_debug") as exp_debug_log,
+        ):
+            self.assertTrue(controller._process_experience_baseline_calibration(20.0, effective_now=20.0))
+            self.assertFalse(controller._process_experience_baseline_calibration(20.3, effective_now=20.3))
+
+        self.assertEqual(controller._toggle_experience_stat_window.call_count, 2)
+        self.assertEqual(controller.experience_tracker.samples, [])
+        self.assertEqual(controller.next_experience_capture_at, 0.0)
+        payload = exp_debug_log.call_args.args[0]
+        self.assertEqual(payload["decision"], "fallback")
+        self.assertEqual(payload["fallback_reason"], "找不到能力值 EXP ROI")
+
+    def test_experience_baseline_moves_cursor_to_window_left_bottom_and_restores(self):
+        controller = self.make_controller([])
+        controller.target_window_provider = Mock(return_value=1234)
+
+        with (
+            patch("maple_star.controllers.auto_potion_controller.get_cursor_position", return_value=(400, 500)) as get_cursor,
+            patch("maple_star.controllers.auto_potion_controller.window_client_size", return_value=(1920, 1080)),
+            patch("maple_star.controllers.auto_potion_controller.client_to_screen_point", return_value=(19, 1094)) as to_screen,
+            patch("maple_star.controllers.auto_potion_controller.set_cursor_position") as set_cursor,
+        ):
+            controller._move_cursor_for_experience_baseline_capture()
+            controller._restore_experience_baseline_cursor()
+
+        get_cursor.assert_called_once()
+        to_screen.assert_called_once_with(1234, 8, 1072)
+        self.assertEqual(set_cursor.call_args_list[0].args, (19, 1094))
+        self.assertEqual(set_cursor.call_args_list[1].args, (400, 500))
+        self.assertIsNone(controller.experience_baseline_cursor_position)
+
+    def test_clear_experience_baseline_state_restores_cursor(self):
+        controller = self.make_controller([])
+        controller.experience_baseline_cursor_position = (400, 500)
+
+        with patch("maple_star.controllers.auto_potion_controller.set_cursor_position") as set_cursor:
+            controller._clear_experience_baseline_calibration_state()
+
+        set_cursor.assert_called_once_with(400, 500)
+        self.assertIsNone(controller.experience_baseline_cursor_position)
+
+    def test_experience_baseline_calibration_does_not_run_after_baseline_exists(self):
+        controller = self.make_controller([])
+        controller.settings.exp_efficiency_enabled = True
+        controller.gameplay_hud_active = True
+        controller.experience_tracker = ExperienceEfficiencyTracker()
+        controller.experience_tracker.add_reading(1.0, 1000, 10.0)
+        controller._capture_foreground_client_image = Mock()
+
+        self.assertFalse(controller._process_experience_baseline_calibration(30.0, effective_now=30.0))
+        controller._capture_foreground_client_image.assert_not_called()
 
     def test_experience_capture_uses_single_frame_after_trusted_baseline(self):
         class ImmediateExecutor:
@@ -232,7 +641,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._update_experience_efficiency(5.0)
 
         submitted_fn, submitted_args, _submitted_kwargs = controller.experience_ocr_executor.call
-        self.assertEqual(submitted_fn, controller.experience_reader.read_burst_frames)
+        self.assertEqual(submitted_fn, read_experience_burst_frames_in_worker)
         self.assertEqual(len(submitted_args[0]), 1)
         self.assertTrue(all(len(frame) == 1 for frame in submitted_args[0]))
         self.assertIsNone(controller.experience_ocr_burst)
@@ -254,9 +663,11 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.experience_reader = Mock()
         controller.experience_ocr_executor = ImmediateExecutor()
         controller.last_failed_experience_ocr_signature = controller._experience_ocr_image_signature([[image]])
+        changed = image.copy()
+        changed[4:10, 20:50, :3] = 255
         controller._experience_text_region = Mock(return_value=(10, 20, 140, 18))
         controller.sct = Mock()
-        controller.sct.grab.return_value = image.copy()
+        controller.sct.grab.return_value = changed
 
         controller._update_experience_efficiency(5.0)
 
@@ -386,7 +797,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._submit_experience_ocr_burst(9.0, [[image], [image.copy()]])
 
         submitted_fn, submitted_args, _submitted_kwargs = controller.experience_ocr_executor.call
-        self.assertEqual(submitted_fn, controller.experience_reader.read_burst_frames)
+        self.assertEqual(submitted_fn, read_experience_burst_frames_in_worker)
         self.assertEqual(len(submitted_args[0]), 2)
         self.assertIsNotNone(controller.experience_ocr_job)
         snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
@@ -420,7 +831,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._submit_experience_ocr_burst(9.0, [[current], [current.copy()], [current.copy()]])
 
         submitted_fn, submitted_args, _submitted_kwargs = controller.experience_ocr_executor.call
-        self.assertEqual(submitted_fn, controller.experience_reader.read_burst_frames)
+        self.assertEqual(submitted_fn, read_experience_burst_frames_in_worker)
         self.assertEqual(len(submitted_args[0]), 3)
         self.assertIsNotNone(controller.experience_ocr_job)
         snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
@@ -447,7 +858,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._submit_experience_ocr_burst(9.0, [[changed]])
 
         submitted_fn, _submitted_args, _submitted_kwargs = controller.experience_ocr_executor.call
-        self.assertEqual(submitted_fn, controller.experience_reader.read_burst_frames)
+        self.assertEqual(submitted_fn, read_experience_burst_frames_in_worker)
         self.assertIsNotNone(controller.experience_ocr_job)
         self.assertIsNotNone(controller.experience_ocr_job.image_signature)
 
@@ -497,6 +908,123 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         key_down.assert_called_once_with(0x2E)
         key_up.assert_called_once_with(0x2E)
         self.assertEqual(held, {})
+
+    def test_potion_action_release_failure_keeps_held_state_for_retry(self):
+        held = {"hp": 0x2E}
+
+        with patch("maple_star.services.potion_action_worker.key_up", side_effect=[OSError("send failed"), None]):
+            with self.assertRaises(OSError):
+                _apply_potion_action(PotionAction("release", "hp", vk_code=0x2E), held)
+            self.assertEqual(held, {"hp": 0x2E})
+
+            _apply_potion_action(PotionAction("release", "hp", vk_code=0x2E), held)
+
+        self.assertEqual(held, {})
+
+    def test_potion_action_worker_survives_action_exception(self):
+        worker = PotionActionWorker()
+
+        with (
+            patch(
+                "maple_star.services.potion_action_worker.tap_hotkey",
+                side_effect=[ValueError("bad key"), None],
+            ) as tap_hotkey,
+            patch("maple_star.services.potion_action_worker.log_exception") as log_exception,
+        ):
+            worker.start()
+            try:
+                worker.tap("hp", "BadKey")
+                worker.tap("mp", "End")
+                deadline = time.monotonic() + 1.0
+                while time.monotonic() < deadline and tap_hotkey.call_count < 2:
+                    time.sleep(0.01)
+            finally:
+                worker.stop()
+
+        self.assertEqual(tap_hotkey.call_count, 2)
+        log_exception.assert_called_once()
+
+    def test_runtime_process_update_does_not_run_local_potion_or_experience_capture(self):
+        controller = self.make_controller([True])
+        runtime = self.FakeRuntime()
+        controller.runtime_processes_enabled = True
+        controller.runtime_processes = runtime
+        controller.target_window_provider = Mock(return_value=4321)
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller.gui.sync_after_event_processing.return_value = True
+        controller._capture_bar_percent = Mock()
+        controller._update_experience_efficiency = Mock()
+        controller._sync_pickup_key_state = Mock()
+        controller._save_settings_when_idle = Mock()
+
+        controller.update(100.0)
+
+        controller._capture_bar_percent.assert_not_called()
+        controller._update_experience_efficiency.assert_not_called()
+        controller._sync_pickup_key_state.assert_called_once()
+        self.assertEqual(runtime.targets_sent, [4321])
+        self.assertEqual(runtime.settings_sent, [controller.settings.snapshot()])
+        self.assertEqual(runtime.potion_controls[-1], PotionControl(enabled=True, scripts_enabled=True))
+
+    def test_runtime_statuses_update_gui_from_worker_queues(self):
+        controller = self.make_controller([True])
+        runtime = self.FakeRuntime()
+        snapshot = ExperienceSnapshot(status="統計中", current_exp=12345)
+        runtime.potion_statuses.append(
+            PotionStatus(
+                hp_percent=25.0,
+                mp_percent=80.0,
+                hp_debug="hp ok",
+                mp_debug="mp ok",
+                status="自動喝水監控中",
+                action="HP 喝水：Delete",
+                notice="",
+                trigger_interval_ms=50.0,
+                console_lines=("HP 喝水按鍵觸發：Delete（間隔：50ms）",),
+                gameplay_hud_active=True,
+                scripts_enabled=True,
+                auto_drink_enabled=True,
+            )
+        )
+        runtime.experience_statuses.append(ExperienceStatus(snapshot=snapshot, status="統計中"))
+        controller.runtime_processes_enabled = True
+        controller.runtime_processes = runtime
+
+        with patch("builtins.print") as print_mock:
+            controller._drain_runtime_statuses()
+
+        controller.gui.set_current_percentages.assert_called_once_with(25.0, 80.0)
+        controller.gui.set_bar_detection_debug.assert_called_once_with("hp ok", "mp ok")
+        controller.gui.set_experience_snapshot.assert_called_once_with(snapshot)
+        self.assertTrue(controller.gameplay_hud_active)
+        self.assertEqual(controller.last_action, "HP 喝水：Delete")
+        print_mock.assert_called_once_with("HP 喝水按鍵觸發：Delete（間隔：50ms）")
+
+    def test_runtime_emergency_stop_sends_release_to_potion_process(self):
+        controller = self.make_controller([True])
+        runtime = self.FakeRuntime()
+        controller.runtime_processes_enabled = True
+        controller.runtime_processes = runtime
+        controller._pause_experience_for_inactive_state = Mock()
+
+        with patch("builtins.print"):
+            controller.emergency_stop()
+
+        self.assertFalse(controller.scripts_enabled)
+        self.assertFalse(controller.auto_drink_enabled)
+        self.assertTrue(
+            any(command.emergency_stop and command.release_all for command in runtime.potion_controls)
+        )
+
+    def test_runtime_worker_crash_disables_auto_drink(self):
+        controller = self.make_controller([])
+
+        controller._apply_worker_crash(WorkerCrashed("potion", "boom"))
+
+        self.assertFalse(controller.auto_drink_enabled)
+        self.assertFalse(controller.gameplay_hud_active)
+        controller.gui.set_status.assert_called_with("喝水 process 已停止：boom")
 
     def test_gameplay_hud_gate_clears_stale_bar_regions_on_fresh_failure(self):
         controller = self.make_controller([])
@@ -647,7 +1175,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         sleep.assert_called_once()
         controller._log_unstable_bar.assert_not_called()
 
-    def test_hp_successful_auto_drink_does_not_print_console_action(self):
+    def test_hp_successful_auto_drink_prints_trigger_interval(self):
         controller = self.make_controller([True, True])
 
         with (
@@ -657,9 +1185,27 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             controller._maybe_drink_hp(100.0, 25.0)
 
         tap_hotkey.assert_called_once_with("Delete")
-        print_mock.assert_not_called()
+        print_mock.assert_called_once_with("HP 喝水按鍵觸發：Delete（間隔：首次）")
         self.assertEqual(controller.last_hp_drink_at, 100.0)
         self.assertEqual(controller.last_action, "HP 喝水：Delete")
+
+    def test_hp_repeat_auto_drink_uses_current_sample_without_confirm_recapture(self):
+        controller = self.make_controller([])
+        controller.gameplay_hud_active = True
+        controller.potion_send_prevalidated_at = 100.2
+        controller.last_hp_drink_at = 100.0
+        controller._capture_confirmed_bar_percent = Mock()
+
+        with (
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("builtins.print") as print_mock,
+        ):
+            controller._maybe_drink_hp(100.2, 25.0)
+
+        tap_hotkey.assert_called_once_with("Delete")
+        controller._capture_confirmed_bar_percent.assert_not_called()
+        print_mock.assert_called_once_with("HP 喝水按鍵觸發：Delete（間隔：200ms）")
+        self.assertEqual(controller.last_hp_drink_at, 100.2)
 
     def test_hp_auto_drink_uses_potion_action_worker_when_available(self):
         controller = self.make_controller([True, True])
@@ -675,7 +1221,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         tap_hotkey.assert_not_called()
         self.assertEqual(controller.last_hp_drink_at, 100.0)
 
-    def test_mp_successful_auto_drink_does_not_print_console_action(self):
+    def test_mp_successful_auto_drink_prints_trigger_interval(self):
         controller = self.make_controller([True, True])
 
         with (
@@ -685,7 +1231,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             controller._maybe_drink_mp(100.0, 25.0)
 
         tap_hotkey.assert_called_once_with("End")
-        print_mock.assert_not_called()
+        print_mock.assert_called_once_with("MP 喝水按鍵觸發：End（間隔：首次）")
         self.assertEqual(controller.last_mp_drink_at, 100.0)
         self.assertEqual(controller.last_action, "MP 喝水：End")
 
@@ -757,55 +1303,9 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         self.assertFalse(controller.hp_potion_effect_attempts[0].pre_window_is_stable)
 
-    def test_hp_flat_repeat_can_drink_every_0_1_seconds(self):
+    def test_hp_flat_repeat_can_drink_as_fast_as_new_samples_arrive(self):
         controller = self.make_controller([True] * 6)
-        controller.settings.hp_cooldown_seconds = 0.1
-
-        with (
-            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
-            patch("builtins.print"),
-        ):
-            controller._maybe_drink_hp(100.0, 25.0)
-            controller._maybe_drink_hp(100.1, 25.0)
-            controller._maybe_drink_hp(100.2, 25.0)
-
-        self.assertEqual(tap_hotkey.call_count, 3)
-        tap_hotkey.assert_called_with("Delete")
-        self.assertEqual(
-            controller.hp_potion_effect_attempts,
-            [
-                PotionEffectAttempt(100.0, 25.0),
-                PotionEffectAttempt(100.1, 25.0),
-                PotionEffectAttempt(100.2, 25.0),
-            ],
-        )
-
-    def test_mp_flat_repeat_can_drink_every_0_1_seconds(self):
-        controller = self.make_controller([True] * 6)
-        controller.settings.mp_cooldown_seconds = 0.1
-
-        with (
-            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
-            patch("builtins.print"),
-        ):
-            controller._maybe_drink_mp(100.0, 25.0)
-            controller._maybe_drink_mp(100.1, 25.0)
-            controller._maybe_drink_mp(100.2, 25.0)
-
-        self.assertEqual(tap_hotkey.call_count, 3)
-        tap_hotkey.assert_called_with("End")
-        self.assertEqual(
-            controller.mp_potion_effect_attempts,
-            [
-                PotionEffectAttempt(100.0, 25.0),
-                PotionEffectAttempt(100.1, 25.0),
-                PotionEffectAttempt(100.2, 25.0),
-            ],
-        )
-
-    def test_hp_cooldown_blocks_before_0_1_seconds(self):
-        controller = self.make_controller([True] * 4)
-        controller.settings.hp_cooldown_seconds = 0.1
+        controller.settings.hp_cooldown_seconds = 1.0
 
         with (
             patch("maple_star.controller.tap_hotkey") as tap_hotkey,
@@ -815,12 +1315,58 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             controller._maybe_drink_hp(100.05, 25.0)
             controller._maybe_drink_hp(100.1, 25.0)
 
+        self.assertEqual(tap_hotkey.call_count, 3)
+        tap_hotkey.assert_called_with("Delete")
+        self.assertEqual(
+            controller.hp_potion_effect_attempts,
+            [
+                PotionEffectAttempt(100.0, 25.0),
+                PotionEffectAttempt(100.05, 25.0),
+                PotionEffectAttempt(100.1, 25.0),
+            ],
+        )
+
+    def test_mp_flat_repeat_can_drink_as_fast_as_new_samples_arrive(self):
+        controller = self.make_controller([True] * 6)
+        controller.settings.mp_cooldown_seconds = 1.0
+
+        with (
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("builtins.print"),
+        ):
+            controller._maybe_drink_mp(100.0, 25.0)
+            controller._maybe_drink_mp(100.05, 25.0)
+            controller._maybe_drink_mp(100.1, 25.0)
+
+        self.assertEqual(tap_hotkey.call_count, 3)
+        tap_hotkey.assert_called_with("End")
+        self.assertEqual(
+            controller.mp_potion_effect_attempts,
+            [
+                PotionEffectAttempt(100.0, 25.0),
+                PotionEffectAttempt(100.05, 25.0),
+                PotionEffectAttempt(100.1, 25.0),
+            ],
+        )
+
+    def test_hp_repeat_skips_duplicate_same_sample_tick_only(self):
+        controller = self.make_controller([True] * 4)
+        controller.settings.hp_cooldown_seconds = 1.0
+
+        with (
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("builtins.print"),
+        ):
+            controller._maybe_drink_hp(100.0, 25.0)
+            controller._maybe_drink_hp(100.0, 25.0)
+            controller._maybe_drink_hp(100.05, 25.0)
+
         self.assertEqual(tap_hotkey.call_count, 2)
         self.assertEqual(
             controller.hp_potion_effect_attempts,
             [
                 PotionEffectAttempt(100.0, 25.0),
-                PotionEffectAttempt(100.1, 25.0),
+                PotionEffectAttempt(100.05, 25.0),
             ],
         )
 
@@ -969,7 +1515,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.settings.exp_efficiency_enabled = True
         controller._sync_registered_control_hotkeys = Mock()
         controller._transition_pause_reason = Mock(return_value=None)
-        controller._capture_bar_percent = Mock(side_effect=[25.0, 25.0])
+        controller._capture_bar_percent = Mock(side_effect=[80.0, 80.0])
         order = []
         controller._maybe_drink_hp = Mock(side_effect=lambda now, percent: order.append("hp"))
         controller._maybe_drink_mp = Mock(side_effect=lambda now, percent: order.append("mp"))
@@ -981,6 +1527,50 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.update(100.0)
 
         self.assertEqual(order, ["hp", "mp", "watch", "exp"])
+
+    def test_update_defers_experience_when_potion_needs_action(self):
+        controller = self.make_controller([True])
+        controller.next_capture_at = 0.0
+        controller.next_experience_capture_at = 0.0
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller.settings.exp_efficiency_enabled = True
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._transition_pause_reason = Mock(return_value=None)
+        controller._capture_bar_percent = Mock(side_effect=[25.0, 80.0])
+        controller._maybe_drink_hp = Mock()
+        controller._maybe_drink_mp = Mock()
+        controller._update_potion_effect_watch_cycles = Mock()
+        controller._update_experience_efficiency = Mock()
+        controller._defer_experience_for_potion_priority = Mock()
+
+        controller.update(100.0)
+
+        controller._defer_experience_for_potion_priority.assert_called_once_with(100.0)
+        controller._update_experience_efficiency.assert_not_called()
+
+    def test_update_reuses_prevalidated_hud_for_potion_send(self):
+        controller = self.make_controller([True])
+        controller.next_capture_at = 0.0
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller.settings.exp_efficiency_enabled = False
+        controller.last_hp_drink_at = 99.9
+        controller.gameplay_hud_active = True
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._transition_pause_reason = Mock(return_value=None)
+        controller._capture_bar_percent = Mock(side_effect=[25.0, 80.0])
+        controller._update_potion_effect_watch_cycles = Mock()
+
+        with (
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("builtins.print"),
+        ):
+            controller.update(100.0)
+
+        tap_hotkey.assert_called_once_with("Delete")
+        controller._refresh_gameplay_hud_state.assert_called_once_with(100.0)
+        self.assertEqual(controller.potion_send_prevalidated_at, 100.0)
 
     def test_continuous_potion_observation_windows_are_throttled(self):
         controller = self.make_controller([True] * 6)
@@ -2436,6 +3026,38 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
         self.assertEqual(snapshot.status, "等待明確 EXP 樣本")
 
+    def test_experience_ocr_does_not_use_missing_percent_marker_as_initial_baseline(self):
+        class DoneFuture:
+            def done(self):
+                return True
+
+            def result(self):
+                return ExperienceTextReading(
+                    current_exp=31031512,
+                    percent=76.71,
+                    text="31031512[76.71]",
+                    confidence=0.92,
+                    success=True,
+                    needs_bar_percent_guard=True,
+                    source="paddle",
+                    reason="OK",
+                )
+
+        controller = self.make_controller([])
+        controller.experience_ocr_job = ExperienceOcrJob(submitted_at=0.0, future=DoneFuture())
+        controller.next_experience_capture_at = 0.0
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.samples = []
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot(sample_count=0)
+
+        with patch("builtins.print"):
+            self.assertTrue(controller._process_experience_ocr_job(8.0))
+
+        controller.experience_tracker.add_reading.assert_not_called()
+        controller.experience_tracker.record_ocr_result.assert_called_once_with(True)
+        snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
+        self.assertEqual(snapshot.status, "等待明確 EXP 樣本")
+
     def test_experience_ocr_accepted_guarded_merge_uses_burst_next_time(self):
         class DoneFuture:
             def done(self):
@@ -2475,6 +3097,29 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             confidence=0.91,
         )
         self.assertEqual(controller.last_failed_experience_ocr_signature, image_signature)
+
+        class ImmediateExecutor:
+            def submit(self, fn, *args, **kwargs):
+                self.call = (fn, args, kwargs)
+                return Mock()
+
+        changed = np.zeros((18, 140, 4), dtype=np.uint8)
+        changed[:, :, 3] = 255
+        changed[5:12, 30:70, :3] = 255
+        controller.experience_ocr_job = None
+        controller.experience_ocr_burst = None
+        controller.next_experience_capture_at = 0.0
+        controller.experience_reader = Mock()
+        controller.experience_ocr_executor = ImmediateExecutor()
+        controller._experience_text_region = Mock(return_value=(10, 20, 140, 18))
+        controller.sct = Mock()
+        controller.sct.grab.return_value = changed
+
+        controller._update_experience_efficiency(9.0)
+
+        self.assertFalse(hasattr(controller.experience_ocr_executor, "call"))
+        self.assertIsNotNone(controller.experience_ocr_burst)
+        self.assertEqual(controller.experience_ocr_burst.capture_count, 1)
 
     def test_experience_ocr_waits_for_second_clear_initial_baseline(self):
         class DoneFuture:
@@ -2586,19 +3231,15 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         with (
             patch("builtins.print") as print_mock,
-            patch("maple_star.controllers.auto_potion_controller.save_experience_ocr_learning_case", return_value="exp-unit") as save_case,
             patch("maple_star.controllers.auto_potion_controller.log_experience_debug") as exp_debug_log,
         ):
             self.assertTrue(controller._process_experience_ocr_job(8.0))
 
         controller.experience_tracker.record_ocr_result.assert_called_once_with(True)
         self.assertEqual(controller.last_failed_experience_ocr_signature, image_signature)
-        save_case.assert_called_once()
-        self.assertEqual(save_case.call_args.kwargs["trigger"], "tracker_rejected")
-        self.assertEqual(save_case.call_args.kwargs["final_reading"].text, "288900[27.08%]")
         printed = "\n".join(call.args[0] for call in print_mock.call_args_list)
         self.assertIn("經驗效率 異常樣本拒絕", printed)
-        self.assertIn("EXP OCR learning case: exp-unit", printed)
+        self.assertNotIn("EXP OCR learning case:", printed)
         self.assertIn("288900[27.08%]", printed)
         self.assertIn("exp=288,900", printed)
         self.assertIn("percent=27.08%", printed)
@@ -2608,7 +3249,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(payload["current_exp"], 288900)
         self.assertEqual(payload["percent"], 27.08)
         self.assertEqual(payload["tracker_status"], "樣本拒絕：EXP 跳動與百分比不一致")
-        self.assertEqual(payload["learning_case_id"], "exp-unit")
+        self.assertEqual(payload["learning_case_id"], "")
 
     def test_missing_experience_region_preserves_last_statistics(self):
         controller = self.make_controller([])
@@ -2672,6 +3313,245 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertGreaterEqual(wide[0] + wide[2], primary[0] + primary[2])
         self.assertGreaterEqual(wide[3], primary[3])
 
+    def test_bottom_hud_layout_uses_hp_mp_exp_labels_across_scales(self):
+        controller = self.make_controller([])
+        for scale in (0.80, 1.0, 1.25):
+            with self.subTest(scale=scale):
+                image, search_area, text_right = self.build_synthetic_bottom_hud(controller, scale=scale)
+                layout = controller._bottom_hud_layout_from_labels(
+                    image,
+                    hp_mask=controller._bar_color_mask(image, "hp"),
+                    mp_mask=controller._bar_color_mask(image, "mp"),
+                    exp_mask=controller._bar_color_mask(image, "exp"),
+                    search_area=search_area,
+                )
+
+                self.assertIsNotNone(layout)
+                assert layout is not None
+                self.assertGreaterEqual(layout.confidence, 0.42)
+                self.assertLess(layout.hp_region[0], layout.mp_region[0])
+                self.assertLess(layout.exp_label_rect[0], layout.exp_bar_region[0])
+                self.assertLess(layout.exp_label_rect[1], layout.exp_bar_region[1] + layout.exp_bar_region[3])
+                self.assertGreaterEqual(layout.exp_text_region[0] + layout.exp_text_region[2], text_right)
+
+    def test_bottom_hud_layout_rejects_label_match_when_bar_color_guard_fails(self):
+        controller = self.make_controller([])
+        image, search_area, _text_right = self.build_synthetic_bottom_hud(controller, wrong_mp_color=True)
+
+        layout = controller._bottom_hud_layout_from_labels(
+            image,
+            hp_mask=controller._bar_color_mask(image, "hp"),
+            mp_mask=controller._bar_color_mask(image, "mp"),
+            exp_mask=controller._bar_color_mask(image, "exp"),
+            search_area=search_area,
+        )
+
+        self.assertIsNone(layout)
+
+    def test_bottom_hud_layout_handles_low_hp_mp_fill_using_label_anchor(self):
+        controller = self.make_controller([])
+        image, search_area, _text_right = self.build_synthetic_bottom_hud(
+            controller,
+            hp_fill=0.05,
+            mp_fill=0.06,
+        )
+
+        layout = controller._bottom_hud_layout_from_labels(
+            image,
+            hp_mask=controller._bar_color_mask(image, "hp"),
+            mp_mask=controller._bar_color_mask(image, "mp"),
+            exp_mask=controller._bar_color_mask(image, "exp"),
+            search_area=search_area,
+        )
+
+        self.assertIsNotNone(layout)
+        assert layout is not None
+        self.assertGreater(layout.hp_track_region[2], 100)
+        self.assertGreater(layout.mp_track_region[2], 100)
+
+    def test_bottom_hud_layout_uses_actual_hp_mp_track_width_for_percent(self):
+        controller = self.make_controller([])
+        image, search_area, _text_right = self.build_synthetic_bottom_hud(
+            controller,
+            hp_fill=0.37,
+            mp_fill=0.64,
+        )
+
+        layout = controller._bottom_hud_layout_from_labels(
+            image,
+            hp_mask=controller._bar_color_mask(image, "hp"),
+            mp_mask=controller._bar_color_mask(image, "mp"),
+            exp_mask=controller._bar_color_mask(image, "exp"),
+            search_area=search_area,
+        )
+
+        self.assertIsNotNone(layout)
+        assert layout is not None
+        self.assertAlmostEqual(layout.hp_track_region[2], 230, delta=3)
+        self.assertAlmostEqual(layout.mp_track_region[2], 230, delta=3)
+
+        self.attach_synthetic_grab(controller, image)
+        hp_percent, hp_reason, _hp_tail = controller._bar_percent_from_region_snapshot(
+            layout.hp_region,
+            "hp",
+            track_region=layout.hp_track_region,
+        )
+        mp_percent, mp_reason, _mp_tail = controller._bar_percent_from_region_snapshot(
+            layout.mp_region,
+            "mp",
+            track_region=layout.mp_track_region,
+        )
+
+        self.assertEqual(hp_reason, "OK")
+        self.assertEqual(mp_reason, "OK")
+        self.assertAlmostEqual(hp_percent, 37.0, delta=1.0)
+        self.assertAlmostEqual(mp_percent, 64.0, delta=1.0)
+
+    def test_bottom_hud_layout_caps_hp_track_before_mp_label(self):
+        controller = self.make_controller([])
+        image, search_area, _text_right = self.build_synthetic_bottom_hud(
+            controller,
+            neutral_hp_mp_gap=True,
+        )
+
+        layout = controller._bottom_hud_layout_from_labels(
+            image,
+            hp_mask=controller._bar_color_mask(image, "hp"),
+            mp_mask=controller._bar_color_mask(image, "mp"),
+            exp_mask=controller._bar_color_mask(image, "exp"),
+            search_area=search_area,
+        )
+
+        self.assertIsNotNone(layout)
+        assert layout is not None
+        self.assertAlmostEqual(layout.hp_track_region[2], 230, delta=3)
+        self.assertLess(layout.hp_track_region[0] + layout.hp_track_region[2], layout.mp_label_rect[0])
+
+    def test_bottom_hud_layout_uses_full_track_height_when_color_body_is_inset(self):
+        controller = self.make_controller([])
+        image, search_area, text_right = self.build_synthetic_bottom_hud(
+            controller,
+            bar_body_vertical_inset=4,
+        )
+
+        layout = controller._bottom_hud_layout_from_labels(
+            image,
+            hp_mask=controller._bar_color_mask(image, "hp"),
+            mp_mask=controller._bar_color_mask(image, "mp"),
+            exp_mask=controller._bar_color_mask(image, "exp"),
+            search_area=search_area,
+        )
+
+        self.assertIsNotNone(layout)
+        assert layout is not None
+        self.assertGreaterEqual(layout.hp_track_region[3], 14)
+        self.assertGreaterEqual(layout.mp_track_region[3], 14)
+        self.assertGreaterEqual(layout.exp_track_region[3], 14)
+        self.assertGreaterEqual(layout.hp_region[3], 18)
+        self.assertGreaterEqual(layout.mp_region[3], 18)
+        self.assertLessEqual(layout.hp_region[1] + layout.hp_region[3], layout.exp_bar_region[1])
+        self.assertLessEqual(layout.mp_region[1] + layout.mp_region[3], layout.exp_bar_region[1])
+        self.assertGreaterEqual(layout.exp_text_region[0] + layout.exp_text_region[2], text_right)
+
+    def test_bottom_hud_layout_exp_track_keeps_yellow_green_gradient_top(self):
+        controller = self.make_controller([])
+        image, search_area, text_right = self.build_synthetic_bottom_hud(
+            controller,
+            exp_yellow_green_top=True,
+        )
+
+        layout = controller._bottom_hud_layout_from_labels(
+            image,
+            hp_mask=controller._bar_color_mask(image, "hp"),
+            mp_mask=controller._bar_color_mask(image, "mp"),
+            exp_mask=controller._bar_color_mask(image, "exp"),
+            search_area=search_area,
+        )
+
+        self.assertIsNotNone(layout)
+        assert layout is not None
+        self.assertGreaterEqual(layout.exp_track_region[3], 14)
+        self.assertGreaterEqual(layout.exp_text_region[1], layout.exp_bar_region[1] - 12)
+        self.assertGreaterEqual(
+            layout.exp_text_region[0],
+            layout.exp_track_region[0] + round(layout.exp_track_region[2] * 0.35),
+        )
+        self.assertLess(layout.exp_text_region[2], round(layout.exp_bar_region[2] * 0.55))
+        self.assertGreaterEqual(layout.exp_text_region[0] + layout.exp_text_region[2], text_right)
+
+    def test_bottom_hud_layout_exp_text_roi_ignores_bright_track_dividers(self):
+        controller = self.make_controller([])
+        image, search_area, text_right = self.build_synthetic_bottom_hud(
+            controller,
+            exp_bright_dividers=True,
+        )
+
+        layout = controller._bottom_hud_layout_from_labels(
+            image,
+            hp_mask=controller._bar_color_mask(image, "hp"),
+            mp_mask=controller._bar_color_mask(image, "mp"),
+            exp_mask=controller._bar_color_mask(image, "exp"),
+            search_area=search_area,
+        )
+
+        self.assertIsNotNone(layout)
+        assert layout is not None
+        self.assertGreaterEqual(layout.exp_text_region[0] + layout.exp_text_region[2], text_right)
+        self.assertLess(layout.exp_text_region[2], round(layout.exp_bar_region[2] * 0.55))
+
+    def test_bottom_hud_layout_exp_text_roi_does_not_include_full_green_bar_band(self):
+        controller = self.make_controller([])
+        image, search_area, text_right = self.build_synthetic_bottom_hud(controller)
+
+        layout = controller._bottom_hud_layout_from_labels(
+            image,
+            hp_mask=controller._bar_color_mask(image, "hp"),
+            mp_mask=controller._bar_color_mask(image, "mp"),
+            exp_mask=controller._bar_color_mask(image, "exp"),
+            search_area=search_area,
+        )
+
+        self.assertIsNotNone(layout)
+        assert layout is not None
+        self.assertGreaterEqual(layout.exp_text_region[0] + layout.exp_text_region[2], text_right)
+        text_bottom = layout.exp_text_region[1] + layout.exp_text_region[3]
+        track_bottom = layout.exp_track_region[1] + layout.exp_track_region[3]
+        self.assertLessEqual(text_bottom, track_bottom + max(2, round(layout.exp_track_region[3] * 0.25)))
+        left, top, width, height = layout.exp_text_region
+        text_crop = image[top : top + height, left : left + width, :3]
+        bar_left, bar_top, bar_width, bar_height = layout.exp_bar_region
+        bar_crop = image[bar_top : bar_top + bar_height, bar_left : bar_left + bar_width, :3]
+        self.assertLess(
+            float(controller._bar_color_mask(text_crop, "exp").mean()),
+            float(controller._bar_color_mask(bar_crop, "exp").mean()),
+        )
+
+    def test_experience_text_regions_prefers_label_driven_exp_roi(self):
+        controller = self.make_controller([])
+        image, search_area, text_right = self.build_synthetic_bottom_hud(controller)
+        layout = controller._bottom_hud_layout_from_labels(
+            image,
+            hp_mask=controller._bar_color_mask(image, "hp"),
+            mp_mask=controller._bar_color_mask(image, "mp"),
+            exp_mask=controller._bar_color_mask(image, "exp"),
+            search_area=search_area,
+        )
+        self.assertIsNotNone(layout)
+        assert layout is not None
+        controller.bottom_hud_layout = layout
+        controller.bottom_bar_regions = {
+            "hp": layout.hp_region,
+            "mp": layout.mp_region,
+        }
+        controller._foreground_client_bounds = Mock(return_value=(0, 0, 1920, 1080))
+
+        regions = controller._experience_text_regions()
+
+        self.assertEqual(regions[0], layout.exp_text_region)
+        self.assertGreater(controller._experience_text_region_bar_crop_left_ratio(0), 0.30)
+        self.assertGreaterEqual(regions[0][0] + regions[0][2], text_right)
+        self.assertEqual(len(regions), 1)
+
     def test_bottom_bar_search_areas_try_full_client_before_16_9_crop(self):
         controller = self.make_controller([])
 
@@ -2704,6 +3584,28 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertLess(regions["hp"][0], regions["mp"][0])
         self.assertGreaterEqual(regions["hp"][1], 907)
         self.assertGreaterEqual(regions["mp"][1], 907)
+
+    def test_bottom_bar_pair_infers_mp_region_when_low_mp_has_no_color_candidate(self):
+        controller = self.make_controller([])
+
+        regions = controller._bottom_bar_pair_regions_from_candidates(
+            hp_candidates=[(183, 136, 250), (766, 104, 133)],
+            mp_candidates=[],
+            hp_mask=None,
+            mp_mask=np.zeros((173, 1344), dtype=bool),
+            search_left=307,
+            search_top=907,
+            search_width=1344,
+            search_height=173,
+            client_width=1920,
+            client_height=1080,
+        )
+
+        self.assertEqual(set(regions), {"hp", "mp"})
+        self.assertLess(regions["hp"][0], regions["mp"][0])
+        self.assertGreaterEqual(regions["mp"][0], 760)
+        self.assertLessEqual(regions["mp"][0], 820)
+        self.assertIn("mp", controller.bottom_bar_track_regions)
 
     def test_find_bottom_bar_pair_regions_detects_full_height_non_16_9_bottom_hud(self):
         controller = self.make_controller([])

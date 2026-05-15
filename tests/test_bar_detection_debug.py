@@ -32,6 +32,23 @@ class BarDetectionDebugTests(unittest.TestCase):
         self.assertEqual(reason, "找不到符合顏色的填滿欄位")
         self.assertIsNone(tail_clear)
 
+    def test_empty_known_track_region_reports_zero_percent(self):
+        controller = self.make_controller()
+        image = np.full((12, 100, 4), 45, dtype=np.uint8)
+        image[:, :, 3] = 255
+        controller.sct = Mock()
+        controller.sct.grab.return_value = image
+
+        percent, reason, tail_clear = controller._bar_percent_from_region_snapshot(
+            (10, 20, 100, 12),
+            "mp",
+            track_region=(10, 20, 100, 12),
+        )
+
+        self.assertEqual(percent, 0.0)
+        self.assertEqual(reason, "OK:EmptyTrack")
+        self.assertIsNone(tail_clear)
+
     def test_percent_result_treats_full_width_bar_with_large_internal_gap_as_full(self):
         controller = self.make_controller()
         mask = np.ones((8, 100), dtype=bool)
@@ -202,6 +219,28 @@ class BarDetectionDebugTests(unittest.TestCase):
         self.assertEqual(set(regions), {"hp", "mp"})
         self.assertLess(regions["hp"][0], regions["mp"][0])
         self.assertGreaterEqual(regions["hp"][0], 1267)
+
+    def test_exp_track_right_of_label_does_not_extend_into_red_button(self):
+        controller = self.make_controller()
+        image = np.zeros((80, 420, 4), dtype=np.uint8)
+        image[:, :, 3] = 255
+        image[38:50, 100:260, :3] = (50, 190, 60)
+        image[38:50, 260:300, :3] = (80, 80, 80)
+        image[38:50, 300:360, :3] = (40, 45, 190)
+        exp_mask = np.zeros((80, 420), dtype=bool)
+        exp_mask[38:50, 100:260] = True
+
+        track = controller._bar_track_right_of_label(
+            image,
+            exp_mask,
+            label_rect=(48, 34, 42, 18),
+            client_width=1000,
+            client_height=800,
+            bar_type="exp",
+        )
+
+        self.assertIsNotNone(track)
+        self.assertLessEqual(track[0] + track[2], 300)
 
     def test_transition_fade_guard_samples_centered_gameplay_content(self):
         controller = self.make_controller()

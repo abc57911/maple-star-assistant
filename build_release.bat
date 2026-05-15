@@ -67,6 +67,7 @@ if not exist "%CUSTOMTKINTER_DIR%" exit /b 1
     --copy-metadata pypdfium2 ^
     --copy-metadata python-bidi ^
     --copy-metadata shapely ^
+    --add-data "maple_star\assets;maple_star/assets" ^
     --add-data "%CUSTOMTKINTER_DIR%;customtkinter/" ^
     main.pyw
 if errorlevel 1 exit /b 1

@@ -10,12 +10,13 @@
 - EXP 百分比以 UI 括號內文字為主，綠條估算只做 guard，不用來改寫百分比。
 
 ## learning mode
-- Pixel OCR learning pending bundle 預設寫入 `%LOCALAPPDATA%\MapleStar\experience_ocr_pending\`，不得直接污染 repo。
-- 只有使用 `tools/experience_ocr_learning.py promote` 後的 fixture/template 才可提交。
-- GUI 的 `OCR學習` 視窗可即時檢視 pending case、輸入正確 `EXP[percent%]`、套用並重建 Pixel template。
-- 套用前仍需人工確認畫面文字正確。
-- 建立 pending case 時需做去重：完全相同 ROI hash、或同 trigger / 同 EXP 文字 / 同 Pixel failure reason 的 pending case 不應重複新增。
-- `tools/experience_ocr_learning.py dedupe` 可清理既有重複 pending case；`delete` 可刪單筆 pending case。
+- Runtime 已停用 Pixel OCR learning pending bundle 寫入，不再要求使用者日常人工校正。
+- GUI 不提供 `OCR學習` / 校正入口；日常穩定性應依賴 Pixel OCR、Paddle fallback、OCR continuity guard 與 tracker rejection。
+- `tools/experience_ocr_learning.py` 與 `maple_star.services.experience_ocr_learning` 僅保留作為開發者離線維護 fixture/template 的工具。
+- 只有使用 `tools/experience_ocr_learning.py promote` 後，並通過 fixture validation 的 fixture/template 才可提交。
+- 若開發者手動套用後 Pixel validation 仍失敗，必須回滾新增 fixture，避免同一張不適合的 ROI 反覆污染 template。
+- `EXP OCR 模糊數字候選不一致`、`ocr_continuity_rejected`、`tracker_rejected` 與 glyph ambiguity case 不得自動套用，避免把綠底誤讀學成 template。
+- 既有 pending case 若需保留，只作為診斷證據；`tools/experience_ocr_learning.py dedupe` 可清理既有重複 pending case，`delete` 可刪單筆 pending case。
 - Pixel OCR runtime template 需放在 package 內可打包資料或 module，不得依賴 `tests/fixtures` 才能辨識。
 
 ## PaddleOCR fallback
@@ -32,7 +33,10 @@
 - OCR 背景工作需維持單 worker、低頻率擷取。
 - 調整 `EXPERIENCE_CAPTURE_INTERVAL_SECONDS` 或 OCR 前處理時，需注意 CPU 佔用。
 - EXP OCR 應優先抓 UI 顯示的 EXP 數字與百分比，不使用 EXP 綠條自行推算百分比。
+- 建立初始 baseline 時可先使用能力值快捷鍵開啟白底 EXP row 作為高可信 EXP 數字來源；成功擷取 ROI 後需立即用同一個能力值快捷鍵關閉視窗，再以截圖 crop 執行 OCR。
+- 能力值視窗 baseline 只把 EXP 數字送入統計，不採用能力值窗的整數百分比；成功後仍回到底部 EXP OCR 做日常更新與精確百分比追蹤。
 - EXP OCR 前處理的主路徑應保留完整文字 ROI、補邊並放大。
+- Pixel OCR 百分比數字需先以白字前景 mask 與 glyph topology 判讀；`6/8/0/9/3/5` 這類近似 glyph 若無法由拓樸與模板同向支持，應 fail closed，不可只靠綠條或最高模板分數改寫。
 - 二值化與 parser 容錯只作為 fallback，不應用 parser 掩蓋可在影像層修正的問題。
 - EXP OCR parser 應以「可選 EXP 標籤、整數 EXP、可選正確千分位、EXP%」為可信結構。
 - EXP 數字段含半形或全形英文字母、混用分隔符、錯誤千分位或結構分數過低時應拒絕，不應送入統計器。

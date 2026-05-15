@@ -188,8 +188,8 @@
       "id": "live12_20260507_ocr_16579564_9283",
       "file": "live12_20260507_ocr_16579564_9283.png",
       "current_exp": 16579564,
-      "percent": 92.83,
-      "text": "16579564[92.83%]"
+      "percent": 92.03,
+      "text": "16579564[92.03%]"
     },
     {
       "id": "exp-20260507-057_ocr_4652609_2449",
@@ -355,8 +355,8 @@
       "id": "exp-20260512-007_ocr_31639338_9181",
       "file": "exp-20260512-007_ocr_31639338_9181.png",
       "current_exp": 31639338,
-      "percent": 91.81,
-      "text": "31639338[91.81%]",
+      "percent": 91.61,
+      "text": "31639338[91.61%]",
       "paddle_fallback": false
     },
     {
@@ -411,8 +411,8 @@
       "id": "exp-20260513-006_ocr_33355236_8880",
       "file": "exp-20260513-006_ocr_33355236_8880.png",
       "current_exp": 33355236,
-      "percent": 88.8,
-      "text": "33355236[88.80%]",
+      "percent": 86.8,
+      "text": "33355236[86.80%]",
       "paddle_fallback": false
     },
     {
@@ -462,6 +462,163 @@
       "percent": 86.68,
       "text": "33307816[86.68%]",
       "paddle_fallback": false
+    },
+    {
+      "id": "exp-20260514-064_ocr_34870186_8603",
+      "file": "exp-20260514-064_ocr_34870186_8603.png",
+      "current_exp": 34870186,
+      "percent": 86.03,
+      "text": "34870186[86.03%]",
+      "paddle_fallback": false
+    },
+    {
+      "id": "exp-20260514-075_ocr_35099570_8660",
+      "file": "exp-20260514-075_ocr_35099570_8660.png",
+      "current_exp": 35099570,
+      "percent": 86.6,
+      "text": "35099570[86.60%]",
+      "paddle_fallback": false
+    },
+    {
+      "id": "exp-20260514-078_ocr_35171532_8677",
+      "file": "exp-20260514-078_ocr_35171532_8677.png",
+      "current_exp": 35171532,
+      "percent": 86.77,
+      "text": "35171532[86.77%]",
+      "paddle_fallback": false
+    },
+    {
+      "id": "exp-20260514-001_ocr_13411951_3137",
+      "file": "exp-20260514-001_ocr_13411951_3137.png",
+      "current_exp": 13411951,
+      "percent": 31.37,
+      "text": "13411951[31.37%]",
+      "paddle_fallback": false
+    },
+    {
+      "id": "exp-20260514-005_ocr_14114775_3301",
+      "file": "exp-20260514-005_ocr_14114775_3301.png",
+      "current_exp": 14114775,
+      "percent": 33.01,
+      "text": "14114775[33.01%]",
+      "paddle_fallback": false
+    },
+    {
+      "id": "exp-20260515-001_ocr_38264102_8950",
+      "file": "exp-20260515-001_ocr_38264102_8950.png",
+      "current_exp": 38264102,
+      "percent": 89.5,
+      "text": "38264102[89.50%]",
+      "paddle_fallback": false,
+      "bar_crop_left_ratio": 0.6060070671378092
+    },
+    {
+      "id": "exp-20260515-003_ocr_39989170_9353",
+      "file": "exp-20260515-003_ocr_39989170_9353.png",
+      "current_exp": 39989170,
+      "percent": 93.53,
+      "text": "39989170[93.53%]",
+      "paddle_fallback": false,
+      "bar_crop_left_ratio": 0.6060070671378092
+    },
+    {
+      "id": "exp-20260515-004_ocr_43008250_9358",
+      "file": "exp-20260515-004_ocr_43008250_9358.png",
+      "current_exp": 43008250,
+      "percent": 93.58,
+      "text": "43008250[93.58%]",
+      "paddle_fallback": false,
+      "bar_crop_left_ratio": 0.5954063604240283
+    },
+    {
+      "id": "exp-20260515-024_ocr_1142804_253",
+      "file": "exp-20260515-024_ocr_1142804_253.png",
+      "current_exp": 1142804,
+      "percent": 2.53,
+      "text": "1142804[2.53%]",
+      "paddle_fallback": false,
+      "bar_crop_left_ratio": 0.666077738515901
+    },
+    {
+      "id": "exp-20260515-010_ocr_40197085_9402",
+      "file": "exp-20260515-010_ocr_40197085_9402.png",
+      "current_exp": 40197085,
+      "percent": 94.02,
+      "text": "40197085[94.02%]",
+      "paddle_fallback": false,
+      "bar_crop_left_ratio": 0.6060070671378092
+    },
+    {
+      "id": "exp-20260515-011_ocr_40219345_9407",
+      "file": "exp-20260515-011_ocr_40219345_9407.png",
+      "current_exp": 40219345,
+      "percent": 94.07,
+      "text": "40219345[94.07%]",
+      "paddle_fallback": false,
+      "bar_crop_left_ratio": 0.6060070671378092
+    },
+    {
+      "id": "exp-20260515-012_ocr_40243365_9413",
+      "file": "exp-20260515-012_ocr_40243365_9413.png",
+      "current_exp": 40243365,
+      "percent": 94.13,
+      "text": "40243365[94.13%]",
+      "paddle_fallback": false,
+      "bar_crop_left_ratio": 0.6060070671378092
+    },
+    {
+      "id": "exp-20260515-013_ocr_40258981_9417",
+      "file": "exp-20260515-013_ocr_40258981_9417.png",
+      "current_exp": 40258981,
+      "percent": 94.17,
+      "text": "40258981[94.17%]",
+      "paddle_fallback": false,
+      "bar_crop_left_ratio": 0.6166077738515902
+    },
+    {
+      "id": "exp-20260515-014_ocr_40274881_9420",
+      "file": "exp-20260515-014_ocr_40274881_9420.png",
+      "current_exp": 40274881,
+      "percent": 94.2,
+      "text": "40274881[94.20%]",
+      "paddle_fallback": false,
+      "bar_crop_left_ratio": 0.6060070671378092
+    },
+    {
+      "id": "exp-20260515-015_ocr_40281241_9422",
+      "file": "exp-20260515-015_ocr_40281241_9422.png",
+      "current_exp": 40281241,
+      "percent": 94.22,
+      "text": "40281241[94.22%]",
+      "paddle_fallback": false,
+      "bar_crop_left_ratio": 0.6060070671378092
+    },
+    {
+      "id": "exp-20260515-016_ocr_40317697_9430",
+      "file": "exp-20260515-016_ocr_40317697_9430.png",
+      "current_exp": 40317697,
+      "percent": 94.3,
+      "text": "40317697[94.30%]",
+      "paddle_fallback": false,
+      "bar_crop_left_ratio": 0.6060070671378092
+    },
+    {
+      "id": "exp-20260515-060_ocr_5662226_1255",
+      "file": "exp-20260515-060_ocr_5662226_1255.png",
+      "current_exp": 5662226,
+      "percent": 12.55,
+      "text": "5662226[12.55%]",
+      "paddle_fallback": false,
+      "bar_crop_left_ratio": 0.6325088339222615
+    },
+    {
+      "id": "exp-20260515-063_ocr_6014674_1333",
+      "file": "exp-20260515-063_ocr_6014674_1333.png",
+      "current_exp": 6014674,
+      "percent": 13.33,
+      "text": "6014674[13.33%]",
+      "paddle_fallback": false,
+      "bar_crop_left_ratio": 0.6431095406360424
     }
   ]
 }

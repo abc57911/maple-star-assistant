@@ -10,6 +10,10 @@ from ..constants import (
     KEYEVENTF_KEYUP,
 )
 
+INPUT_MOUSE = 0
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+
 GWL_EXSTYLE = -20
 WS_EX_TOPMOST = 0x00000008
 HWND_TOPMOST = wintypes.HWND(-1)
@@ -189,6 +193,10 @@ user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 user32.GetClientRect.restype = wintypes.BOOL
 user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(Point)]
 user32.ClientToScreen.restype = wintypes.BOOL
+user32.GetCursorPos.argtypes = [ctypes.POINTER(Point)]
+user32.GetCursorPos.restype = wintypes.BOOL
+user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+user32.SetCursorPos.restype = wintypes.BOOL
 user32.SetWindowPos.argtypes = [
     wintypes.HWND,
     wintypes.HWND,
@@ -245,6 +253,22 @@ def keyboard_input(vk_code: int, flags: int = 0) -> Input:
     )
 
 
+def mouse_input(flags: int) -> Input:
+    return Input(
+        type=INPUT_MOUSE,
+        union=InputUnion(
+            mi=MouseInput(
+                dx=0,
+                dy=0,
+                mouseData=0,
+                dwFlags=flags,
+                time=0,
+                dwExtraInfo=None,
+            )
+        ),
+    )
+
+
 def key_down(vk_code: int) -> None:
     event = keyboard_input(vk_code)
     sent = user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(Input))
@@ -267,6 +291,56 @@ def tap_key(vk_code: int) -> None:
     sent = user32.SendInput(2, events, ctypes.sizeof(Input))
     if sent != 2:
         raise ctypes.WinError(ctypes.get_last_error())
+
+
+def get_cursor_position() -> tuple[int, int]:
+    point = Point()
+    if not user32.GetCursorPos(ctypes.byref(point)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(point.x), int(point.y)
+
+
+def set_cursor_position(x: int, y: int) -> None:
+    if not user32.SetCursorPos(int(x), int(y)):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def client_to_screen_point(hwnd: int, x: int, y: int) -> tuple[int, int]:
+    if not is_valid_window(hwnd):
+        raise RuntimeError("目標視窗無效")
+    point = Point(int(x), int(y))
+    if not user32.ClientToScreen(hwnd, ctypes.byref(point)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(point.x), int(point.y)
+
+
+def click_screen_point(x: int, y: int, *, preserve_cursor_position: bool = True) -> None:
+    original_position: tuple[int, int] | None = None
+    if preserve_cursor_position:
+        original_position = get_cursor_position()
+    try:
+        set_cursor_position(x, y)
+        events = (Input * 2)(
+            mouse_input(MOUSEEVENTF_LEFTDOWN),
+            mouse_input(MOUSEEVENTF_LEFTUP),
+        )
+        sent = user32.SendInput(2, events, ctypes.sizeof(Input))
+        if sent != 2:
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        if original_position is not None:
+            set_cursor_position(*original_position)
+
+
+def click_client_point(
+    hwnd: int,
+    x: int,
+    y: int,
+    *,
+    preserve_cursor_position: bool = True,
+) -> None:
+    screen_x, screen_y = client_to_screen_point(hwnd, x, y)
+    click_screen_point(screen_x, screen_y, preserve_cursor_position=preserve_cursor_position)
 
 
 def key_display_name(vk_code: int) -> str:

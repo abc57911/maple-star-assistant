@@ -24,10 +24,20 @@ PROMOTED_TEXT_RE = re.compile(r"([0-9]+)\[((?:[0-9]{1,2}|100)\.[0-9]{2})%\]")
 AUTO_PROMOTE_MIN_CONFIDENCE = 0.965
 AUTO_PROMOTE_MIN_CONFIDENCE_GAP = 0.006
 AUTO_PROMOTE_MIN_MATCHING_ATTEMPTS = 2
+AUTO_PROMOTE_STRONG_ATTEMPT_MIN_CONFIDENCE = 0.93
+AUTO_PROMOTE_STRONG_ATTEMPT_MIN_CONFIDENCE_GAP = 0.02
+AUTO_PROMOTE_STRONG_ATTEMPT_MIN_MATCHING_ATTEMPTS = 4
 REVIEW_ACTION_AUTO_PROMOTE = "auto_promote"
 REVIEW_ACTION_MANUAL_REVIEW = "manual_review"
+REVIEW_ACTION_DIAGNOSTIC_ONLY = "diagnostic_only"
 REVIEW_ACTION_DELETE_RECOMMENDED = "delete_recommended"
 FALSE_POSITIVE_REVIEW_TRIGGERS = {"tracker_rejected", "ocr_continuity_rejected"}
+REVIEW_ACTION_SORT_PRIORITY = {
+    REVIEW_ACTION_AUTO_PROMOTE: 0,
+    REVIEW_ACTION_MANUAL_REVIEW: 1,
+    REVIEW_ACTION_DIAGNOSTIC_ONLY: 2,
+    REVIEW_ACTION_DELETE_RECOMMENDED: 3,
+}
 
 
 def list_experience_ocr_learning_cases() -> list[dict[str, Any]]:
@@ -83,6 +93,8 @@ def list_experience_ocr_learning_cases() -> list[dict[str, Any]]:
             "candidate_match_count": candidate_stats["matching_attempts"],
             "top_candidate_text": candidate_stats["top_text"],
             "top_candidate_confidence": candidate_stats["top_confidence"],
+            "glyph_ambiguities": candidate_stats["glyph_ambiguities"],
+            "glyph_ambiguity_count": candidate_stats["glyph_ambiguity_count"],
         }
         auto_decision = _auto_promote_decision(case_item, str(case_item["default_correct_text"]))
         case_item["auto_promote_decision"] = auto_decision
@@ -91,7 +103,7 @@ def list_experience_ocr_learning_cases() -> list[dict[str, Any]]:
         review = _learning_case_review(case_item)
         case_item.update(review)
         cases.append(case_item)
-    cases = sorted(cases, key=lambda item: (str(item.get("created_at", "")), str(item.get("id", ""))))
+    cases = sorted(cases, key=_learning_case_sort_key)
     _attach_learning_case_groups(cases)
     return cases
 
@@ -113,6 +125,7 @@ def promote_experience_ocr_learning_case(
         raise FileNotFoundError(f"pending case not found: {case_id}")
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     source_file = _promotion_source_file(case_dir, metadata, compact)
+    bar_crop_left_ratio = _promotion_source_bar_crop_left_ratio(metadata, compact)
     if not source_file.exists():
         raise FileNotFoundError(f"ROI file missing: {source_file}")
 
@@ -155,6 +168,7 @@ def promote_experience_ocr_learning_case(
             "percent": float(percent_text),
             "text": compact,
             "paddle_fallback": False,
+            "bar_crop_left_ratio": bar_crop_left_ratio,
         }
     )
     _write_manifest(manifest)
@@ -208,6 +222,12 @@ def auto_promote_experience_ocr_learning_cases(*, dry_run: bool = False) -> dict
             )
             continue
 
+        record_experience_ocr_learning_validation_failure(
+            case_id,
+            sample_id=str(promoted["sample_id"]),
+            text=str(promoted["text"]),
+            validation=validation,
+        )
         remove_experience_ocr_fixture_sample(str(promoted["sample_id"]))
         regen = regen_experience_pixel_templates()
         result["template_count"] = regen["template_count"]
@@ -221,6 +241,34 @@ def auto_promote_experience_ocr_learning_cases(*, dry_run: bool = False) -> dict
             }
         )
     return result
+
+
+def record_experience_ocr_learning_validation_failure(
+    case_id: str,
+    *,
+    sample_id: str,
+    text: str,
+    validation: dict[str, Any],
+) -> bool:
+    metadata_path = _pending_case_dir(case_id) / "metadata.json"
+    if not metadata_path.exists():
+        return False
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    metadata["last_promotion_validation"] = {
+        "success": False,
+        "sample_id": sample_id,
+        "text": text,
+        "read_text": validation.get("text") or "",
+        "reason": validation.get("reason") or "Pixel validation failed",
+        "confidence": validation.get("confidence"),
+        "current_exp": validation.get("current_exp"),
+        "percent": validation.get("percent"),
+    }
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    return True
 
 
 def delete_recommended_experience_ocr_learning_cases(*, dry_run: bool = False) -> list[dict[str, str]]:
@@ -250,6 +298,15 @@ def _learning_case_review(case: dict[str, Any]) -> dict[str, str]:
             "review_label": "需人工確認",
             "review_reason": f"metadata unreadable: {case['error']}",
         }
+    metadata = case.get("metadata") or {}
+    validation = metadata.get("last_promotion_validation") or {}
+    if validation and validation.get("success") is False:
+        reason = str(validation.get("reason") or "Pixel validation failed")
+        return {
+            "review_action": REVIEW_ACTION_DELETE_RECOMMENDED,
+            "review_label": "建議刪除",
+            "review_reason": f"套用後 Pixel validation 仍失敗，不適合作為 template case：{reason}",
+        }
     if case.get("auto_promote_promotable"):
         return {
             "review_action": REVIEW_ACTION_AUTO_PROMOTE,
@@ -260,15 +317,32 @@ def _learning_case_review(case: dict[str, Any]) -> dict[str, str]:
     auto_reason = str(case.get("auto_promote_skip_reason") or "")
     final_reason = str(case.get("final_reason") or "")
     source_warning = str(case.get("source_warning") or "")
-    metadata = case.get("metadata") or {}
     trigger = str(metadata.get("trigger") or case.get("trigger") or "")
     reading_key = str(metadata.get("reading_key") or case.get("reading_key") or "")
     stats = _learning_case_candidate_stats(metadata, reading_key)
     if trigger in FALSE_POSITIVE_REVIEW_TRIGGERS:
         return {
-            "review_action": REVIEW_ACTION_MANUAL_REVIEW,
-            "review_label": "需人工校正",
-            "review_reason": "此 case 來自 OCR false-positive 防線，必須人工確認正確值",
+            "review_action": REVIEW_ACTION_DIAGNOSTIC_ONLY,
+            "review_label": "背景診斷",
+            "review_reason": "已由 OCR/tracker 防線拒絕，保留證據即可，不需日常校正",
+        }
+    if final_reason == "EXP OCR 連續性不可信":
+        return {
+            "review_action": REVIEW_ACTION_DIAGNOSTIC_ONLY,
+            "review_label": "背景診斷",
+            "review_reason": "OCR 連續性防線已拒絕此值，保留證據即可",
+        }
+    if final_reason == "EXP OCR 模糊數字候選不一致":
+        return {
+            "review_action": REVIEW_ACTION_DIAGNOSTIC_ONLY,
+            "review_label": "背景診斷",
+            "review_reason": "Pixel glyph 模糊候選已保留證據，不需日常校正",
+        }
+    if auto_reason == "glyph 模糊候選僅作背景診斷":
+        return {
+            "review_action": REVIEW_ACTION_DIAGNOSTIC_ONLY,
+            "review_label": "背景診斷",
+            "review_reason": "Pixel glyph 模糊候選已保留證據，不需日常校正",
         }
     if auto_reason == "candidate 百分比與綠條不一致":
         return {
@@ -297,6 +371,12 @@ def _learning_case_review(case: dict[str, Any]) -> dict[str, str]:
             "review_label": "建議刪除",
             "review_reason": "沒有可信候選文字且百分比與綠條衝突",
         }
+    if source_warning or not case.get("default_correct_text"):
+        return {
+            "review_action": REVIEW_ACTION_DIAGNOSTIC_ONLY,
+            "review_label": "背景診斷",
+            "review_reason": "沒有可綁定的 OCR 候選文字，保留證據即可，不需日常校正",
+        }
     return {
         "review_action": REVIEW_ACTION_MANUAL_REVIEW,
         "review_label": "需人工校正",
@@ -324,8 +404,16 @@ def _auto_promote_decision(case: dict[str, Any], text: str) -> dict[str, Any]:
         decision["skip_reason"] = f"metadata unreadable: {case['error']}"
         return decision
     trigger = str(metadata.get("trigger") or case.get("trigger") or "")
+    validation = metadata.get("last_promotion_validation") or {}
+    if validation and validation.get("success") is False:
+        decision["skip_reason"] = "Pixel validation 已失敗，建議清理此 case"
+        return decision
     if trigger in FALSE_POSITIVE_REVIEW_TRIGGERS:
-        decision["skip_reason"] = "false-positive case 必須人工確認"
+        decision["skip_reason"] = "false-positive case 僅作背景診斷"
+        return decision
+    final_reason = str((metadata.get("final_reading") or {}).get("reason") or case.get("final_reason") or "")
+    if final_reason == "EXP OCR 模糊數字候選不一致":
+        decision["skip_reason"] = "Pixel glyph 模糊候選僅作背景診斷"
         return decision
     if not compact_text:
         decision["skip_reason"] = "沒有可自動套用的預設文字"
@@ -352,6 +440,17 @@ def _auto_promote_decision(case: dict[str, Any], text: str) -> dict[str, Any]:
         and stats["confidence_gap"] >= AUTO_PROMOTE_MIN_CONFIDENCE_GAP
     )
     has_attempt_support = stats["matching_attempts"] >= AUTO_PROMOTE_MIN_MATCHING_ATTEMPTS
+    has_strong_attempt_support = (
+        stats["top_confidence"] is not None
+        and stats["confidence_gap"] is not None
+        and stats["top_confidence"] >= AUTO_PROMOTE_STRONG_ATTEMPT_MIN_CONFIDENCE
+        and stats["confidence_gap"] >= AUTO_PROMOTE_STRONG_ATTEMPT_MIN_CONFIDENCE_GAP
+        and stats["matching_attempts"] >= AUTO_PROMOTE_STRONG_ATTEMPT_MIN_MATCHING_ATTEMPTS
+    )
+    decision["strong_candidate_support"] = has_strong_attempt_support
+    if stats["glyph_ambiguity_count"] > 0 and not has_strong_attempt_support:
+        decision["skip_reason"] = "glyph 模糊候選僅作背景診斷"
+        return decision
     if not has_confident_gap and not has_attempt_support:
         decision["skip_reason"] = "candidate 信心或獨立 attempt 支援不足"
         return decision
@@ -359,14 +458,20 @@ def _auto_promote_decision(case: dict[str, Any], text: str) -> dict[str, Any]:
     return decision
 
 
+def _learning_case_sort_key(item: dict[str, Any]) -> tuple[int, str, str]:
+    priority = REVIEW_ACTION_SORT_PRIORITY.get(str(item.get("review_action") or ""), 99)
+    return (priority, str(item.get("created_at", "")), str(item.get("id", "")))
+
+
 def _learning_case_candidate_stats(metadata: dict[str, Any], compact_text: str) -> dict[str, Any]:
     attempt_tops: list[str] = []
     bar_mismatch_count = 0
     candidates_by_text: dict[str, dict[str, Any]] = {}
+    glyph_ambiguities: list[dict[str, Any]] = []
     frames = metadata.get("frames") or []
-    for frame in frames:
-        for roi in frame:
-            for attempt in roi.get("attempts") or []:
+    for frame_index, frame in enumerate(frames):
+        for roi_index, roi in enumerate(frame):
+            for attempt_index, attempt in enumerate(roi.get("attempts") or []):
                 attempt_candidates: list[tuple[str, float | None, int]] = []
                 for index, candidate in enumerate(attempt.get("candidates") or []):
                     text = str(candidate.get("text") or "").strip().replace(" ", "")
@@ -391,6 +496,17 @@ def _learning_case_candidate_stats(metadata: dict[str, Any], compact_text: str) 
                     attempt_tops.append(attempt_top[0])
                     if attempt_top[0] == compact_text and _candidate_attempt_bar_mismatches(compact_text, attempt):
                         bar_mismatch_count += 1
+                for segment_index, segment in enumerate(attempt.get("segments") or []):
+                    ambiguity = segment.get("ambiguity")
+                    if not isinstance(ambiguity, dict):
+                        continue
+                    item = dict(ambiguity)
+                    item["frame_index"] = frame_index
+                    item["roi_index"] = roi_index
+                    item["attempt_index"] = attempt_index
+                    item["segment_index"] = segment_index
+                    item["file"] = segment.get("file", "")
+                    glyph_ambiguities.append(item)
 
     top_candidates = sorted(
         candidates_by_text.values(),
@@ -414,6 +530,8 @@ def _learning_case_candidate_stats(metadata: dict[str, Any], compact_text: str) 
         "confidence_gap": confidence_gap,
         "matching_attempts": sum(1 for text in attempt_tops if text == compact_text),
         "bar_mismatch_count": bar_mismatch_count,
+        "glyph_ambiguities": glyph_ambiguities[:8],
+        "glyph_ambiguity_count": len(glyph_ambiguities),
     }
 
 
@@ -739,7 +857,15 @@ def _read_fixture_sample_with_pixel(sample: dict[str, Any]) -> Any | None:
         image = cv2.imread(str(FIXTURE_DIR / str(sample.get("file"))), cv2.IMREAD_UNCHANGED)
         if image is None:
             return None
-        ocr_image = experience_model.ExperienceOcrImage(image=image, source_id=str(sample.get("id") or ""))
+        try:
+            bar_crop_left_ratio = float(sample.get("bar_crop_left_ratio", experience_model.EXP_OCR_BAR_CROP_LEFT_RATIO))
+        except (TypeError, ValueError):
+            bar_crop_left_ratio = experience_model.EXP_OCR_BAR_CROP_LEFT_RATIO
+        ocr_image = experience_model.ExperienceOcrImage(
+            image=image,
+            bar_crop_left_ratio=bar_crop_left_ratio,
+            source_id=str(sample.get("id") or ""),
+        )
         bar_percent = experience_model.estimate_experience_bar_percent(
             image,
             bar_crop_left_ratio=ocr_image.bar_crop_left_ratio,
@@ -794,6 +920,30 @@ def _promotion_source_file(case_dir: Path, metadata: dict[str, Any], compact_tex
 
     source_name = frames[0][0]["file"]
     return case_dir / source_name
+
+
+def _promotion_source_bar_crop_left_ratio(metadata: dict[str, Any], compact_text: str) -> float:
+    source = _find_candidate_source(metadata, compact_text)
+    frames = metadata.get("frames") or []
+    for frame in frames:
+        for roi in frame:
+            roi_ratio = _coerce_bar_crop_left_ratio(roi.get("bar_crop_left_ratio"))
+            if source is None:
+                return roi_ratio
+            source_name, preview_name = source
+            if roi.get("file") == preview_name:
+                return roi_ratio
+            for attempt in roi.get("attempts") or []:
+                if attempt.get("file") == source_name:
+                    return roi_ratio
+    return experience_model.EXP_OCR_BAR_CROP_LEFT_RATIO
+
+
+def _coerce_bar_crop_left_ratio(value: Any) -> float:
+    try:
+        return max(0.0, min(0.98, float(value)))
+    except (TypeError, ValueError):
+        return experience_model.EXP_OCR_BAR_CROP_LEFT_RATIO
 
 
 def _find_candidate_source(metadata: dict[str, Any], compact_text: str) -> tuple[str, str] | None:

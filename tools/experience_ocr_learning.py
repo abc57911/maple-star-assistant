@@ -21,6 +21,17 @@ from maple_star.services.experience_ocr_learning import (  # noqa: E402
 )
 
 
+def _configure_output_encoding() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def list_cases(_args: argparse.Namespace) -> int:
     cases = list_experience_ocr_learning_cases()
     if not cases:
@@ -30,12 +41,19 @@ def list_cases(_args: argparse.Namespace) -> int:
         if case.get("error"):
             print(f"{case['id']}: metadata unreadable: {case['error']}")
             continue
+        ambiguity = ""
+        if case.get("glyph_ambiguity_count"):
+            first = (case.get("glyph_ambiguities") or [{}])[0]
+            characters = "".join(str(char) for char in first.get("characters", []))
+            ambiguity = f" | ambiguity={case.get('glyph_ambiguity_count')}:{characters or '--'}"
         print(
             f"{case['id']} | {case.get('trigger', '--')} | "
             f"group={case.get('group_id', '--')}:{case.get('group_index', 1)}/{case.get('group_size', 1)} | "
             f"text={case.get('final_text')!r} | reason={case.get('final_reason', '--')} | "
             f"auto={case.get('auto_promote_skip_reason') or 'promotable'} | "
-            f"review={case.get('review_label', '--')}:{case.get('review_reason', '--')}"
+            f"review={case.get('review_action', '--')}:"
+            f"{case.get('review_label', '--')}:{case.get('review_reason', '--')}"
+            f"{ambiguity}"
         )
     return 0
 
@@ -117,6 +135,7 @@ def dedupe_fixtures(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_output_encoding()
     parser = argparse.ArgumentParser(description="Manage Maple EXP Pixel OCR learning cases.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 

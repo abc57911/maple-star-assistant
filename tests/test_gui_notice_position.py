@@ -48,42 +48,6 @@ class ToggleNoticePositionTests(unittest.TestCase):
         label.bind.assert_called_once()
         self.assertEqual(label.bind.call_args.args[0], "<Button-1>")
 
-    def test_experience_learning_pixel_validation_failure_logs_rollback(self):
-        gui = self.make_gui()
-        gui._current_experience_learning_case = Mock(return_value={"id": "exp-unit"})
-        gui.experience_learning_correct_text = Mock()
-        gui.experience_learning_correct_text.get.return_value = "34466495[89.69%]"
-        gui.experience_learning_status = Mock()
-        gui._reload_experience_learning_cases = Mock()
-
-        with (
-            patch(
-                "maple_star.views.settings_gui.promote_experience_ocr_learning_case",
-                return_value={"sample_id": "exp-unit_ocr_34466495_8969", "text": "34466495[89.69%]"},
-            ),
-            patch(
-                "maple_star.views.settings_gui.regen_experience_pixel_templates",
-                return_value={"template_count": 949},
-            ),
-            patch(
-                "maple_star.views.settings_gui.validate_promoted_experience_fixture",
-                return_value={"success": False, "text": "34466495[89.89%", "reason": "EXP 像素字型結構不可信"},
-            ),
-            patch("maple_star.views.settings_gui.remove_experience_ocr_fixture_sample") as remove_sample,
-            patch("builtins.print") as print_mock,
-        ):
-            gui._promote_current_experience_learning_case()
-
-        remove_sample.assert_called_once_with("exp-unit_ocr_34466495_8969")
-        print_mock.assert_called_once_with(
-            "EXP OCR learning rolled back: "
-            "exp-unit -> exp-unit_ocr_34466495_8969 | templates=949 | "
-            "pixel_valid=False | read_text=34466495[89.89% | reason=EXP 像素字型結構不可信"
-        )
-        gui.experience_learning_status.set.assert_called_once_with(
-            "未套用，Pixel 仍未通過，保留 case：34466495[89.89% | EXP 像素字型結構不可信"
-        )
-
     def test_saved_position_rejects_windows_minimized_sentinel(self):
         gui = self.make_gui()
         gui._virtual_screen_bounds = Mock(return_value=(0, 0, 1920, 1080))

@@ -29,6 +29,7 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(settings.emergency_stop_hotkey, "Pause")
         self.assertEqual(settings.experience_toggle_hotkey, "F10")
         self.assertEqual(settings.experience_reset_hotkey, "F9")
+        self.assertEqual(settings.character_stat_hotkey, "")
         self.assertIsNone(settings.pickup_toggle_hotkey)
         self.assertIsNone(settings.pickup_key)
         self.assertFalse(settings.console_collapsed)
@@ -50,6 +51,7 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(saved["emergency_stop_hotkey"], "Pause")
         self.assertEqual(saved["experience_toggle_hotkey"], "F10")
         self.assertEqual(saved["experience_reset_hotkey"], "F9")
+        self.assertEqual(saved["character_stat_hotkey"], "")
         self.assertIsNone(saved["pickup_toggle_hotkey"])
         self.assertIsNone(saved["pickup_key"])
         self.assertFalse(saved["console_collapsed"])
@@ -186,6 +188,7 @@ class SettingsProfileTests(unittest.TestCase):
             emergency_stop_hotkey="Pause",
             experience_toggle_hotkey="F10",
             experience_reset_hotkey="F8",
+            character_stat_hotkey="V",
             pickup_toggle_hotkey="F7",
             pickup_key="Z",
             console_collapsed=True,
@@ -203,6 +206,7 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(payload["emergency_stop_hotkey"], "Pause")
         self.assertEqual(payload["experience_toggle_hotkey"], "F10")
         self.assertEqual(payload["experience_reset_hotkey"], "F8")
+        self.assertEqual(payload["character_stat_hotkey"], "V")
         self.assertEqual(payload["pickup_toggle_hotkey"], "F7")
         self.assertEqual(payload["pickup_key"], "Z")
         self.assertTrue(payload["console_collapsed"])
@@ -219,6 +223,7 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertNotIn("emergency_stop_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("experience_toggle_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("experience_reset_hotkey", payload["profiles"]["Default"])
+        self.assertNotIn("character_stat_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("pickup_toggle_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("pickup_key", payload["profiles"]["Default"])
         self.assertNotIn("console_collapsed", payload["profiles"]["Default"])

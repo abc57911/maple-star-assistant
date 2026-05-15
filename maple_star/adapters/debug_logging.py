@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import sys
 import threading
 import traceback
@@ -14,6 +15,10 @@ from ..models.settings import app_base_dir
 
 DEBUG_LOG_PATH = app_base_dir() / "debug.log"
 EXPERIENCE_DEBUG_LOG_PATH = app_base_dir() / "experience_debug.log"
+DEBUG_LOG_MAX_BYTES = 5 * 1024 * 1024
+DEBUG_LOG_BACKUP_COUNT = 3
+EXPERIENCE_DEBUG_LOG_MAX_BYTES = 5 * 1024 * 1024
+EXPERIENCE_DEBUG_LOG_BACKUP_COUNT = 3
 
 _LOGGER_NAME = "maple_star.debug"
 _EXPERIENCE_LOGGER_NAME = "maple_star.experience_debug"
@@ -23,18 +28,42 @@ _original_excepthook = sys.excepthook
 _original_threading_excepthook = getattr(threading, "excepthook", None)
 
 
-def configure_debug_logging(path: Path | None = None, *, reset: bool = False) -> Path:
+def configure_debug_logging(
+    path: Path | None = None,
+    *,
+    reset: bool = False,
+    max_bytes: int = DEBUG_LOG_MAX_BYTES,
+    backup_count: int = DEBUG_LOG_BACKUP_COUNT,
+) -> Path:
     log_path = path or DEBUG_LOG_PATH
-    _configure_logger(_LOGGER_NAME, log_path, reset=reset)
+    _configure_logger(
+        _LOGGER_NAME,
+        log_path,
+        reset=reset,
+        max_bytes=max_bytes,
+        backup_count=backup_count,
+    )
     sys.excepthook = _handle_unhandled_exception
     if hasattr(threading, "excepthook"):
         threading.excepthook = _handle_thread_exception
     return log_path
 
 
-def configure_experience_debug_logging(path: Path | None = None, *, reset: bool = False) -> Path:
+def configure_experience_debug_logging(
+    path: Path | None = None,
+    *,
+    reset: bool = False,
+    max_bytes: int = EXPERIENCE_DEBUG_LOG_MAX_BYTES,
+    backup_count: int = EXPERIENCE_DEBUG_LOG_BACKUP_COUNT,
+) -> Path:
     log_path = path or EXPERIENCE_DEBUG_LOG_PATH
-    _configure_logger(_EXPERIENCE_LOGGER_NAME, log_path, reset=reset)
+    _configure_logger(
+        _EXPERIENCE_LOGGER_NAME,
+        log_path,
+        reset=reset,
+        max_bytes=max_bytes,
+        backup_count=backup_count,
+    )
     return log_path
 
 
@@ -109,7 +138,14 @@ def write_exception_text(
         pass
 
 
-def _configure_logger(logger_name: str, log_path: Path, *, reset: bool = False) -> None:
+def _configure_logger(
+    logger_name: str,
+    log_path: Path,
+    *,
+    reset: bool = False,
+    max_bytes: int,
+    backup_count: int,
+) -> None:
     global _configured_path, _experience_configured_path
     resolved = log_path.resolve()
     configured_path = _logger_configured_path(logger_name)
@@ -124,7 +160,15 @@ def _configure_logger(logger_name: str, log_path: Path, *, reset: bool = False) 
         logger.removeHandler(handler)
         handler.close()
 
-    handler = logging.FileHandler(resolved, mode="w" if reset else "a", encoding="utf-8")
+    if reset:
+        resolved.write_text("", encoding="utf-8")
+    handler = RotatingFileHandler(
+        resolved,
+        mode="a",
+        maxBytes=max(0, int(max_bytes)),
+        backupCount=max(0, int(backup_count)),
+        encoding="utf-8",
+    )
     handler.setLevel(logging.DEBUG)
     if logger_name == _EXPERIENCE_LOGGER_NAME:
         formatter = logging.Formatter("%(message)s")

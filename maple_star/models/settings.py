@@ -19,6 +19,7 @@ DEFAULT_TOGGLE_HOTKEY = "F11"
 DEFAULT_EMERGENCY_STOP_HOTKEY = "Pause"
 DEFAULT_EXPERIENCE_TOGGLE_HOTKEY = "F10"
 DEFAULT_EXPERIENCE_RESET_HOTKEY = "F9"
+DEFAULT_CHARACTER_STAT_HOTKEY = ""
 CONTROLLER_BUTTON_CHOICES = (
     "A",
     "B",
@@ -88,6 +89,7 @@ class AutoPotionSettings:
     emergency_stop_hotkey: str = DEFAULT_EMERGENCY_STOP_HOTKEY
     experience_toggle_hotkey: str = DEFAULT_EXPERIENCE_TOGGLE_HOTKEY
     experience_reset_hotkey: str = DEFAULT_EXPERIENCE_RESET_HOTKEY
+    character_stat_hotkey: str = DEFAULT_CHARACTER_STAT_HOTKEY
     pickup_toggle_hotkey: str | None = None
     pickup_key: str | None = None
     console_collapsed: bool = False
@@ -129,6 +131,7 @@ class AutoPotionSettings:
             self.emergency_stop_hotkey,
             self.experience_toggle_hotkey,
             self.experience_reset_hotkey,
+            self.character_stat_hotkey,
             self.pickup_toggle_hotkey,
             self.pickup_key,
             self.console_collapsed,
@@ -178,6 +181,7 @@ class AutoPotionSettings:
             "emergency_stop_hotkey": self.emergency_stop_hotkey,
             "experience_toggle_hotkey": self.experience_toggle_hotkey,
             "experience_reset_hotkey": self.experience_reset_hotkey,
+            "character_stat_hotkey": self.character_stat_hotkey,
             "pickup_toggle_hotkey": self.pickup_toggle_hotkey,
             "pickup_key": self.pickup_key,
             "console_collapsed": self.console_collapsed,
@@ -268,6 +272,7 @@ GLOBAL_SETTING_KEYS = (
     "emergency_stop_hotkey",
     "experience_toggle_hotkey",
     "experience_reset_hotkey",
+    "character_stat_hotkey",
     "pickup_toggle_hotkey",
     "pickup_key",
     "console_collapsed",
@@ -406,6 +411,7 @@ def settings_from_profile_payload(
         emergency_stop_hotkey=fallback.emergency_stop_hotkey,
         experience_toggle_hotkey=fallback.experience_toggle_hotkey,
         experience_reset_hotkey=fallback.experience_reset_hotkey,
+        character_stat_hotkey=fallback.character_stat_hotkey,
         pickup_toggle_hotkey=fallback.pickup_toggle_hotkey,
         pickup_key=fallback.pickup_key,
         console_collapsed=fallback.console_collapsed,
@@ -490,6 +496,7 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
             "experience_reset_hotkey",
             settings.experience_reset_hotkey,
         ),
+        character_stat_hotkey=_read_string(raw, "character_stat_hotkey", settings.character_stat_hotkey),
         pickup_toggle_hotkey=_read_optional_string(raw, "pickup_toggle_hotkey", settings.pickup_toggle_hotkey),
         pickup_key=_read_optional_string(raw, "pickup_key", settings.pickup_key),
         console_collapsed=_read_bool(raw, "console_collapsed", settings.console_collapsed),
