@@ -59,6 +59,8 @@ class PotionStatus:
     gameplay_hud_active: bool
     scripts_enabled: bool
     auto_drink_enabled: bool
+    hp_region: tuple[int, int, int, int] | None = None
+    mp_region: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -348,14 +350,20 @@ def _install_potion_console_recorder(controller: Any, gui: HeadlessRuntimeGui) -
     original = controller._log_potion_key_trigger_interval
 
     def record(label: str, key_name: str, previous_at: float, now: float) -> None:
-        if previous_at <= -100.0:
-            interval_text = "首次"
-        else:
-            interval_text = f"{max(0.0, now - previous_at) * 1000.0:.0f}ms"
-        gui.console_lines.append(f"{label} 喝水按鍵觸發：{key_name}（間隔：{interval_text}）")
         original(label, key_name, previous_at, now)
 
     controller._log_potion_key_trigger_interval = record
+
+
+def _bar_debug_region(controller: Any, bar_type: str) -> tuple[int, int, int, int] | None:
+    debug = getattr(controller, "last_bar_debug", {}).get(bar_type)
+    region = getattr(debug, "region", None)
+    if region is None or len(region) != 4:
+        return None
+    try:
+        return tuple(int(value) for value in region)
+    except (TypeError, ValueError):
+        return None
 
 
 def _handle_potion_command(
@@ -408,19 +416,7 @@ def _handle_experience_command(controller: Any, target_state: dict[str, int], co
 
 
 def _potion_status(controller: Any, gui: HeadlessRuntimeGui) -> PotionStatus:
-    trigger_interval_ms: float | None = None
     lines = gui.consume_console_lines()
-    for line in reversed(lines):
-        marker = "（間隔："
-        if marker not in line or not line.endswith("）"):
-            continue
-        value = line.split(marker, 1)[1][:-1]
-        if value.endswith("ms"):
-            try:
-                trigger_interval_ms = float(value[:-2])
-            except ValueError:
-                trigger_interval_ms = None
-        break
     return PotionStatus(
         hp_percent=gui.hp_percent,
         mp_percent=gui.mp_percent,
@@ -429,9 +425,11 @@ def _potion_status(controller: Any, gui: HeadlessRuntimeGui) -> PotionStatus:
         status=gui.status,
         action=str(getattr(controller, "last_action", "")),
         notice=gui.notice,
-        trigger_interval_ms=trigger_interval_ms,
+        trigger_interval_ms=None,
         console_lines=lines,
         gameplay_hud_active=bool(getattr(controller, "gameplay_hud_active", False)),
         scripts_enabled=bool(getattr(controller, "scripts_enabled", False)),
         auto_drink_enabled=bool(getattr(controller, "auto_drink_enabled", False)),
+        hp_region=_bar_debug_region(controller, "hp"),
+        mp_region=_bar_debug_region(controller, "mp"),
     )

@@ -1171,6 +1171,21 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(tracker.sample_attempt_count, 3)
         self.assertEqual(tracker.sample_accept_count, 1)
 
+    def test_experience_tracker_rejects_confirmed_lower_value_after_exp_only_baseline(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 362500, None, confidence=0.98))
+        self.assertEqual(tracker.snapshot(0.1).current_exp, 362500)
+
+        self.assertFalse(tracker.add_reading(5.0, 28567, 0.76, confidence=0.98))
+        self.assertFalse(tracker.add_reading(10.0, 28567, 0.76, confidence=0.98))
+        snapshot = tracker.snapshot(10.0)
+
+        self.assertEqual(snapshot.current_exp, 362500)
+        self.assertIsNone(snapshot.current_percent)
+        self.assertEqual(snapshot.sample_count, 1)
+        self.assertIn("EXP 低於基準值", snapshot.status)
+        self.assertIsNone(tracker.pending_rebase)
+
     def test_experience_tracker_requires_confirmed_initial_baseline_when_requested(self):
         tracker = ExperienceEfficiencyTracker()
 
@@ -1606,6 +1621,26 @@ class ExperienceTests(unittest.TestCase):
         self.assertFalse(guarded.success)
         self.assertEqual(guarded.current_exp, 36984144)
         self.assertEqual(guarded.percent, 96.25)
+        self.assertEqual(guarded.continuity_status, "incompatible")
+        self.assertEqual(guarded.reason, "EXP OCR 連續性不可信")
+
+    def test_experience_ocr_continuity_rejects_lower_value_after_exp_only_baseline(self):
+        hint = ExperienceOcrContinuityHint(current_exp=362500, percent=None, captured_at=10.0, now=15.0)
+        reading = ExperienceTextReading(
+            current_exp=28567,
+            percent=0.76,
+            text="28567[0.76%]",
+            confidence=0.98,
+            success=True,
+            reason="OK:Pixel",
+            source="pixel",
+        )
+
+        guarded = _apply_experience_ocr_continuity_guard(reading, hint)
+
+        self.assertFalse(guarded.success)
+        self.assertEqual(guarded.current_exp, 28567)
+        self.assertEqual(guarded.percent, 0.76)
         self.assertEqual(guarded.continuity_status, "incompatible")
         self.assertEqual(guarded.reason, "EXP OCR 連續性不可信")
 

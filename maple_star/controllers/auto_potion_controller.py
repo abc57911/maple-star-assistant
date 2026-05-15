@@ -196,6 +196,7 @@ AUTO_DRINK_STOP_SOUND_PATH = PROJECT_ROOT / "media" / "auto-drink-stop.mp3"
 AUTO_PICKUP_START_SOUND_PATH = PROJECT_ROOT / "media" / "auto-pickup-start.mp3"
 AUTO_PICKUP_STOP_SOUND_PATH = PROJECT_ROOT / "media" / "auto-pickup-stop.mp3"
 POTION_TIME_EPSILON_SECONDS = 1e-9
+POTION_PENDING_SEND_CAPTURE_GUARD_SECONDS = 0.20
 POTION_EXPERIENCE_DEFER_SECONDS = 1.0
 STAT_WINDOW_EXP_LABEL_TEMPLATE_MATCH_THRESHOLD = 0.80
 STAT_WINDOW_EXP_LABEL_TEMPLATE_PATH = PROJECT_ROOT / "maple_star" / "assets" / "stat_window_exp_label.png"
@@ -235,6 +236,10 @@ class AutoPotionController:
         self.last_hp_drink_at = -999.0
         self.last_mp_drink_at = -999.0
         self.potion_send_prevalidated_at = -999.0
+        self.hp_pending_potion_send_at = -999.0
+        self.mp_pending_potion_send_at = -999.0
+        self.hp_pending_potion_send_percent: float | None = None
+        self.mp_pending_potion_send_percent: float | None = None
         self.hp_potion_effect_attempts: list[PotionEffectAttempt] = []
         self.mp_potion_effect_attempts: list[PotionEffectAttempt] = []
         self.hp_potion_no_effect_count = 0
@@ -454,6 +459,10 @@ class AutoPotionController:
         self.gameplay_hud_active = status.gameplay_hud_active
         self.gui.set_current_percentages(status.hp_percent, status.mp_percent)
         self.gui.set_bar_detection_debug(status.hp_debug, status.mp_debug)
+        self._apply_runtime_bar_detection_region("hp", status.hp_region, status.hp_percent)
+        self._apply_runtime_bar_detection_region("mp", status.mp_region, status.mp_percent)
+        if status.gameplay_hud_active and status.hp_region is not None and status.mp_region is not None:
+            self.gui.refresh_bar_preview_once()
         if status.status:
             self.gui.set_status(status.status)
         if status.notice:
@@ -463,6 +472,24 @@ class AutoPotionController:
         for line in status.console_lines:
             print(line)
         self.last_runtime_potion_status_at = time.monotonic()
+
+    def _apply_runtime_bar_detection_region(
+        self,
+        bar_type: str,
+        region: tuple[int, int, int, int] | None,
+        percent: float | None,
+    ) -> None:
+        if region is None:
+            return
+        debug = self.last_bar_debug.get(bar_type)
+        if debug is None:
+            debug = BarDetectionDebug(bar_type)
+            self.last_bar_debug[bar_type] = debug
+        debug.source = "runtime"
+        debug.region = region
+        debug.percent = percent
+        debug.success = percent is not None
+        debug.reason = "OK" if percent is not None else debug.reason
 
     def _apply_worker_crash(self, crash: WorkerCrashed) -> None:
         if crash.worker == "potion":
@@ -898,6 +925,8 @@ class AutoPotionController:
         key_up(held_vk)
 
     def _release_all_potion_keys(self) -> None:
+        self._clear_pending_potion_send("hp")
+        self._clear_pending_potion_send("mp")
         if self._runtime_processes_active():
             self._send_runtime_release_all_potions()
             self.hp_potion_held_vk = 0
@@ -933,11 +962,7 @@ class AutoPotionController:
         return True
 
     def _log_potion_key_trigger_interval(self, label: str, key_name: str, previous_at: float, now: float) -> None:
-        if previous_at <= -100.0:
-            interval_text = "首次"
-        else:
-            interval_text = f"{max(0.0, now - previous_at) * 1000.0:.0f}ms"
-        print(f"{label} 喝水按鍵觸發：{key_name}（間隔：{interval_text}）")
+        return
 
     def _tap_potion_key(self, bar_type: str, key_name: str) -> None:
         worker = getattr(self, "potion_action_worker", None)
@@ -1157,9 +1182,19 @@ class AutoPotionController:
         target_window_active = self.is_target_window_active()
         if target_window_active:
             self._sync_pickup_key_state()
+            self._process_due_potion_sends(now)
         else:
             self._release_pickup_key()
             self._release_all_potion_keys()
+
+        next_pending_send_at = self._next_pending_potion_send_at()
+        if (
+            target_window_active
+            and next_pending_send_at is not None
+            and now + POTION_TIME_EPSILON_SECONDS < next_pending_send_at
+            and next_pending_send_at - now <= POTION_PENDING_SEND_CAPTURE_GUARD_SECONDS
+        ):
+            return
 
         if now < self.next_capture_at:
             return
@@ -2225,14 +2260,10 @@ class AutoPotionController:
         return np.asarray(self.sct.grab({"left": left, "top": top, "width": width, "height": height})).copy()
 
     def _capture_experience_text_images(self, regions: list[tuple[int, int, int, int]]) -> list[ExperienceOcrImage]:
-        started_at = time.perf_counter()
         images: list[ExperienceOcrImage] = []
-        details: list[str] = []
         for index, region in enumerate(regions):
             source_id = "primary" if index == 0 else "wide"
-            capture_started_at = time.perf_counter()
             image = self._capture_experience_text_image(region)
-            capture_ms = (time.perf_counter() - capture_started_at) * 1000.0
             images.append(
                 ExperienceOcrImage(
                     image,
@@ -2240,13 +2271,6 @@ class AutoPotionController:
                     source_id,
                 )
             )
-            height, width = image.shape[:2]
-            details.append(f"{source_id}:{width}x{height}:{capture_ms:.1f}ms")
-        log_debug(
-            "EXP OCR timing capture "
-            f"regions={len(regions)} total_ms={(time.perf_counter() - started_at) * 1000.0:.1f} "
-            f"details={','.join(details) if details else '--'}"
-        )
         return images
 
     def _submit_experience_ocr_burst(
@@ -2261,35 +2285,20 @@ class AutoPotionController:
             return
         if effective_now is None:
             effective_now = self._experience_effective_time(now)
-        signature_started_at = time.perf_counter()
         image_signature = self._experience_ocr_image_signature(image_frames)
-        signature_ms = (time.perf_counter() - signature_started_at) * 1000.0
-        frame_count = len(image_frames)
-        roi_count = sum(len(images) for images in image_frames)
         if self._is_repeated_completed_experience_ocr_signature(image_signature):
-            log_debug(
-                "EXP OCR timing submit "
-                f"skipped=repeated_completed frames={frame_count} rois={roi_count} "
-                f"signature_ms={signature_ms:.1f}"
-            )
             self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
             snapshot = self.experience_tracker.snapshot(effective_now)
             snapshot.status = "EXP ROI 未變化，保留統計"
             self.gui.set_experience_snapshot(snapshot)
             return
         if self._is_repeated_failed_experience_ocr_signature(image_signature):
-            log_debug(
-                "EXP OCR timing submit "
-                f"skipped=repeated_failed frames={frame_count} rois={roi_count} "
-                f"signature_ms={signature_ms:.1f}"
-            )
             self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
             snapshot = self.experience_tracker.snapshot(effective_now)
             snapshot.status = "OCR ROI 未變化，保留統計" if snapshot.sample_count else "OCR ROI 未變化，等待畫面更新"
             self.gui.set_experience_snapshot(snapshot)
             return
 
-        submit_started_at = time.perf_counter()
         continuity_hint = self._experience_ocr_continuity_hint(effective_now)
         copied_frames = [[self._copy_experience_ocr_image(image) for image in images] for images in image_frames]
         if continuity_hint is None:
@@ -2308,11 +2317,6 @@ class AutoPotionController:
             future=future,
             image_signature=image_signature,
             image_frames=[[self._copy_experience_ocr_image(image) for image in images] for images in image_frames],
-        )
-        log_debug(
-            "EXP OCR timing submit "
-            f"frames={frame_count} rois={roi_count} signature_ms={signature_ms:.1f} "
-            f"submit_ms={(time.perf_counter() - submit_started_at) * 1000.0:.1f}"
         )
         self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
         snapshot = self.experience_tracker.snapshot(effective_now)
@@ -2462,13 +2466,6 @@ class AutoPotionController:
             log_exception("OCR 背景工作失敗")
             reading = ExperienceTextReading(reason=f"OCR 背景工作失敗：{exc}")
         job_elapsed_ms = max(0.0, now - job.submitted_at) * 1000.0
-        log_debug(
-            "EXP OCR timing job "
-            f"elapsed_ms={job_elapsed_ms:.1f} "
-            f"result={'success' if reading.success else 'failure'} "
-            f"{self._experience_reading_log_fields(reading)} | reason={reading.reason}"
-        )
-
         self._log_experience_ocr_reading(reading)
         if reading.success and reading.current_exp is not None:
             tracker_samples = getattr(self.experience_tracker, "samples", None)
@@ -2848,6 +2845,11 @@ class AutoPotionController:
             if last_drink_at > -100.0:
                 elapsed_since_drink = now - last_drink_at
                 if elapsed_since_drink + POTION_TIME_EPSILON_SECONDS < self._potion_cooldown_seconds(bar_type):
+                    self._schedule_pending_potion_send(
+                        bar_type,
+                        last_drink_at + self._potion_cooldown_seconds(bar_type),
+                        percent,
+                    )
                     return
         if not self._is_target_window_active_before_send(label, now):
             if continuous_enabled:
@@ -2886,6 +2888,70 @@ class AutoPotionController:
             return
 
         previous_at = self._last_potion_drink_at(bar_type)
+        self._clear_pending_potion_send(bar_type)
+        self._tap_potion_key(bar_type, key_name)
+        self._log_potion_key_trigger_interval(label, key_name, previous_at, now)
+        self._set_last_potion_drink_at(bar_type, now)
+        self._record_potion_effect_attempt(bar_type, now, percent)
+        self.last_action = f"{label} 喝水：{key_name}"
+
+    def _process_due_potion_sends(self, now: float) -> None:
+        if not self.auto_drink_enabled:
+            self._clear_pending_potion_send("hp")
+            self._clear_pending_potion_send("mp")
+            return
+        self._process_due_potion_send(
+            "hp",
+            "HP",
+            now,
+            self.settings.hp_enabled,
+            self.settings.hp_threshold_percent,
+            self.settings.hp_key,
+            self.settings.hp_continuous_enabled,
+        )
+        self._process_due_potion_send(
+            "mp",
+            "MP",
+            now,
+            self.settings.mp_enabled,
+            self.settings.mp_threshold_percent,
+            self.settings.mp_key,
+            self.settings.mp_continuous_enabled,
+        )
+
+    def _process_due_potion_send(
+        self,
+        bar_type: str,
+        label: str,
+        now: float,
+        enabled: bool,
+        threshold_percent: float,
+        key_name: str,
+        continuous_enabled: bool,
+    ) -> None:
+        due_at = self._pending_potion_send_at(bar_type)
+        if due_at <= -100.0 or now + POTION_TIME_EPSILON_SECONDS < due_at:
+            return
+        percent = self._pending_potion_send_percent(bar_type)
+        self._clear_pending_potion_send(bar_type)
+        if (
+            not enabled
+            or continuous_enabled
+            or self._out_of_potion_hold(bar_type) is not None
+            or percent is None
+            or not should_drink_for_threshold(percent, threshold_percent)
+        ):
+            return
+        previous_at = self._last_potion_drink_at(bar_type)
+        if previous_at > -100.0:
+            cooldown_seconds = self._potion_cooldown_seconds(bar_type)
+            if now - previous_at + POTION_TIME_EPSILON_SECONDS < cooldown_seconds:
+                self._schedule_pending_potion_send(bar_type, previous_at + cooldown_seconds, percent)
+                return
+        if getattr(self, "gameplay_hud_active", False):
+            self.potion_send_prevalidated_at = now
+        if not self._is_target_window_active_before_send(label, now):
+            return
         self._tap_potion_key(bar_type, key_name)
         self._log_potion_key_trigger_interval(label, key_name, previous_at, now)
         self._set_last_potion_drink_at(bar_type, now)
@@ -3076,6 +3142,7 @@ class AutoPotionController:
 
     def _clear_potion_bar_state(self, bar_type: str) -> None:
         self._release_potion_key(bar_type)
+        self._clear_pending_potion_send(bar_type)
         self._set_potion_effect_attempts(bar_type, [])
         self._reset_potion_no_effect_count(bar_type)
         self._set_out_of_potion_hold(bar_type, None)
@@ -3085,6 +3152,7 @@ class AutoPotionController:
         self._set_potion_damage_pressure_active(bar_type, False)
 
     def _clear_potion_attempt_state(self, bar_type: str) -> None:
+        self._clear_pending_potion_send(bar_type)
         self._set_potion_effect_attempts(bar_type, [])
         self._reset_potion_no_effect_count(bar_type)
         self._set_potion_recent_samples(bar_type, [])
@@ -3094,10 +3162,12 @@ class AutoPotionController:
     def _clear_uncertain_potion_observations(self, hp_percent: float | None, mp_percent: float | None) -> None:
         if hp_percent is None:
             self._release_potion_key("hp")
+            self._clear_pending_potion_send("hp")
             self._set_potion_effect_attempts("hp", [])
             self._set_potion_recent_samples("hp", [])
         if mp_percent is None:
             self._release_potion_key("mp")
+            self._clear_pending_potion_send("mp")
             self._set_potion_effect_attempts("mp", [])
             self._set_potion_recent_samples("mp", [])
 
@@ -3124,6 +3194,45 @@ class AutoPotionController:
             self.hp_potion_last_no_effect_counted_at = now
         else:
             self.mp_potion_last_no_effect_counted_at = now
+
+    def _pending_potion_send_at(self, bar_type: str) -> float:
+        if bar_type == "hp":
+            return getattr(self, "hp_pending_potion_send_at", -999.0)
+        return getattr(self, "mp_pending_potion_send_at", -999.0)
+
+    def _pending_potion_send_percent(self, bar_type: str) -> float | None:
+        if bar_type == "hp":
+            return getattr(self, "hp_pending_potion_send_percent", None)
+        return getattr(self, "mp_pending_potion_send_percent", None)
+
+    def _schedule_pending_potion_send(self, bar_type: str, due_at: float, percent: float) -> None:
+        if bar_type == "hp":
+            self.hp_pending_potion_send_at = due_at
+            self.hp_pending_potion_send_percent = percent
+        else:
+            self.mp_pending_potion_send_at = due_at
+            self.mp_pending_potion_send_percent = percent
+
+    def _clear_pending_potion_send(self, bar_type: str) -> None:
+        if bar_type == "hp":
+            self.hp_pending_potion_send_at = -999.0
+            self.hp_pending_potion_send_percent = None
+        else:
+            self.mp_pending_potion_send_at = -999.0
+            self.mp_pending_potion_send_percent = None
+
+    def _next_pending_potion_send_at(self) -> float | None:
+        pending_times = [
+            due_at
+            for due_at in (
+                self._pending_potion_send_at("hp"),
+                self._pending_potion_send_at("mp"),
+            )
+            if due_at > -100.0
+        ]
+        if not pending_times:
+            return None
+        return min(pending_times)
 
     def _potion_cooldown_seconds(self, bar_type: str) -> float:
         if bar_type == "hp":

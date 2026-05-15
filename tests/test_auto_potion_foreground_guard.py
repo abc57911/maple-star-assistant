@@ -110,6 +110,10 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.last_hp_drink_at = -999.0
         controller.last_mp_drink_at = -999.0
         controller.potion_send_prevalidated_at = -999.0
+        controller.hp_pending_potion_send_at = -999.0
+        controller.mp_pending_potion_send_at = -999.0
+        controller.hp_pending_potion_send_percent = None
+        controller.mp_pending_potion_send_percent = None
         controller.hp_potion_effect_attempts = []
         controller.mp_potion_effect_attempts = []
         controller.hp_potion_no_effect_count = 0
@@ -980,11 +984,13 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
                 status="自動喝水監控中",
                 action="HP 喝水：Delete",
                 notice="",
-                trigger_interval_ms=50.0,
-                console_lines=("HP 喝水按鍵觸發：Delete（間隔：50ms）",),
+                trigger_interval_ms=None,
+                console_lines=(),
                 gameplay_hud_active=True,
                 scripts_enabled=True,
                 auto_drink_enabled=True,
+                hp_region=(10, 20, 30, 12),
+                mp_region=(40, 50, 30, 12),
             )
         )
         runtime.experience_statuses.append(ExperienceStatus(snapshot=snapshot, status="統計中"))
@@ -999,7 +1005,31 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.gui.set_experience_snapshot.assert_called_once_with(snapshot)
         self.assertTrue(controller.gameplay_hud_active)
         self.assertEqual(controller.last_action, "HP 喝水：Delete")
-        print_mock.assert_called_once_with("HP 喝水按鍵觸發：Delete（間隔：50ms）")
+        self.assertEqual(controller.last_bar_debug["hp"].region, (10, 20, 30, 12))
+        self.assertEqual(controller.last_bar_debug["mp"].region, (40, 50, 30, 12))
+        controller.gui.refresh_bar_preview_once.assert_called_once()
+        print_mock.assert_not_called()
+
+    def test_runtime_status_without_regions_does_not_refresh_bar_preview(self):
+        controller = self.make_controller([True])
+        status = PotionStatus(
+            hp_percent=25.0,
+            mp_percent=80.0,
+            hp_debug="hp ok",
+            mp_debug="mp ok",
+            status="自動喝水監控中",
+            action="",
+            notice="",
+            trigger_interval_ms=None,
+            console_lines=(),
+            gameplay_hud_active=True,
+            scripts_enabled=True,
+            auto_drink_enabled=True,
+        )
+
+        controller._apply_potion_status(status)
+
+        controller.gui.refresh_bar_preview_once.assert_not_called()
 
     def test_runtime_emergency_stop_sends_release_to_potion_process(self):
         controller = self.make_controller([True])
@@ -1176,7 +1206,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         sleep.assert_called_once()
         controller._log_unstable_bar.assert_not_called()
 
-    def test_hp_successful_auto_drink_prints_trigger_interval(self):
+    def test_hp_successful_auto_drink_does_not_log_trigger(self):
         controller = self.make_controller([True, True])
 
         with (
@@ -1186,11 +1216,11 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             controller._maybe_drink_hp(100.0, 25.0)
 
         tap_hotkey.assert_called_once_with("Delete")
-        print_mock.assert_called_once_with("HP 喝水按鍵觸發：Delete（間隔：首次）")
+        print_mock.assert_not_called()
         self.assertEqual(controller.last_hp_drink_at, 100.0)
         self.assertEqual(controller.last_action, "HP 喝水：Delete")
 
-    def test_hp_repeat_auto_drink_uses_current_sample_without_confirm_recapture(self):
+    def test_hp_repeat_auto_drink_uses_current_sample_without_confirm_recapture_or_log(self):
         controller = self.make_controller([])
         controller.gameplay_hud_active = True
         controller.potion_send_prevalidated_at = 100.2
@@ -1205,7 +1235,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         tap_hotkey.assert_called_once_with("Delete")
         controller._capture_confirmed_bar_percent.assert_not_called()
-        print_mock.assert_called_once_with("HP 喝水按鍵觸發：Delete（間隔：200ms）")
+        print_mock.assert_not_called()
         self.assertEqual(controller.last_hp_drink_at, 100.2)
 
     def test_hp_auto_drink_uses_potion_action_worker_when_available(self):
@@ -1222,7 +1252,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         tap_hotkey.assert_not_called()
         self.assertEqual(controller.last_hp_drink_at, 100.0)
 
-    def test_mp_successful_auto_drink_prints_trigger_interval(self):
+    def test_mp_successful_auto_drink_does_not_log_trigger(self):
         controller = self.make_controller([True, True])
 
         with (
@@ -1232,7 +1262,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             controller._maybe_drink_mp(100.0, 25.0)
 
         tap_hotkey.assert_called_once_with("End")
-        print_mock.assert_called_once_with("MP 喝水按鍵觸發：End（間隔：首次）")
+        print_mock.assert_not_called()
         self.assertEqual(controller.last_mp_drink_at, 100.0)
         self.assertEqual(controller.last_action, "MP 喝水：End")
 
@@ -1371,6 +1401,85 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
                 PotionEffectAttempt(100.2, 25.0),
             ],
         )
+
+    def test_hp_repeat_schedules_due_send_for_exact_cooldown(self):
+        controller = self.make_controller([True] * 4)
+        controller.settings.hp_cooldown_seconds = 0.2
+        controller.gameplay_hud_active = True
+
+        with (
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("builtins.print"),
+        ):
+            controller._maybe_drink_hp(100.0, 25.0)
+            controller._maybe_drink_hp(100.05, 25.0)
+
+            self.assertEqual(tap_hotkey.call_count, 1)
+            self.assertEqual(controller.hp_pending_potion_send_at, 100.2)
+            self.assertEqual(controller.hp_pending_potion_send_percent, 25.0)
+
+            controller._process_due_potion_sends(100.199)
+            self.assertEqual(tap_hotkey.call_count, 1)
+
+            controller._process_due_potion_sends(100.2)
+
+        self.assertEqual(tap_hotkey.call_count, 2)
+        tap_hotkey.assert_called_with("Delete")
+        self.assertEqual(controller.last_hp_drink_at, 100.2)
+        self.assertEqual(controller.hp_pending_potion_send_at, -999.0)
+        self.assertIsNone(controller.hp_pending_potion_send_percent)
+        self.assertEqual(
+            controller.hp_potion_effect_attempts,
+            [
+                PotionEffectAttempt(100.0, 25.0),
+                PotionEffectAttempt(100.2, 25.0),
+            ],
+        )
+
+    def test_update_processes_due_potion_send_before_capture_gate(self):
+        controller = self.make_controller([True])
+        controller.settings.hp_cooldown_seconds = 0.2
+        controller.next_capture_at = 999.0
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller.gameplay_hud_active = True
+        controller.last_hp_drink_at = 100.0
+        controller.hp_pending_potion_send_at = 100.2
+        controller.hp_pending_potion_send_percent = 25.0
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._sync_pickup_key_state = Mock()
+        controller._save_settings_when_idle = Mock()
+        controller._capture_bar_percent = Mock()
+
+        with (
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("builtins.print"),
+        ):
+            controller.update(100.2)
+
+        tap_hotkey.assert_called_once_with("Delete")
+        controller._capture_bar_percent.assert_not_called()
+        self.assertEqual(controller.last_hp_drink_at, 100.2)
+        self.assertEqual(controller.hp_pending_potion_send_at, -999.0)
+
+    def test_near_due_potion_send_skips_capture_to_preserve_cooldown_time(self):
+        controller = self.make_controller([True])
+        controller.next_capture_at = 0.0
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller.gameplay_hud_active = True
+        controller.last_hp_drink_at = 100.0
+        controller.hp_pending_potion_send_at = 100.2
+        controller.hp_pending_potion_send_percent = 25.0
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._sync_pickup_key_state = Mock()
+        controller._save_settings_when_idle = Mock()
+        controller._capture_bar_percent = Mock()
+
+        controller.update(100.1)
+
+        controller._capture_bar_percent.assert_not_called()
+        self.assertEqual(controller.hp_pending_potion_send_at, 100.2)
 
     def test_hp_continuous_holds_once_until_above_threshold(self):
         controller = self.make_controller([True] * 4)
