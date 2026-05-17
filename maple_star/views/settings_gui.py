@@ -20,6 +20,7 @@ from ..models.experience import (
     format_duration,
     format_eta,
     format_exp,
+    format_exp_10m_gain,
     format_exp_rate,
     format_ocr_success_rate,
     format_rate_confidence,
@@ -166,8 +167,9 @@ class AutoPotionSettingsGui:
         self.key_detection_focus_bindings: list[tuple[tk.Misc, str]] = []
         self.toggle_notice_window: ctk.CTkToplevel | None = None
         self.toggle_notice_after_id: str | None = None
+        self.toggle_notice_message = ""
         self.bar_preview_provider: Callable[[bool], dict[str, dict[str, object]]] | None = None
-        self.experience_reset_handler: Callable[[], None] | None = None
+        self.experience_reset_handler: Callable[[], bool | None] | None = None
         self.bar_preview_labels: dict[str, ctk.CTkLabel] = {}
         self.bar_preview_images: list[ctk.CTkImage] = []
         self.bar_preview_has_snapshot = False
@@ -251,9 +253,9 @@ class AutoPotionSettingsGui:
         self.hp_detection_status = tk.StringVar(value="HP: --")
         self.mp_detection_status = tk.StringVar(value="MP: --")
         self.exp_current_status = tk.StringVar(value="EXP：--")
-        self.exp_rate_5m_status = tk.StringVar(value="5m：--")
         self.exp_rate_10m_status = tk.StringVar(value="10m：--")
         self.exp_rate_1h_status = tk.StringVar(value="1h：--")
+        self.exp_10m_gain_status = tk.StringVar(value="EXP-10：--")
         self.exp_eta_status = tk.StringVar(value="升級預估：--    時間：--")
         self.exp_quality_status = tk.StringVar(value="樣本：--    信賴度：--")
         self.exp_reader_status = tk.StringVar(value="狀態：尚未開始")
@@ -416,9 +418,9 @@ class AutoPotionSettingsGui:
         exp_rate_frame.grid(row=2, column=0, sticky="ew", padx=(0, 8), pady=(0, 2))
         for column in range(3):
             exp_rate_frame.columnconfigure(column, weight=1, uniform="exp_rate")
-        self._label(exp_rate_frame, textvariable=self.exp_rate_5m_status, font=EXP_MONO_FONT).grid(row=0, column=0, sticky="w")
-        self._label(exp_rate_frame, textvariable=self.exp_rate_10m_status, font=EXP_MONO_FONT).grid(row=0, column=1, sticky="w")
-        self._label(exp_rate_frame, textvariable=self.exp_rate_1h_status, font=EXP_MONO_FONT).grid(row=0, column=2, sticky="w")
+        self._label(exp_rate_frame, textvariable=self.exp_rate_10m_status, font=EXP_MONO_FONT).grid(row=0, column=0, sticky="w")
+        self._label(exp_rate_frame, textvariable=self.exp_rate_1h_status, font=EXP_MONO_FONT).grid(row=0, column=1, sticky="w")
+        self._label(exp_rate_frame, textvariable=self.exp_10m_gain_status, font=EXP_MONO_FONT).grid(row=0, column=2, sticky="w")
         self._label(exp_frame, textvariable=self.exp_quality_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=3, column=0, sticky="w", padx=(0, 8), pady=(0, 0))
         exp_frame.rowconfigure(4, weight=1, minsize=12)
         self._label(exp_frame, textvariable=self.exp_reader_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=5, column=0, sticky="sw", padx=(0, 8), pady=(0, 0))
@@ -1584,12 +1586,13 @@ class AutoPotionSettingsGui:
     def set_bar_preview_provider(self, provider: Callable[[bool], dict[str, dict[str, object]]]) -> None:
         self.bar_preview_provider = provider
 
-    def set_experience_reset_handler(self, handler: Callable[[], None]) -> None:
+    def set_experience_reset_handler(self, handler: Callable[[], bool | None]) -> None:
         self.experience_reset_handler = handler
 
     def reset_experience_statistics(self) -> None:
         if self.experience_reset_handler is not None:
-            self.experience_reset_handler()
+            if self.experience_reset_handler() is False:
+                return
         self.set_experience_snapshot(ExperienceSnapshot(status="已重置"))
 
     def is_detecting_key(self) -> bool:
@@ -2065,9 +2068,9 @@ class AutoPotionSettingsGui:
         percent = "" if snapshot.current_percent is None else f" ({snapshot.current_percent:.2f}%)"
         ocr_success = format_ocr_success_rate(snapshot.ocr_success_count, snapshot.ocr_attempt_count)
         self.exp_current_status.set(f"EXP：{format_exp(snapshot.current_exp)}{percent}    OCR：{ocr_success}")
-        self.exp_rate_5m_status.set(f"5m：{format_exp_rate(snapshot.xp_per_5m)}")
         self.exp_rate_10m_status.set(f"10m：{format_exp_rate(snapshot.xp_per_10m)}")
         self.exp_rate_1h_status.set(f"1h：{format_exp_rate(snapshot.xp_per_hour)}")
+        self.exp_10m_gain_status.set(f"EXP-10：{format_exp_10m_gain(snapshot.exp_10m_gain)}")
         self.exp_eta_status.set(
             f"升級預估：{format_eta(snapshot.eta_seconds)}    時間：{format_duration(snapshot.elapsed_seconds)}"
         )
@@ -2128,11 +2131,24 @@ class AutoPotionSettingsGui:
         if self.closed:
             return
 
+        if self.toggle_notice_window is not None and self.toggle_notice_message == message:
+            try:
+                if self.toggle_notice_after_id is not None:
+                    self.root.after_cancel(self.toggle_notice_after_id)
+                self.toggle_notice_after_id = self.root.after(1300, self._destroy_toggle_notice)
+                self.toggle_notice_window.lift()
+                return
+            except tk.TclError:
+                self.toggle_notice_after_id = None
+                self.toggle_notice_window = None
+                self.toggle_notice_message = ""
+
         self._destroy_toggle_notice()
         target_rect = self._foreground_client_rect()
         try:
             notice = self._create_auxiliary_window(fg_color=NOTICE_BG, overrideredirect=True)
             self.toggle_notice_window = notice
+            self.toggle_notice_message = message
             try:
                 notice.attributes("-alpha", 0.92)
             except tk.TclError:
@@ -2240,6 +2256,7 @@ class AutoPotionSettingsGui:
             self.toggle_notice_after_id = None
 
         if self.toggle_notice_window is None:
+            self.toggle_notice_message = ""
             return
 
         try:
@@ -2247,6 +2264,7 @@ class AutoPotionSettingsGui:
         except tk.TclError:
             pass
         self.toggle_notice_window = None
+        self.toggle_notice_message = ""
 
     def append_console(self, text: str) -> None:
         if self.closed or not text:

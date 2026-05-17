@@ -33,6 +33,7 @@ from maple_star.experience import (
     _erase_experience_green_bar_to_text_image,
     _experience_ocr_continuity_status,
     _experience_pixel_font_runtime_attempts,
+    _experience_should_read_secondary_roi,
     _read_experience_pixel_font_adaptive,
     _experience_text_structure_score,
     _pixel_font_text_reading,
@@ -44,6 +45,7 @@ from maple_star.experience import (
     extract_paddle_text_items,
     format_duration,
     format_eta,
+    format_exp_10m_gain,
     format_exp_rate,
     format_ocr_success_rate,
     format_rate_confidence,
@@ -967,6 +969,17 @@ class ExperienceTests(unittest.TestCase):
         self.assertFalse(reading.success)
         self.assertEqual(reading.reason, "EXP 數字解析失敗")
 
+    def test_reading_from_paddle_result_requires_level_up_grace_for_low_percent_repair(self):
+        result = [{"res": {"rec_texts": ["162870.03%]"], "rec_scores": [0.94]}}]
+
+        rejected = reading_from_paddle_result(result)
+        accepted = reading_from_paddle_result(result, allow_low_percent_repair=True)
+
+        self.assertFalse(rejected.success)
+        self.assertTrue(accepted.success)
+        self.assertEqual(accepted.current_exp, 16287)
+        self.assertEqual(accepted.percent, 0.03)
+
     def test_reading_from_paddle_result_repairs_missing_percent_marker(self):
         reading = reading_from_paddle_result([{"res": {"rec_texts": ["3704316[96.66]"], "rec_scores": [0.91]}}])
 
@@ -1141,6 +1154,17 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(snapshot.current_exp, 3877001)
         self.assertEqual(snapshot.current_percent, 90.93)
         self.assertIn("樣本拒絕", snapshot.status)
+
+    def test_experience_tracker_rejects_large_percent_jump_without_matching_exp_gain(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 43738131, 82.84, confidence=0.98))
+
+        self.assertFalse(tracker.add_reading(64.0, 44015096, 88.17, confidence=0.90))
+
+        snapshot = tracker.snapshot(64.0)
+        self.assertEqual(snapshot.current_exp, 43738131)
+        self.assertEqual(snapshot.current_percent, 82.84)
+        self.assertIn("EXP 增量低於百分比變化", snapshot.status)
 
     def test_experience_tracker_repairs_green_bar_three_read_as_eight(self):
         tracker = ExperienceEfficiencyTracker()
@@ -1603,6 +1627,13 @@ class ExperienceTests(unittest.TestCase):
 
         self.assertEqual(status, "level_up")
 
+    def test_experience_ocr_continuity_allows_low_percent_after_near_full_level_up(self):
+        hint = ExperienceOcrContinuityHint(current_exp=49377752, percent=98.0, captured_at=30.0, now=35.0)
+
+        status = _experience_ocr_continuity_status(16287, 0.03, hint)
+
+        self.assertEqual(status, "level_up")
+
     def test_experience_ocr_continuity_guard_rejects_percent_regression_success(self):
         hint = ExperienceOcrContinuityHint(current_exp=36884521, percent=96.99, captured_at=10.0, now=39.828)
         reading = ExperienceTextReading(
@@ -1687,6 +1718,15 @@ class ExperienceTests(unittest.TestCase):
         self.assertLess(len(tight_attempts), len(wide_attempts))
         self.assertLessEqual(len(tight_attempts), 6)
         self.assertIn("tight_right_4", {attempt.preprocess_variant for attempt in tight_attempts})
+
+    def test_secondary_roi_is_used_when_primary_ocr_has_known_failure(self):
+        primary = ExperienceOcrImage(np.zeros((30, 280, 4), dtype=np.uint8), source_id="primary")
+        secondary = ExperienceOcrImage(np.zeros((30, 380, 4), dtype=np.uint8), source_id="wide")
+        primary_failure = ExperienceTextReading(reason="EXP 百分比解析失敗", confidence=0.93)
+        ambiguous_failure = ExperienceTextReading(reason="EXP OCR 候選不一致", confidence=0.93)
+
+        self.assertTrue(_experience_should_read_secondary_roi(primary, primary_failure, secondary))
+        self.assertFalse(_experience_should_read_secondary_roi(primary, ambiguous_failure, secondary))
 
     def test_tight_right_exp_roi_uses_paddle_after_pixel_text_failure(self):
         reader = PaddleExperienceTextReader()
@@ -3032,6 +3072,36 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(snapshot.xp_per_10m, 60000.0)
         self.assertAlmostEqual(snapshot.xp_per_hour, 360000.0)
         self.assertIsNotNone(snapshot.eta_seconds)
+
+    def test_tracker_records_exact_exp_10m_checkpoint_gain(self):
+        tracker = ExperienceEfficiencyTracker()
+        tracker.record_exp_10m_checkpoint(1_000_000)
+        self.assertIsNone(tracker.snapshot(0.0).exp_10m_gain)
+
+        tracker.record_exp_10m_checkpoint(1_123_456)
+        snapshot = tracker.snapshot(600.0)
+
+        self.assertEqual(snapshot.exp_10m_gain, 123456)
+        self.assertEqual(format_exp_10m_gain(snapshot.exp_10m_gain), "12.35萬")
+
+    def test_tracker_exp_10m_checkpoint_drop_resets_anchor_without_estimate(self):
+        tracker = ExperienceEfficiencyTracker()
+        tracker.record_exp_10m_checkpoint(1_000_000)
+        tracker.record_exp_10m_checkpoint(25_000)
+        self.assertIsNone(tracker.snapshot(600.0).exp_10m_gain)
+
+        tracker.record_exp_10m_checkpoint(55_000)
+        self.assertEqual(tracker.snapshot(1200.0).exp_10m_gain, 30000)
+
+    def test_tracker_reset_clears_exp_10m_checkpoint(self):
+        tracker = ExperienceEfficiencyTracker()
+        tracker.record_exp_10m_checkpoint(1_000_000)
+        tracker.record_exp_10m_checkpoint(1_010_000)
+
+        tracker.reset()
+
+        self.assertIsNone(tracker.snapshot(0.0).exp_10m_gain)
+        self.assertIsNone(tracker.exp_10m_checkpoint_exp)
 
     def test_tracker_reports_smoothed_rate_windows_for_early_continuous_gain(self):
         tracker = ExperienceEfficiencyTracker()

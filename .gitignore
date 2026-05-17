@@ -9,5 +9,7 @@ release/
 *.spec
 startup_error.log
 debug.log
+debug.log.*
 experience_debug.log
+experience_debug.log.*
 settings.json

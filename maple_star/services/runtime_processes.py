@@ -9,6 +9,7 @@ from typing import Any
 
 from ..adapters.debug_logging import log_exception
 from ..adapters.win_input import foreground_window_handle, is_valid_window, is_window_minimized
+from ..adapters.window_target import is_target_window
 from ..constants import DEFAULT_CAPTURE_INTERVAL_SECONDS
 from ..models.experience import ExperienceSnapshot
 from ..models.settings import AutoPotionSettings
@@ -30,6 +31,7 @@ class PotionControl:
     scripts_enabled: bool
     emergency_stop: bool = False
     release_all: bool = False
+    generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,7 @@ class ExperienceControl:
     reset: bool = False
     pause: bool = False
     resume: bool = False
+    generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,7 @@ class PotionStatus:
     auto_drink_enabled: bool
     hp_region: tuple[int, int, int, int] | None = None
     mp_region: tuple[int, int, int, int] | None = None
+    generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,7 @@ class ExperienceStatus:
     snapshot: ExperienceSnapshot
     status: str
     debug_event: dict[str, object] | None = None
+    generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -135,12 +140,16 @@ class HeadlessRuntimeGui:
     def show_toggle_notice(self, message: str) -> None:
         self.notice = message
 
+    def consume_notice(self) -> str:
+        notice = self.notice
+        self.notice = ""
+        return notice
+
     def refresh_bar_preview_once(self) -> None:
         return
 
     def set_experience_snapshot(self, snapshot: ExperienceSnapshot) -> None:
         self.experience_snapshot = snapshot
-        self.status = snapshot.status
 
     def set_exp_efficiency_enabled(self, enabled: bool) -> None:
         self.settings.exp_efficiency_enabled = enabled
@@ -254,7 +263,12 @@ def _settings_from_payload(payload: dict[str, object]) -> AutoPotionSettings:
 
 
 def _is_target_hwnd_active(hwnd: int) -> bool:
-    return bool(hwnd and is_valid_window(hwnd) and not is_window_minimized(hwnd) and foreground_window_handle() == hwnd)
+    foreground_hwnd = foreground_window_handle()
+    if not foreground_hwnd:
+        return False
+    if hwnd and is_valid_window(hwnd) and not is_window_minimized(hwnd) and foreground_hwnd == hwnd:
+        return True
+    return is_target_window(foreground_hwnd)
 
 
 def _run_potion_runtime_process(command_queue, status_queue, settings_payload: dict[str, object], target_hwnd: int) -> None:
@@ -281,18 +295,21 @@ def _run_potion_runtime_process(command_queue, status_queue, settings_payload: d
         controller._play_toggle_beep = lambda *_args, **_kwargs: None
         _install_potion_console_recorder(controller, gui)
         next_status_at = 0.0
+        generation = 0
         shutdown = False
         while not shutdown:
             for command in _drain_queue(command_queue, 128):
                 if isinstance(command, Shutdown):
                     shutdown = True
                     break
+                if isinstance(command, PotionControl):
+                    generation = int(command.generation or 0)
                 _handle_potion_command(controller, gui, target_state, command)
             now = time.monotonic()
             if not shutdown:
                 controller.update(now, pump_gui=False)
                 if now >= next_status_at or gui.console_lines:
-                    status_queue.put(_potion_status(controller, gui))
+                    status_queue.put(_potion_status(controller, gui, generation))
                     next_status_at = now + 0.10
             time.sleep(0.01)
         controller._release_all_potion_keys()
@@ -325,18 +342,21 @@ def _run_experience_stats_process(command_queue, status_queue, settings_payload:
         controller._play_media_file = lambda *_args, **_kwargs: None
         controller._play_toggle_beep = lambda *_args, **_kwargs: None
         next_status_at = 0.0
+        generation = 0
         shutdown = False
         while not shutdown:
             for command in _drain_queue(command_queue, 128):
                 if isinstance(command, Shutdown):
                     shutdown = True
                     break
+                if isinstance(command, ExperienceControl):
+                    generation = int(command.generation or 0)
                 _handle_experience_command(controller, target_state, command)
             now = time.monotonic()
             if not shutdown:
                 controller.update(now, pump_gui=False)
                 if now >= next_status_at:
-                    status_queue.put(ExperienceStatus(gui.experience_snapshot, gui.status))
+                    status_queue.put(ExperienceStatus(gui.experience_snapshot, gui.status, generation=generation))
                     next_status_at = now + 0.20
             time.sleep(0.01)
         controller._cancel_experience_baseline_calibration(close_ui=True)
@@ -412,10 +432,12 @@ def _handle_experience_command(controller: Any, target_state: dict[str, int], co
         if command.pause:
             controller._pause_experience_clock(time.monotonic())
         if command.resume:
-            controller._resume_experience_clock(time.monotonic())
+            now = time.monotonic()
+            controller._resume_exp_10m_checkpoint_schedule(now)
+            controller._resume_experience_clock(now)
 
 
-def _potion_status(controller: Any, gui: HeadlessRuntimeGui) -> PotionStatus:
+def _potion_status(controller: Any, gui: HeadlessRuntimeGui, generation: int = 0) -> PotionStatus:
     lines = gui.consume_console_lines()
     return PotionStatus(
         hp_percent=gui.hp_percent,
@@ -424,7 +446,7 @@ def _potion_status(controller: Any, gui: HeadlessRuntimeGui) -> PotionStatus:
         mp_debug=gui.mp_debug,
         status=gui.status,
         action=str(getattr(controller, "last_action", "")),
-        notice=gui.notice,
+        notice=gui.consume_notice(),
         trigger_interval_ms=None,
         console_lines=lines,
         gameplay_hud_active=bool(getattr(controller, "gameplay_hud_active", False)),
@@ -432,4 +454,5 @@ def _potion_status(controller: Any, gui: HeadlessRuntimeGui) -> PotionStatus:
         auto_drink_enabled=bool(getattr(controller, "auto_drink_enabled", False)),
         hp_region=_bar_debug_region(controller, "hp"),
         mp_region=_bar_debug_region(controller, "mp"),
+        generation=int(generation or 0),
     )

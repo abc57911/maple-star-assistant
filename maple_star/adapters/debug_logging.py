@@ -6,6 +6,7 @@ from logging.handlers import RotatingFileHandler
 import sys
 import threading
 import traceback
+from datetime import datetime
 from pathlib import Path
 from types import TracebackType
 from typing import TextIO
@@ -15,10 +16,10 @@ from ..models.settings import app_base_dir
 
 DEBUG_LOG_PATH = app_base_dir() / "debug.log"
 EXPERIENCE_DEBUG_LOG_PATH = app_base_dir() / "experience_debug.log"
-DEBUG_LOG_MAX_BYTES = 5 * 1024 * 1024
+DEBUG_LOG_MAX_BYTES = 1 * 1024 * 1024
 DEBUG_LOG_BACKUP_COUNT = 3
 EXPERIENCE_DEBUG_LOG_MAX_BYTES = 5 * 1024 * 1024
-EXPERIENCE_DEBUG_LOG_BACKUP_COUNT = 3
+EXPERIENCE_DEBUG_LOG_BACKUP_COUNT = 5
 
 _LOGGER_NAME = "maple_star.debug"
 _EXPERIENCE_LOGGER_NAME = "maple_star.experience_debug"
@@ -106,7 +107,8 @@ def log_debug(message: str) -> None:
 def log_experience_debug(event: dict[str, object]) -> None:
     if _experience_configured_path is None:
         configure_experience_debug_logging()
-    payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"), default=str)
+    payload_event = {"logged_at": datetime.now().isoformat(timespec="seconds"), **event}
+    payload = json.dumps(payload_event, ensure_ascii=False, separators=(",", ":"), default=str)
     logging.getLogger(_EXPERIENCE_LOGGER_NAME).info(payload)
 
 
@@ -161,7 +163,7 @@ def _configure_logger(
         handler.close()
 
     if reset:
-        resolved.write_text("", encoding="utf-8")
+        _reset_rotating_log_files(resolved)
     handler = RotatingFileHandler(
         resolved,
         mode="a",
@@ -183,6 +185,28 @@ def _configure_logger(
         _experience_configured_path = resolved
     else:
         _configured_path = resolved
+
+
+def _reset_rotating_log_files(log_path: Path) -> None:
+    for candidate in _rotating_log_files(log_path):
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            pass
+    log_path.write_text("", encoding="utf-8")
+
+
+def _rotating_log_files(log_path: Path) -> list[Path]:
+    files = [log_path]
+    try:
+        candidates = sorted(log_path.parent.glob(f"{log_path.name}.*"))
+    except OSError:
+        return files
+    for candidate in candidates:
+        suffix = candidate.name[len(log_path.name) + 1 :]
+        if suffix.isdigit():
+            files.append(candidate)
+    return files
 
 
 def _logger_configured_path(logger_name: str) -> Path | None:

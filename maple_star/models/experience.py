@@ -115,6 +115,8 @@ EXP_OCR_CONTINUITY_MAX_PERCENT_GAIN_PER_SECOND = 10.0
 EXP_OCR_CONTINUITY_MIN_JUMP_PERCENT = 2.0
 EXP_OCR_CONTINUITY_LEVEL_UP_PREVIOUS_PERCENT_MIN = 95.0
 EXP_OCR_CONTINUITY_LEVEL_UP_CANDIDATE_PERCENT_MAX = 5.0
+EXP_LEVEL_WRAP_RATE_GRACE_SECONDS = 90.0
+EXP_LEVEL_WRAP_RATE_DISPLAY_FLOOR = 10000.0
 EXP_GAIN_EXPECTED_TOLERANCE_RATIO = 3.0
 EXP_GAIN_MIN_ABSOLUTE_TOLERANCE = 5000
 EXP_INITIAL_REBASE_MAX_SAMPLES = 6
@@ -123,6 +125,9 @@ EXP_PERCENT_REGRESSION_TOLERANCE = 0.03
 EXP_PERCENT_DELTA_TOLERANCE_RATIO = 1.25
 EXP_PERCENT_ROUNDING_TOLERANCE_RATIO = 0.0002
 EXP_PERCENT_DELTA_MIN_ABSOLUTE_TOLERANCE = 1000
+EXP_PERCENT_UNDERGAIN_STRICT_MIN_DELTA = 0.50
+EXP_PERCENT_UNDERGAIN_STRICT_MIN_EXPECTED_DELTA = 20000
+EXP_PERCENT_UNDERGAIN_STRICT_MIN_RATIO = 0.35
 EXP_REBASE_CONFIRM_SECONDS = 20.0
 EXP_REBASE_CONFIRM_MAX_PERCENT_DELTA = 0.30
 EXP_REBASE_CONFIRM_MAX_LEVEL_RATIO = 0.03
@@ -271,6 +276,7 @@ class PendingExperienceBaseline:
 class ExperienceSnapshot:
     current_exp: int | None = None
     current_percent: float | None = None
+    exp_10m_gain: int | None = None
     xp_per_5m: float | None = None
     xp_per_10m: float | None = None
     xp_per_hour: float | None = None
@@ -304,6 +310,12 @@ def format_exp_rate(value: float | int | None) -> str:
     if thousands:
         return f"{ten_thousands:,}萬{thousands}"
     return f"{ten_thousands:,}萬"
+
+
+def format_exp_10m_gain(value: int | None) -> str:
+    if value is None:
+        return "--"
+    return f"{max(0, int(value)) / 10000.0:.2f}萬"
 
 
 def format_ocr_success_rate(success_count: int, attempt_count: int) -> str:
@@ -357,6 +369,9 @@ class ExperienceEfficiencyTracker:
         self.estimated_level_total_exp: float | None = None
         self.last_snapshot: ExperienceSnapshot | None = None
         self.last_rate_sample_at: float | None = None
+        self.exp_10m_checkpoint_exp: int | None = None
+        self.exp_10m_gain: int | None = None
+        self.last_level_wrap_at: float | None = None
         self.baseline_current_exp_floor: int | None = None
         self.pending_initial_baseline: PendingExperienceBaseline | None = None
         self.pending_initial_baselines: list[PendingExperienceBaseline] = []
@@ -378,6 +393,14 @@ class ExperienceEfficiencyTracker:
         self.ocr_attempt_count += 1
         if success:
             self.ocr_success_count += 1
+
+    def record_exp_10m_checkpoint(self, current_exp: int) -> None:
+        previous_exp = self.exp_10m_checkpoint_exp
+        self.exp_10m_checkpoint_exp = current_exp
+        if previous_exp is None or current_exp < previous_exp:
+            self.exp_10m_gain = None
+            return
+        self.exp_10m_gain = current_exp - previous_exp
 
     def add_reading(
         self,
@@ -485,6 +508,7 @@ class ExperienceEfficiencyTracker:
                 self._reject_sample("EXP 數字回落但不符合升級條件")
                 return False
             delta = wrapped_delta
+            self.last_level_wrap_at = now
         else:
             corrected_exp = self._correct_green_bar_three_as_eight_ocr(current_exp, percent)
             if corrected_exp is not None:
@@ -528,6 +552,7 @@ class ExperienceEfficiencyTracker:
             snapshot = ExperienceSnapshot(
                 current_exp=latest.current_exp,
                 current_percent=latest.percent,
+                exp_10m_gain=self.exp_10m_gain,
                 elapsed_seconds=self._elapsed_seconds(now),
                 sample_count=len(self.samples),
                 **self._quality_snapshot_fields(),
@@ -599,6 +624,10 @@ class ExperienceEfficiencyTracker:
             len(self.samples),
             stale_seconds,
         )
+        if self._level_wrap_rate_grace_active(now):
+            xp_per_5m = self._level_wrap_grace_rate(xp_per_5m, "xp_per_5m")
+            xp_per_10m = self._level_wrap_grace_rate(xp_per_10m, "xp_per_10m")
+            xp_per_hour = self._level_wrap_grace_rate(xp_per_hour, "xp_per_hour")
         preferred_rate = self._preferred_eta_rate_per_second(
             self._window_rate_per_second(xp_per_5m, EXP_RATE_5M_SECONDS),
             self._window_rate_per_second(xp_per_10m, EXP_RATE_10M_SECONDS),
@@ -622,6 +651,7 @@ class ExperienceEfficiencyTracker:
         snapshot = ExperienceSnapshot(
             current_exp=latest.current_exp,
             current_percent=latest.percent,
+            exp_10m_gain=self.exp_10m_gain,
             xp_per_5m=xp_per_5m,
             xp_per_10m=xp_per_10m,
             xp_per_hour=xp_per_hour,
@@ -962,6 +992,7 @@ class ExperienceEfficiencyTracker:
     def _snapshot_from_last(self, now: float, status: str) -> ExperienceSnapshot:
         if self.last_snapshot is None:
             return ExperienceSnapshot(
+                exp_10m_gain=self.exp_10m_gain,
                 elapsed_seconds=self._elapsed_seconds(now),
                 status=status,
                 **self._quality_snapshot_fields(),
@@ -969,6 +1000,7 @@ class ExperienceEfficiencyTracker:
         return ExperienceSnapshot(
             current_exp=self.last_snapshot.current_exp,
             current_percent=self.last_snapshot.current_percent,
+            exp_10m_gain=self.exp_10m_gain,
             xp_per_5m=self.last_snapshot.xp_per_5m,
             xp_per_10m=self.last_snapshot.xp_per_10m,
             xp_per_hour=self.last_snapshot.xp_per_hour,
@@ -1140,6 +1172,12 @@ class ExperienceEfficiencyTracker:
             self.estimated_level_total_exp * EXP_PERCENT_ROUNDING_TOLERANCE_RATIO,
             abs(expected_delta) * EXP_PERCENT_DELTA_TOLERANCE_RATIO,
         )
+        if (
+            percent_delta >= EXP_PERCENT_UNDERGAIN_STRICT_MIN_DELTA
+            and expected_delta >= EXP_PERCENT_UNDERGAIN_STRICT_MIN_EXPECTED_DELTA
+            and delta < expected_delta * EXP_PERCENT_UNDERGAIN_STRICT_MIN_RATIO
+        ):
+            return f"EXP 增量低於百分比變化：+{delta:,} / 預期約 +{round(expected_delta):,}"
         if delta > expected_delta + tolerance:
             return f"EXP 跳動與百分比不一致：+{delta:,} / 預期約 +{round(expected_delta):,}"
         if expected_delta > tolerance and delta + tolerance < expected_delta:
@@ -1360,6 +1398,20 @@ class ExperienceEfficiencyTracker:
             return None
         value = getattr(self.last_snapshot, field_name)
         return value if isinstance(value, (int, float)) else None
+
+    def _level_wrap_rate_grace_active(self, now: float) -> bool:
+        if self.last_level_wrap_at is None or self.last_snapshot is None:
+            return False
+        elapsed = now - self.last_level_wrap_at
+        return 0.0 <= elapsed <= EXP_LEVEL_WRAP_RATE_GRACE_SECONDS
+
+    def _level_wrap_grace_rate(self, current: float | None, field_name: str) -> float | None:
+        previous = self._previous_rate_value(field_name)
+        if previous is None:
+            return current
+        if current is None or current < EXP_LEVEL_WRAP_RATE_DISPLAY_FLOOR:
+            return previous
+        return current
 
     def _session_rate_per_second(self) -> float | None:
         if len(self.samples) < 2:
@@ -1664,7 +1716,11 @@ class PaddleExperienceTextReader:
         if _experience_tight_right_roi_should_skip_paddle(ocr_image, pixel_reading):
             return pixel_reading
 
-        paddle_reading = self._read_with_paddle(ocr_image, bar_percent=bar_percent)
+        paddle_reading = self._read_with_paddle(
+            ocr_image,
+            bar_percent=bar_percent,
+            continuity_hint=continuity_hint,
+        )
         paddle_reading = _with_experience_reading_metadata(paddle_reading, bar_percent=bar_percent, source="paddle")
         if paddle_reading.success:
             paddle_reading = _apply_experience_ocr_continuity_guard(paddle_reading, continuity_hint)
@@ -1706,6 +1762,7 @@ class PaddleExperienceTextReader:
         ocr_image: ExperienceOcrImage,
         *,
         bar_percent: float | None,
+        continuity_hint: ExperienceOcrContinuityHint | None = None,
     ) -> ExperienceTextReading:
         if not self._ensure_ocr():
             return ExperienceTextReading(reason=self.unavailable_reason or "PaddleOCR 尚未初始化")
@@ -1726,7 +1783,13 @@ class PaddleExperienceTextReader:
                     return
 
                 reading = _apply_experience_bar_percent_guard(
-                    reading_from_paddle_result(result),
+                    reading_from_paddle_result(
+                        result,
+                        allow_low_percent_repair=_experience_level_up_low_percent_repair_allowed(
+                            continuity_hint,
+                            bar_percent,
+                        ),
+                    ),
                     bar_percent,
                 )
                 if reading.success:
@@ -3718,7 +3781,11 @@ def _experience_reading_metadata(reading: ExperienceTextReading | None) -> dict[
     }
 
 
-def reading_from_paddle_result(result: object) -> ExperienceTextReading:
+def reading_from_paddle_result(
+    result: object,
+    *,
+    allow_low_percent_repair: bool = False,
+) -> ExperienceTextReading:
     text_items = extract_paddle_text_items(result)
     text = " ".join(item_text for item_text, _score in text_items).strip()
     confidence_values = [score for _item_text, score in text_items if score is not None]
@@ -3726,7 +3793,7 @@ def reading_from_paddle_result(result: object) -> ExperienceTextReading:
     if confidence_values and confidence < EXP_OCR_MIN_SCORE:
         return ExperienceTextReading(text=text, confidence=confidence, reason="PaddleOCR 信心過低")
 
-    candidate = _best_experience_text_candidate(text)
+    candidate = _best_experience_text_candidate(text, allow_low_percent_repair=allow_low_percent_repair)
     if candidate is None:
         return ExperienceTextReading(
             text=text,
@@ -3840,9 +3907,11 @@ def _experience_should_read_secondary_roi(
     if secondary_image.source_id != "wide":
         return True
     primary_width = primary_image.image.shape[1] if primary_image.image.ndim >= 2 else 0
+    if primary_width > EXP_OCR_TIGHT_RIGHT_ROI_MAX_WIDTH:
+        return False
     if primary_width < EXP_OCR_TIGHT_RIGHT_ROI_MAX_WIDTH:
         return True
-    return primary_reading.reason not in {
+    return primary_reading.reason in {
         "EXP OCR 結構不可信",
         "EXP 數字解析失敗",
         "EXP 百分比解析失敗",
@@ -3893,7 +3962,7 @@ def _select_best_success_reading(readings: list[ExperienceTextReading]) -> Exper
 
 
 def _experience_text_candidate_rank(text: str) -> tuple[float, float]:
-    candidate = _best_experience_text_candidate(text)
+    candidate = _best_experience_text_candidate(text, allow_low_percent_repair=True)
     if candidate is None:
         return 0.0, 0.0
     return candidate.structure_score, 0.0 if candidate.repaired_percent else 1.0
@@ -4194,8 +4263,12 @@ def _experience_text_structure_score(text: str) -> float:
     return candidate.structure_score
 
 
-def _best_experience_text_candidate(text: str) -> ExperienceTextCandidate | None:
-    candidates = _experience_text_candidates(text)
+def _best_experience_text_candidate(
+    text: str,
+    *,
+    allow_low_percent_repair: bool = False,
+) -> ExperienceTextCandidate | None:
+    candidates = _experience_text_candidates(text, allow_low_percent_repair=allow_low_percent_repair)
     if not candidates:
         return None
     return max(
@@ -4208,7 +4281,11 @@ def _best_experience_text_candidate(text: str) -> ExperienceTextCandidate | None
     )
 
 
-def _experience_text_candidates(text: str) -> list[ExperienceTextCandidate]:
+def _experience_text_candidates(
+    text: str,
+    *,
+    allow_low_percent_repair: bool = False,
+) -> list[ExperienceTextCandidate]:
     compact = normalize_exp_ocr_text(text)
     if _has_spaced_experience_number_prefix(text):
         return []
@@ -4241,8 +4318,18 @@ def _experience_text_candidates(text: str) -> list[ExperienceTextCandidate]:
                         needs_bar_percent_guard=tail == "",
                     )
                 )
-    candidates.extend(_missing_open_bracket_experience_text_candidates(compact))
-    candidates.extend(_merged_exp_percent_text_candidates(compact))
+    candidates.extend(
+        _missing_open_bracket_experience_text_candidates(
+            compact,
+            allow_low_percent_repair=allow_low_percent_repair,
+        )
+    )
+    candidates.extend(
+        _merged_exp_percent_text_candidates(
+            compact,
+            allow_low_percent_repair=allow_low_percent_repair,
+        )
+    )
     return candidates
 
 
@@ -4251,7 +4338,11 @@ def _has_spaced_experience_number_prefix(text: str) -> bool:
     return re.search(r"\d\s+\d[0-9\s,.]*[\[\(]", normalized) is not None
 
 
-def _missing_open_bracket_experience_text_candidates(compact: str) -> list[ExperienceTextCandidate]:
+def _missing_open_bracket_experience_text_candidates(
+    compact: str,
+    *,
+    allow_low_percent_repair: bool = False,
+) -> list[ExperienceTextCandidate]:
     if "[" in compact or "(" in compact:
         return []
     match = re.fullmatch(
@@ -4272,35 +4363,47 @@ def _missing_open_bracket_experience_text_candidates(compact: str) -> list[Exper
     if digit_match is None:
         return []
 
+    percent_integer_options: list[str] = []
+    if allow_low_percent_repair and before_decimal.endswith("0"):
+        percent_integer_options.append("0")
     integer_digits = digit_match.group(1)
     if len(integer_digits) == 3 and int(integer_digits) > 100:
-        integer_digits = integer_digits[-2:]
+        percent_integer_options.append(integer_digits[-2:])
     elif len(integer_digits) == 3 and integer_digits != "100":
         return []
+    else:
+        percent_integer_options.append(integer_digits)
 
-    percent = float(f"{integer_digits}.{decimals}")
-    if not 10.0 <= percent <= 100.0:
-        return []
-    exp_segment = before_decimal[: len(before_decimal) - len(integer_digits)]
-    if not _exp_number_separators_are_valid(exp_segment):
-        return []
-    exp_digits = "".join(char for char in exp_segment if char.isdigit())
-    if len(exp_digits) < 5:
-        return []
-    percent_start = len(exp_segment)
-    percent_span = (percent_start, len(body))
-    return [
-        ExperienceTextCandidate(
-            current_exp=int(exp_digits),
-            percent=percent,
-            percent_span=percent_span,
-            structure_score=4.3 + min(len(exp_digits), 8) / 10.0,
-            repaired_percent=True,
+    candidates: list[ExperienceTextCandidate] = []
+    for percent_integer_digits in dict.fromkeys(percent_integer_options):
+        percent = float(f"{percent_integer_digits}.{decimals}")
+        if not _repaired_experience_percent_is_allowed(percent, allow_low_percent_repair=allow_low_percent_repair):
+            continue
+        exp_segment = before_decimal[: len(before_decimal) - len(percent_integer_digits)]
+        if not _exp_number_separators_are_valid(exp_segment):
+            continue
+        exp_digits = "".join(char for char in exp_segment if char.isdigit())
+        if len(exp_digits) < 5:
+            continue
+        percent_start = len(exp_segment)
+        percent_span = (percent_start, len(body))
+        candidates.append(
+            ExperienceTextCandidate(
+                current_exp=int(exp_digits),
+                percent=percent,
+                percent_span=percent_span,
+                structure_score=4.3 + min(len(exp_digits), 8) / 10.0,
+                repaired_percent=True,
+            )
         )
-    ]
+    return candidates
 
 
-def _merged_exp_percent_text_candidates(compact: str) -> list[ExperienceTextCandidate]:
+def _merged_exp_percent_text_candidates(
+    compact: str,
+    *,
+    allow_low_percent_repair: bool = False,
+) -> list[ExperienceTextCandidate]:
     body = re.sub(r"^EXP[:：]?", "", compact, flags=re.IGNORECASE)
     if any(char in body for char in "[]()%Xx"):
         return []
@@ -4311,7 +4414,7 @@ def _merged_exp_percent_text_candidates(compact: str) -> list[ExperienceTextCand
     exp_digits = match.group(1)
     percent_integer = int(match.group(2))
     percent = float(f"{percent_integer}.{match.group(3)}")
-    if not 10.0 <= percent <= 99.99:
+    if not _repaired_experience_percent_is_allowed(percent, allow_low_percent_repair=allow_low_percent_repair):
         return []
     candidates: list[ExperienceTextCandidate] = []
     if exp_digits.endswith("1") and len(exp_digits) >= 6:
@@ -4337,6 +4440,25 @@ def _merged_exp_percent_text_candidates(compact: str) -> list[ExperienceTextCand
         )
     )
     return candidates
+
+
+def _repaired_experience_percent_is_allowed(percent: float, *, allow_low_percent_repair: bool) -> bool:
+    if 10.0 <= percent <= 100.0:
+        return True
+    return allow_low_percent_repair and 0.0 <= percent <= EXP_OCR_CONTINUITY_LEVEL_UP_CANDIDATE_PERCENT_MAX
+
+
+def _experience_level_up_low_percent_repair_allowed(
+    continuity_hint: ExperienceOcrContinuityHint | None,
+    bar_percent: float | None,
+) -> bool:
+    if continuity_hint is None or continuity_hint.percent is None:
+        return False
+    if continuity_hint.percent < EXP_OCR_CONTINUITY_LEVEL_UP_PREVIOUS_PERCENT_MIN:
+        return False
+    if bar_percent is None:
+        return True
+    return 0.0 <= bar_percent <= EXP_OCR_CONTINUITY_LEVEL_UP_CANDIDATE_PERCENT_MAX
 
 
 def _strict_experience_parse_failure_reason(text: str) -> str:

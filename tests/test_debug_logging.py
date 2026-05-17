@@ -38,6 +38,8 @@ class DebugLoggingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             debug_log = Path(temp_dir) / "debug.log"
             debug_log.write_text("old log\n", encoding="utf-8")
+            (debug_log.parent / "debug.log.1").write_text("old backup\n", encoding="utf-8")
+            (debug_log.parent / "debug.log.2").write_text("old backup\n", encoding="utf-8")
 
             try:
                 configure_debug_logging(debug_log, reset=True)
@@ -48,6 +50,8 @@ class DebugLoggingTests(unittest.TestCase):
             text = debug_log.read_text(encoding="utf-8")
             self.assertNotIn("old log", text)
             self.assertIn("new log", text)
+            self.assertFalse((debug_log.parent / "debug.log.1").exists())
+            self.assertFalse((debug_log.parent / "debug.log.2").exists())
 
     def test_gui_console_writer_mirrors_console_text_to_debug_log(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -93,6 +97,7 @@ class DebugLoggingTests(unittest.TestCase):
 
             text = debug_log.read_text(encoding="utf-8")
             self.assertIn('"event":"experience_ocr_job"', text)
+            self.assertIn('"logged_at":', text)
             self.assertIn('"current_exp":123456', text)
             self.assertIn('"percent":78.9', text)
 
@@ -100,6 +105,8 @@ class DebugLoggingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             debug_log = Path(temp_dir) / "experience_debug.log"
             debug_log.write_text("old log\n", encoding="utf-8")
+            (debug_log.parent / "experience_debug.log.1").write_text("old backup\n", encoding="utf-8")
+            (debug_log.parent / "experience_debug.log.2").write_text("old backup\n", encoding="utf-8")
 
             try:
                 configure_experience_debug_logging(debug_log, reset=True)
@@ -110,6 +117,8 @@ class DebugLoggingTests(unittest.TestCase):
             text = debug_log.read_text(encoding="utf-8")
             self.assertNotIn("old log", text)
             self.assertIn('"event":"new"', text)
+            self.assertFalse((debug_log.parent / "experience_debug.log.1").exists())
+            self.assertFalse((debug_log.parent / "experience_debug.log.2").exists())
 
     def test_experience_debug_log_rotates_instead_of_growing_without_bound(self):
         with tempfile.TemporaryDirectory() as temp_dir:

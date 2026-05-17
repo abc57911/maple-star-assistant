@@ -9,9 +9,14 @@ from pathlib import Path
 if __name__ == "__main__":
     mp.freeze_support()
     try:
-        from maple_star.debug_logging import configure_debug_logging, log_exception
+        from maple_star.debug_logging import (
+            configure_debug_logging,
+            configure_experience_debug_logging,
+            log_exception,
+        )
 
         configure_debug_logging(reset=True)
+        configure_experience_debug_logging(reset=True)
         from main import main
 
         raise SystemExit(main())

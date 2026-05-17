@@ -62,6 +62,8 @@ from ..constants import (
     LOADING_GUARD_BRIGHT_PIXEL_RATIO,
     LOADING_GUARD_LOW_SATURATION_RATIO,
     LOADING_GUARD_MEAN_LUMINANCE,
+    PICKUP_DISABLE_HOLD_SECONDS,
+    PICKUP_REASSERT_SECONDS,
     PM_REMOVE,
     POTION_EFFECT_AUTO_HOLD_BAR_TYPES,
     POTION_EFFECT_DAMAGE_GRACE_SECONDS,
@@ -176,6 +178,9 @@ EXPERIENCE_BASELINE_CALIBRATION_COOLDOWN_SECONDS = 30.0
 EXPERIENCE_BASELINE_CALIBRATION_TIMEOUT_SECONDS = 4.0
 EXPERIENCE_BASELINE_CALIBRATION_MENU_SETTLE_SECONDS = 0.18
 EXPERIENCE_BASELINE_CALIBRATION_STATS_SETTLE_SECONDS = 0.25
+EXPERIENCE_10M_CHECKPOINT_INTERVAL_SECONDS = 10.0 * 60.0
+EXPERIENCE_10M_CHECKPOINT_OCR_RETRY_DELAY_SECONDS = 10.0
+EXPERIENCE_10M_CHECKPOINT_OCR_MAX_ATTEMPTS = 3
 HUD_LABEL_MATCH_THRESHOLD = 0.42
 HUD_LABEL_SCALE_MIN = 0.70
 HUD_LABEL_SCALE_MAX = 1.60
@@ -191,10 +196,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MEDIA_VOLUME_PERCENT = 20
 MCI_MAX_VOLUME = 1000
 MCI_MEDIA_VOLUME = round(MCI_MAX_VOLUME * MEDIA_VOLUME_PERCENT / 100)
+MCI_MEDIA_START_MS = 0
 AUTO_DRINK_START_SOUND_PATH = PROJECT_ROOT / "media" / "auto-drink-start.mp3"
 AUTO_DRINK_STOP_SOUND_PATH = PROJECT_ROOT / "media" / "auto-drink-stop.mp3"
 AUTO_PICKUP_START_SOUND_PATH = PROJECT_ROOT / "media" / "auto-pickup-start.mp3"
 AUTO_PICKUP_STOP_SOUND_PATH = PROJECT_ROOT / "media" / "auto-pickup-stop.mp3"
+MEDIA_SOUND_ALIASES = (
+    (AUTO_DRINK_START_SOUND_PATH, "auto_drink_start"),
+    (AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop"),
+    (AUTO_PICKUP_START_SOUND_PATH, "pickup_start"),
+    (AUTO_PICKUP_STOP_SOUND_PATH, "pickup_stop"),
+)
 POTION_TIME_EPSILON_SECONDS = 1e-9
 POTION_PENDING_SEND_CAPTURE_GUARD_SECONDS = 0.20
 POTION_EXPERIENCE_DEFER_SECONDS = 1.0
@@ -288,8 +300,10 @@ class AutoPotionController:
         self.last_experience_toggle_hotkey_at = -999.0
         self.last_experience_reset_hotkey_at = -999.0
         self.last_pickup_toggle_hotkey_at = -999.0
+        self.pickup_disable_hold_started_at = -999.0
         self.pickup_enabled = False
         self.pickup_held_vk = 0
+        self.last_pickup_key_down_at = -999.0
         self.hp_potion_held_vk = 0
         self.mp_potion_held_vk = 0
         self.emergency_stop_requested = False
@@ -322,6 +336,11 @@ class AutoPotionController:
         self.experience_baseline_ocr_job: ExperienceOcrJob | None = None
         self.experience_baseline_calibration_attempts = 0
         self.next_experience_baseline_calibration_at = 0.0
+        self.experience_10m_checkpoint_capture: ExperienceBaselineCalibration | None = None
+        self.experience_10m_checkpoint_ocr_job: ExperienceOcrJob | None = None
+        self.next_experience_10m_checkpoint_at = 0.0
+        self.experience_10m_checkpoint_stopped = False
+        self.experience_10m_checkpoint_attempts = 0
         self.experience_baseline_cursor_position: tuple[int, int] | None = None
         self.last_completed_experience_ocr_signature: ExperienceOcrImageSignature | None = None
         self.last_failed_experience_ocr_signature: ExperienceOcrImageSignature | None = None
@@ -341,9 +360,14 @@ class AutoPotionController:
         self.runtime_settings_snapshot: tuple[object, ...] | None = None
         self.runtime_target_hwnd = 0
         self.runtime_control_state: tuple[bool, bool, bool] | None = None
+        self.runtime_potion_generation = 0
+        self.runtime_experience_generation = 0
         self.runtime_potion_crash_reported = False
         self.runtime_experience_crash_reported = False
         self.last_runtime_potion_status_at = -999.0
+        self.last_runtime_experience_alert_status = ""
+        self._media_alias_paths: dict[str, Path] = {}
+        self._preload_media_files()
         if start_control_hotkey_worker:
             self._sync_registered_control_hotkeys()
         if runtime_processes_enabled:
@@ -407,9 +431,26 @@ class AutoPotionController:
         )
         if state == getattr(self, "runtime_control_state", None):
             return
+        previous_state = getattr(self, "runtime_control_state", None)
+        if previous_state is None or state[:2] != previous_state[:2]:
+            self.runtime_potion_generation = int(getattr(self, "runtime_potion_generation", 0)) + 1
+        if previous_state is None or state[1:] != previous_state[1:]:
+            self.runtime_experience_generation = int(getattr(self, "runtime_experience_generation", 0)) + 1
         self.runtime_control_state = state
-        runtime.send_potion_control(PotionControl(enabled=state[0], scripts_enabled=state[1]))
-        runtime.send_experience_control(ExperienceControl(enabled=state[2] and state[1], resume=state[2] and state[1]))
+        runtime.send_potion_control(
+            PotionControl(
+                enabled=state[0],
+                scripts_enabled=state[1],
+                generation=int(getattr(self, "runtime_potion_generation", 0)),
+            )
+        )
+        runtime.send_experience_control(
+            ExperienceControl(
+                enabled=state[2] and state[1],
+                resume=state[2] and state[1],
+                generation=int(getattr(self, "runtime_experience_generation", 0)),
+            )
+        )
 
     def _send_runtime_release_all_potions(self) -> None:
         runtime = getattr(self, "runtime_processes", None)
@@ -419,6 +460,7 @@ class AutoPotionController:
                     enabled=bool(getattr(self, "auto_drink_enabled", False)),
                     scripts_enabled=bool(getattr(self, "scripts_enabled", False)),
                     release_all=True,
+                    generation=int(getattr(self, "runtime_potion_generation", 0)),
                 )
             )
 
@@ -444,16 +486,67 @@ class AutoPotionController:
         runtime = getattr(self, "runtime_processes", None)
         if runtime is None:
             return
-        for item in runtime.drain_potion_statuses():
+        latest_potion_status: PotionStatus | None = None
+        for item in self._runtime_drain_potion_statuses(runtime):
             if isinstance(item, PotionStatus):
-                self._apply_potion_status(item)
+                if self._runtime_potion_status_is_current(item):
+                    latest_potion_status = item
             elif isinstance(item, WorkerCrashed):
                 self._apply_worker_crash(item)
-        for item in runtime.drain_experience_statuses():
+        if latest_potion_status is not None:
+            self._apply_potion_status(latest_potion_status)
+
+        latest_experience_status: ExperienceStatus | None = None
+        for item in self._runtime_drain_experience_statuses(runtime):
             if isinstance(item, ExperienceStatus):
-                self.gui.set_experience_snapshot(item.snapshot)
+                if self._runtime_experience_status_is_current(item):
+                    latest_experience_status = item
             elif isinstance(item, WorkerCrashed):
                 self._apply_worker_crash(item)
+        if latest_experience_status is not None:
+            self._apply_experience_status(latest_experience_status)
+
+    def _runtime_drain_potion_statuses(self, runtime: object) -> list[object]:
+        drain = getattr(runtime, "drain_potion_statuses")
+        try:
+            return drain(limit=512)
+        except TypeError:
+            return drain()
+
+    def _runtime_drain_experience_statuses(self, runtime: object) -> list[object]:
+        drain = getattr(runtime, "drain_experience_statuses")
+        try:
+            return drain(limit=512)
+        except TypeError:
+            return drain()
+
+    def _runtime_potion_status_is_current(self, status: PotionStatus) -> bool:
+        if int(getattr(status, "generation", 0)) != int(getattr(self, "runtime_potion_generation", 0)):
+            return False
+        if bool(status.scripts_enabled) != bool(getattr(self, "scripts_enabled", False)):
+            return False
+        if bool(status.auto_drink_enabled) != bool(getattr(self, "auto_drink_enabled", False)):
+            return False
+        return True
+
+    def _runtime_experience_status_is_current(self, status: ExperienceStatus) -> bool:
+        if int(getattr(status, "generation", 0)) != int(getattr(self, "runtime_experience_generation", 0)):
+            return False
+        if not bool(getattr(self, "scripts_enabled", False)):
+            return False
+        if not bool(getattr(self.settings, "exp_efficiency_enabled", False)):
+            return False
+        return True
+
+    def _apply_experience_status(self, status: ExperienceStatus) -> None:
+        self.gui.set_experience_snapshot(status.snapshot)
+        snapshot_status = str(getattr(status.snapshot, "status", "") or "")
+        if not snapshot_status.startswith("EXP-10 OCR 失敗"):
+            return
+        if snapshot_status == self.last_runtime_experience_alert_status:
+            return
+        self.last_runtime_experience_alert_status = snapshot_status
+        self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
 
     def _apply_potion_status(self, status: PotionStatus) -> None:
         self.gameplay_hud_active = status.gameplay_hud_active
@@ -623,17 +716,22 @@ class AutoPotionController:
 
         worker = getattr(self, "control_hotkey_worker", None)
         if worker is not None:
+            ensure_running = getattr(worker, "ensure_running", None)
+            if callable(ensure_running):
+                ensure_running()
             worker_events = self._drain_control_hotkey_worker_events()
             cached_down = self._cached_control_hotkey_worker_down_states()
             if cached_down is not None:
                 self._apply_control_hotkey_down_states(cached_down)
+                now = time.monotonic()
+                self._process_pending_pickup_disable(now)
                 if worker_events:
-                    now = time.monotonic()
                     for event in worker_events:
                         self._dispatch_control_hotkey_event(event, now)
                 return
             if worker_events:
                 now = time.monotonic()
+                self._process_pending_pickup_disable(now)
                 for event in worker_events:
                     self._dispatch_control_hotkey_event(event, now)
                 return
@@ -698,6 +796,7 @@ class AutoPotionController:
             pickup_toggle_triggered = True
         self.pickup_toggle_hotkey_was_down = pickup_toggle_is_down
 
+        self._process_pending_pickup_disable(time.monotonic())
         if emergency_stop_triggered:
             self.emergency_stop()
         elif toggle_triggered:
@@ -818,7 +917,8 @@ class AutoPotionController:
         if now - self.last_experience_reset_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
             return
         self.last_experience_reset_hotkey_at = now
-        self.reset_experience_statistics()
+        if not self.reset_experience_statistics():
+            return
         self.gui.set_experience_snapshot(ExperienceSnapshot(status="已重置"))
         self.gui.set_status("經驗統計已重置")
         self.gui.show_toggle_notice("經驗統計已重置")
@@ -829,9 +929,36 @@ class AutoPotionController:
         if now - self.last_pickup_toggle_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
             return
         self.last_pickup_toggle_hotkey_at = now
+        print(
+            "拾取切換熱鍵："
+            f"enabled={self.pickup_enabled} "
+            f"held_vk={getattr(self, 'pickup_held_vk', 0)} "
+            f"toggle_down={self.pickup_toggle_hotkey_was_down}"
+        )
+        if self.pickup_enabled:
+            self.pickup_disable_hold_started_at = now
+            print(f"拾取停用確認：按住 {self.settings.pickup_toggle_hotkey} {PICKUP_DISABLE_HOLD_SECONDS:.2f} 秒")
+            return
+        self.toggle_pickup_enabled()
+
+    def _process_pending_pickup_disable(self, now: float) -> None:
+        started_at = getattr(self, "pickup_disable_hold_started_at", -999.0)
+        if started_at < 0:
+            return
+        if not self.pickup_enabled:
+            self.pickup_disable_hold_started_at = -999.0
+            return
+        if not self.pickup_toggle_hotkey_was_down:
+            self.pickup_disable_hold_started_at = -999.0
+            print("拾取停用取消：熱鍵未持續按住")
+            return
+        if now - started_at + POTION_TIME_EPSILON_SECONDS < PICKUP_DISABLE_HOLD_SECONDS:
+            return
+        self.pickup_disable_hold_started_at = -999.0
         self.toggle_pickup_enabled()
 
     def toggle_pickup_enabled(self) -> None:
+        self.pickup_disable_hold_started_at = -999.0
         if self.pickup_enabled:
             self.pickup_enabled = False
             self._release_pickup_key()
@@ -891,17 +1018,24 @@ class AutoPotionController:
             self.gui.show_toggle_notice("拾取鍵設定無效")
             return
 
+        now = time.monotonic()
+        if self.pickup_held_vk == pickup_vk and now - self.last_pickup_key_down_at < PICKUP_REASSERT_SECONDS:
+            return
         if self.pickup_held_vk == pickup_vk:
+            key_down(pickup_vk)
+            self.last_pickup_key_down_at = now
             return
         self._release_pickup_key()
         key_down(pickup_vk)
         self.pickup_held_vk = pickup_vk
+        self.last_pickup_key_down_at = now
 
     def _release_pickup_key(self) -> None:
         held_vk = getattr(self, "pickup_held_vk", 0)
         if not held_vk:
             return
         self.pickup_held_vk = 0
+        self.last_pickup_key_down_at = -999.0
         key_up(held_vk)
 
     def _potion_held_vk(self, bar_type: str) -> int:
@@ -1033,14 +1167,30 @@ class AutoPotionController:
     def toggle_experience_efficiency(self) -> None:
         now = time.monotonic()
         enabled = not self.settings.exp_efficiency_enabled
+        if enabled and not self._experience_stat_hotkey_is_configured():
+            self._show_experience_stat_hotkey_required("經驗統計啟用", beep=True)
+            return
         self.gui.set_exp_efficiency_enabled(enabled)
         if self._runtime_processes_active():
             runtime = getattr(self, "runtime_processes", None)
             if runtime is not None:
-                runtime.send_experience_control(ExperienceControl(enabled=enabled and self.scripts_enabled, resume=enabled, pause=not enabled))
-            self.runtime_control_state = None
-            snapshot = ExperienceSnapshot(status="等待下一次 EXP 樣本" if enabled else "已停用")
-            self.gui.set_experience_snapshot(snapshot)
+                self.runtime_experience_generation = int(getattr(self, "runtime_experience_generation", 0)) + 1
+                runtime.send_experience_control(
+                    ExperienceControl(
+                        enabled=enabled and self.scripts_enabled,
+                        resume=enabled,
+                        pause=not enabled,
+                        generation=int(getattr(self, "runtime_experience_generation", 0)),
+                    )
+                )
+            self.runtime_control_state = (
+                bool(getattr(self, "auto_drink_enabled", False)),
+                bool(getattr(self, "scripts_enabled", False)),
+                enabled,
+            )
+            if enabled:
+                snapshot = ExperienceSnapshot(status="等待下一次 EXP 樣本")
+                self.gui.set_experience_snapshot(snapshot)
             self._play_toggle_beep(RESUME_BEEP_PATTERN if enabled else PAUSE_BEEP_PATTERN)
             self.gui.set_status("經驗統計已啟用" if enabled else "經驗統計已停用")
             self.gui.show_toggle_notice("經驗統計已啟用" if enabled else "經驗統計已停用")
@@ -1049,6 +1199,7 @@ class AutoPotionController:
             return
         if enabled:
             self._stop_experience_ocr_job()
+            self._resume_exp_10m_checkpoint_schedule(now)
             effective_now = self._resume_experience_clock(now)
             self.next_experience_capture_at = 0.0
             if not getattr(self.experience_tracker, "samples", []):
@@ -1099,8 +1250,24 @@ class AutoPotionController:
         if self._runtime_processes_active():
             runtime = getattr(self, "runtime_processes", None)
             if runtime is not None:
-                runtime.send_potion_control(PotionControl(False, False, emergency_stop=True, release_all=True))
-                runtime.send_experience_control(ExperienceControl(False, pause=True))
+                self.runtime_potion_generation = int(getattr(self, "runtime_potion_generation", 0)) + 1
+                self.runtime_experience_generation = int(getattr(self, "runtime_experience_generation", 0)) + 1
+                runtime.send_potion_control(
+                    PotionControl(
+                        False,
+                        False,
+                        emergency_stop=True,
+                        release_all=True,
+                        generation=int(getattr(self, "runtime_potion_generation", 0)),
+                    )
+                )
+                runtime.send_experience_control(
+                    ExperienceControl(
+                        False,
+                        pause=True,
+                        generation=int(getattr(self, "runtime_experience_generation", 0)),
+                    )
+                )
             self.runtime_control_state = None
         self.emergency_stop_requested = True
         self.last_hp_drink_at = now
@@ -1131,17 +1298,54 @@ class AutoPotionController:
         try:
             winmm = ctypes.windll.winmm
             buffer = ctypes.create_unicode_buffer(256)
-            winmm.mciSendStringW(f"close {alias}", buffer, len(buffer), None)
-            open_command = f'open "{path}" type mpegvideo alias {alias}'
-            if winmm.mciSendStringW(open_command, buffer, len(buffer), None) != 0:
-                self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
+            if not self._ensure_media_alias_opened(winmm, buffer, path, alias):
                 return
-            winmm.mciSendStringW(f"setaudio {alias} volume to {MCI_MEDIA_VOLUME}", buffer, len(buffer), None)
-            if winmm.mciSendStringW(f"play {alias} from 0", buffer, len(buffer), None) != 0:
-                winmm.mciSendStringW(f"close {alias}", buffer, len(buffer), None)
+            winmm.mciSendStringW(f"stop {alias}", buffer, len(buffer), None)
+            if winmm.mciSendStringW(f"play {alias} from {MCI_MEDIA_START_MS}", buffer, len(buffer), None) != 0:
+                self._close_media_alias(winmm, buffer, alias)
                 self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
         except Exception:
             self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
+
+    def _preload_media_files(self) -> None:
+        try:
+            winmm = ctypes.windll.winmm
+            buffer = ctypes.create_unicode_buffer(256)
+            for path, alias in MEDIA_SOUND_ALIASES:
+                if path.exists():
+                    self._ensure_media_alias_opened(winmm, buffer, path, alias)
+        except Exception:
+            pass
+
+    def _ensure_media_alias_opened(self, winmm: object, buffer: object, path: Path, alias: str) -> bool:
+        alias_paths = getattr(self, "_media_alias_paths", None)
+        if alias_paths is None:
+            alias_paths = {}
+            self._media_alias_paths = alias_paths
+        if alias_paths.get(alias) == path:
+            return True
+
+        self._close_media_alias(winmm, buffer, alias)
+        open_command = f'open "{path}" type mpegvideo alias {alias}'
+        if winmm.mciSendStringW(open_command, buffer, len(buffer), None) != 0:
+            self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
+            return False
+        if winmm.mciSendStringW(f"setaudio {alias} volume to {MCI_MEDIA_VOLUME}", buffer, len(buffer), None) != 0:
+            self._close_media_alias(winmm, buffer, alias)
+            self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
+            return False
+        if winmm.mciSendStringW(f"set {alias} time format milliseconds", buffer, len(buffer), None) != 0:
+            self._close_media_alias(winmm, buffer, alias)
+            self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
+            return False
+        alias_paths[alias] = path
+        return True
+
+    def _close_media_alias(self, winmm: object, buffer: object, alias: str) -> None:
+        winmm.mciSendStringW(f"close {alias}", buffer, len(buffer), None)
+        alias_paths = getattr(self, "_media_alias_paths", None)
+        if isinstance(alias_paths, dict):
+            alias_paths.pop(alias, None)
 
     def update(self, now: float, *, pump_gui: bool = True) -> None:
         self.poll_control_hotkeys()
@@ -1157,6 +1361,7 @@ class AutoPotionController:
             self._sync_registered_control_hotkeys()
         self.poll_control_hotkeys()
         self._save_settings_when_idle(now)
+        self._enforce_experience_prerequisites(now)
 
         if self._runtime_processes_active():
             self._update_runtime_processes(now)
@@ -1285,22 +1490,29 @@ class AutoPotionController:
             save_settings(self.settings)
             self.next_settings_save_at = None
 
-    def reset_experience_statistics(self) -> None:
+    def reset_experience_statistics(self) -> bool:
+        if not self._experience_stat_hotkey_is_configured():
+            self._show_experience_stat_hotkey_required("經驗統計重置", beep=True)
+            return False
         if self._runtime_processes_active():
             runtime = getattr(self, "runtime_processes", None)
             if runtime is not None:
+                self.runtime_experience_generation = int(getattr(self, "runtime_experience_generation", 0)) + 1
                 runtime.send_experience_control(
                     ExperienceControl(
                         enabled=bool(getattr(self.settings, "exp_efficiency_enabled", False)),
                         reset=True,
+                        generation=int(getattr(self, "runtime_experience_generation", 0)),
                     )
-                )
+            )
             self.gui.set_experience_snapshot(ExperienceSnapshot(status="已重置"))
-            return
+            return True
         self._stop_experience_ocr_job()
         self.experience_tracker.reset()
         self.next_experience_capture_at = 0.0
+        self._reset_exp_10m_checkpoint_state()
         self._reset_experience_baseline_calibration_attempts()
+        return True
 
     def _experience_effective_time(self, now: float) -> float:
         paused_total = float(getattr(self, "experience_total_paused_seconds", 0.0))
@@ -1323,6 +1535,46 @@ class AutoPotionController:
 
     def _experience_clock_is_paused(self) -> bool:
         return getattr(self, "experience_pause_started_at", None) is not None
+
+    def _experience_stat_hotkey_is_configured(self) -> bool:
+        hotkey = getattr(self.settings, "character_stat_hotkey", "").strip()
+        if not hotkey:
+            return False
+        try:
+            parse_vk_key(hotkey)
+        except ValueError:
+            return False
+        return True
+
+    def _show_experience_stat_hotkey_required(self, action: str, *, beep: bool = False) -> None:
+        self.settings.exp_efficiency_enabled = False
+        self.gui.set_exp_efficiency_enabled(False)
+        self._stop_experience_ocr_job()
+        snapshot = self.experience_tracker.snapshot(self._experience_effective_time(time.monotonic()))
+        snapshot.status = "請先設定能力值快捷鍵"
+        self.gui.set_experience_snapshot(snapshot)
+        self.gui.set_status("請先設定能力值快捷鍵才能使用經驗統計")
+        self.gui.show_toggle_notice("請先設定能力值快捷鍵")
+        self.last_action = f"{action}：能力值快捷鍵未設定"
+        if beep:
+            self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
+        print(f"{action}：請先設定能力值快捷鍵")
+
+    def _enforce_experience_prerequisites(self, now: float) -> bool:
+        if not getattr(self.settings, "exp_efficiency_enabled", False):
+            return True
+        if self._experience_stat_hotkey_is_configured():
+            return True
+        self.settings.exp_efficiency_enabled = False
+        self.gui.set_exp_efficiency_enabled(False)
+        self._stop_experience_ocr_job()
+        effective_now = self._pause_experience_clock(now)
+        snapshot = self.experience_tracker.snapshot(effective_now)
+        snapshot.status = "請先設定能力值快捷鍵"
+        self.gui.set_experience_snapshot(snapshot)
+        self.gui.set_status("請先設定能力值快捷鍵才能使用經驗統計")
+        self.last_action = "經驗統計：能力值快捷鍵未設定"
+        return False
 
     def _set_gameplay_hud_active(self, active: bool, now: float) -> None:
         self.gameplay_hud_active = active
@@ -1423,6 +1675,9 @@ class AutoPotionController:
     def _update_experience_efficiency(self, now: float) -> None:
         effective_now = self._resume_experience_clock(now)
         if self._process_experience_baseline_calibration(now, effective_now=effective_now):
+            return
+
+        if self._process_exp_10m_checkpoint(now, effective_now=effective_now):
             return
 
         if self._process_experience_ocr_job(now, effective_now=effective_now):
@@ -1567,6 +1822,8 @@ class AutoPotionController:
             )
             snapshot = self.experience_tracker.snapshot(effective_now)
             if accepted:
+                self._record_exp_10m_checkpoint(tracker_reading.current_exp, now)
+                snapshot = self.experience_tracker.snapshot(effective_now)
                 snapshot.status = "能力值 baseline 已校準"
                 self.next_experience_capture_at = now + BAR_CONFIRM_RETRY_DELAY_SECONDS
                 self._clear_failed_experience_ocr_signature()
@@ -1626,6 +1883,373 @@ class AutoPotionController:
         self._finish_failed_experience_baseline_calibration(now)
         self.gui.set_experience_snapshot(snapshot)
         return False
+
+    def _process_exp_10m_checkpoint(
+        self,
+        now: float,
+        *,
+        effective_now: float | None = None,
+    ) -> bool:
+        if effective_now is None:
+            effective_now = self._experience_effective_time(now)
+
+        if self._process_exp_10m_checkpoint_ocr_job(now, effective_now=effective_now):
+            return True
+
+        state = getattr(self, "experience_10m_checkpoint_capture", None)
+        if state is None:
+            if not self._should_start_exp_10m_checkpoint(now):
+                return False
+            state = ExperienceBaselineCalibration(
+                phase="opening_stats",
+                attempt=int(getattr(self, "experience_10m_checkpoint_attempts", 0)) + 1,
+                started_at=now,
+                next_step_at=now,
+            )
+            self.experience_10m_checkpoint_capture = state
+            self.experience_10m_checkpoint_attempts = state.attempt
+            snapshot = self.experience_tracker.snapshot(effective_now)
+            snapshot.status = self._exp_10m_checkpoint_attempt_status("按能力值快捷鍵擷取 EXP-10", state.attempt)
+            self.gui.set_experience_snapshot(snapshot)
+            self._log_exp_10m_checkpoint_event(
+                phase=state.phase,
+                decision="started",
+                completed_at=now,
+                effective_now=effective_now,
+                snapshot=snapshot,
+                click_step="character_stat_hotkey",
+            )
+
+        if now - state.started_at > EXPERIENCE_BASELINE_CALIBRATION_TIMEOUT_SECONDS:
+            self._fail_exp_10m_checkpoint(now, effective_now, "能力值 EXP-10 擷取逾時", close_ui=state.opened_ui)
+            return True
+        if now < state.next_step_at:
+            return True
+
+        if state.phase == "opening_stats":
+            return self._advance_exp_10m_checkpoint_open_stats(state, now, effective_now)
+        if state.phase == "locating_stat_exp_roi":
+            return self._advance_exp_10m_checkpoint_capture_roi(state, now, effective_now)
+        return False
+
+    def _process_exp_10m_checkpoint_ocr_job(self, now: float, *, effective_now: float) -> bool:
+        job = getattr(self, "experience_10m_checkpoint_ocr_job", None)
+        if job is None:
+            return False
+        if self._experience_clock_is_paused():
+            self._fail_exp_10m_checkpoint(now, effective_now, "EXP-10 擷取期間暫停", close_ui=True)
+            return True
+        if not job.future.done():
+            elapsed_seconds = max(0.0, now - job.submitted_at)
+            if elapsed_seconds >= EXPERIENCE_CAPTURE_INTERVAL_SECONDS:
+                snapshot = self.experience_tracker.snapshot(effective_now)
+                snapshot.status = f"EXP-10 OCR 延遲：{elapsed_seconds:.1f}s"
+                self.gui.set_experience_snapshot(snapshot)
+            return True
+
+        self.experience_10m_checkpoint_ocr_job = None
+        try:
+            reading = job.future.result()
+        except Exception as exc:
+            log_exception("EXP-10 OCR 背景工作失敗")
+            reading = ExperienceTextReading(reason=f"EXP-10 OCR 背景工作失敗：{exc}", source="stat_window")
+        job_elapsed_ms = max(0.0, now - job.submitted_at) * 1000.0
+        log_debug(
+            "EXP-10 stat OCR job "
+            f"elapsed_ms={job_elapsed_ms:.1f} result={'success' if reading.success else 'failure'} "
+            f"{self._experience_reading_log_fields(reading)} | reason={reading.reason}"
+        )
+
+        if reading.success and reading.current_exp is not None:
+            self.experience_tracker.record_ocr_result(True)
+            self._record_exp_10m_checkpoint(reading.current_exp, now)
+            snapshot = self.experience_tracker.snapshot(effective_now)
+            snapshot.status = "EXP-10 已更新" if snapshot.exp_10m_gain is not None else "EXP-10 升級區間略過"
+            self._log_exp_10m_checkpoint_event(
+                phase="ocr_checkpoint",
+                decision="accepted",
+                completed_at=now,
+                effective_now=effective_now,
+                snapshot=snapshot,
+                reading=reading,
+                roi_found=True,
+                close_method="character_stat_hotkey",
+                job_elapsed_ms=job_elapsed_ms,
+            )
+            self._clear_exp_10m_checkpoint_capture_state()
+            self.gui.set_experience_snapshot(snapshot)
+            return True
+
+        self.experience_tracker.record_ocr_result(False)
+        self._log_experience_ocr_error(now, reading.reason, reading.text)
+        snapshot = self.experience_tracker.snapshot(effective_now)
+        self._log_exp_10m_checkpoint_event(
+            phase="ocr_checkpoint",
+            decision="ocr_failure",
+            completed_at=now,
+            effective_now=effective_now,
+            snapshot=snapshot,
+            reading=reading,
+            roi_found=True,
+            close_method="character_stat_hotkey",
+            fallback_reason=reading.reason,
+            job_elapsed_ms=job_elapsed_ms,
+        )
+        self._retry_or_stop_exp_10m_checkpoint_after_ocr_failure(now, effective_now, reading.reason)
+        return True
+
+    def _advance_exp_10m_checkpoint_open_stats(
+        self,
+        state: ExperienceBaselineCalibration,
+        now: float,
+        effective_now: float,
+    ) -> bool:
+        self._move_cursor_for_experience_baseline_capture()
+        if not self._toggle_experience_stat_window():
+            self._restore_experience_baseline_cursor()
+            self._fail_exp_10m_checkpoint(now, effective_now, "能力值快捷鍵設定無效", close_ui=False)
+            return True
+        state.opened_ui = True
+        state.phase = "locating_stat_exp_roi"
+        state.next_step_at = now + EXPERIENCE_BASELINE_CALIBRATION_STATS_SETTLE_SECONDS
+        snapshot = self.experience_tracker.snapshot(effective_now)
+        snapshot.status = self._exp_10m_checkpoint_attempt_status(
+            "按能力值快捷鍵開啟 EXP-10 視窗中",
+            state.attempt,
+        )
+        self.gui.set_experience_snapshot(snapshot)
+        self._log_exp_10m_checkpoint_event(
+            phase=state.phase,
+            decision="hotkey",
+            completed_at=now,
+            effective_now=effective_now,
+            snapshot=snapshot,
+            click_step="character_stat_hotkey",
+        )
+        return True
+
+    def _advance_exp_10m_checkpoint_capture_roi(
+        self,
+        state: ExperienceBaselineCalibration,
+        now: float,
+        effective_now: float,
+    ) -> bool:
+        try:
+            image, _bounds = self._capture_foreground_client_image()
+            roi = self._locate_stat_window_exp_roi(image)
+        except Exception:
+            self._restore_experience_baseline_cursor()
+            raise
+        if roi is None:
+            self._fail_exp_10m_checkpoint(now, effective_now, "找不到能力值 EXP ROI", close_ui=True)
+            return True
+
+        left, top, width, height = roi
+        crop = image[top : top + height, left : left + width].copy()
+        ocr_image = ExperienceOcrImage(crop, source_id="stat_window", roi_offset=roi)
+        image_signature = self._experience_ocr_image_signature([[ocr_image]])
+        self._close_experience_baseline_calibration_ui()
+        state.opened_ui = False
+        self._restore_experience_baseline_cursor()
+        future = self.experience_ocr_executor.submit(read_stat_window_exp_in_worker, ocr_image)
+        self.experience_10m_checkpoint_ocr_job = ExperienceOcrJob(
+            submitted_at=now,
+            future=future,
+            image_signature=image_signature,
+            image_frames=[[ocr_image]],
+        )
+        state.phase = "ocr_checkpoint"
+        state.next_step_at = now
+        snapshot = self.experience_tracker.snapshot(effective_now)
+        snapshot.status = self._exp_10m_checkpoint_attempt_status("讀取能力值 EXP-10", state.attempt)
+        self.gui.set_experience_snapshot(snapshot)
+        self._log_exp_10m_checkpoint_event(
+            phase=state.phase,
+            decision="captured",
+            completed_at=now,
+            effective_now=effective_now,
+            snapshot=snapshot,
+            roi_found=True,
+            close_method="character_stat_hotkey",
+            click_step="stat_exp_roi",
+        )
+        return True
+
+    def _should_start_exp_10m_checkpoint(self, now: float) -> bool:
+        if not getattr(self.settings, "exp_efficiency_enabled", False):
+            return False
+        if self._experience_clock_is_paused():
+            return False
+        if not getattr(self, "gameplay_hud_active", False):
+            return False
+        if getattr(self, "experience_10m_checkpoint_stopped", False):
+            return False
+        checkpoint_exp = getattr(self.experience_tracker, "exp_10m_checkpoint_exp", None)
+        if not isinstance(checkpoint_exp, int):
+            return False
+        if now < float(getattr(self, "next_experience_10m_checkpoint_at", 0.0)):
+            return False
+        if getattr(self, "experience_ocr_job", None) is not None:
+            return False
+        if getattr(self, "experience_ocr_burst", None) is not None:
+            return False
+        if getattr(self, "experience_baseline_calibration", None) is not None:
+            return False
+        if getattr(self, "experience_baseline_ocr_job", None) is not None:
+            return False
+        if getattr(self, "experience_10m_checkpoint_ocr_job", None) is not None:
+            return False
+        return True
+
+    def _record_exp_10m_checkpoint(self, current_exp: int, now: float) -> None:
+        self.experience_tracker.record_exp_10m_checkpoint(current_exp)
+        self.next_experience_10m_checkpoint_at = now + EXPERIENCE_10M_CHECKPOINT_INTERVAL_SECONDS
+        self.experience_10m_checkpoint_stopped = False
+        self.experience_10m_checkpoint_attempts = 0
+
+    def _resume_exp_10m_checkpoint_schedule(self, now: float) -> None:
+        self.experience_10m_checkpoint_stopped = False
+        self.experience_10m_checkpoint_attempts = 0
+        if isinstance(getattr(self.experience_tracker, "exp_10m_checkpoint_exp", None), int):
+            self.next_experience_10m_checkpoint_at = now + EXPERIENCE_10M_CHECKPOINT_INTERVAL_SECONDS
+
+    def _reset_exp_10m_checkpoint_state(self) -> None:
+        self._cancel_exp_10m_checkpoint(close_ui=True)
+        self.next_experience_10m_checkpoint_at = 0.0
+        self.experience_10m_checkpoint_stopped = False
+        self.experience_10m_checkpoint_attempts = 0
+
+    def _exp_10m_checkpoint_attempt_status(self, message: str, attempt: int | None = None) -> str:
+        attempt = int(attempt if attempt is not None else getattr(self, "experience_10m_checkpoint_attempts", 0))
+        if attempt <= 1:
+            return message
+        return f"{message}（第 {attempt}/{EXPERIENCE_10M_CHECKPOINT_OCR_MAX_ATTEMPTS} 次）"
+
+    def _retry_or_stop_exp_10m_checkpoint_after_ocr_failure(
+        self,
+        now: float,
+        effective_now: float,
+        reason: str,
+    ) -> None:
+        self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
+        attempt = max(1, int(getattr(self, "experience_10m_checkpoint_attempts", 0)))
+        self._cancel_exp_10m_checkpoint(close_ui=False)
+        if attempt < EXPERIENCE_10M_CHECKPOINT_OCR_MAX_ATTEMPTS:
+            self.experience_10m_checkpoint_stopped = False
+            self.next_experience_10m_checkpoint_at = now + EXPERIENCE_10M_CHECKPOINT_OCR_RETRY_DELAY_SECONDS
+            snapshot = self.experience_tracker.snapshot(effective_now)
+            next_attempt = attempt + 1
+            snapshot.status = (
+                f"EXP-10 OCR 失敗，10 秒後重試"
+                f"（第 {next_attempt}/{EXPERIENCE_10M_CHECKPOINT_OCR_MAX_ATTEMPTS} 次）"
+            )
+            self.gui.set_experience_snapshot(snapshot)
+            return
+
+        self.experience_10m_checkpoint_stopped = True
+        self.next_experience_10m_checkpoint_at = 0.0
+        self.experience_10m_checkpoint_attempts = 0
+        snapshot = self.experience_tracker.snapshot(effective_now)
+        snapshot.status = (
+            f"EXP-10 OCR 失敗已達 {EXPERIENCE_10M_CHECKPOINT_OCR_MAX_ATTEMPTS} 次，保留上一筆統計"
+        )
+        self.gui.set_experience_snapshot(snapshot)
+
+    def _fail_exp_10m_checkpoint(
+        self,
+        now: float,
+        effective_now: float,
+        reason: str,
+        *,
+        close_ui: bool,
+    ) -> None:
+        if close_ui:
+            with contextlib.suppress(Exception):
+                self._close_experience_baseline_calibration_ui()
+        self._log_exp_10m_checkpoint_event(
+            phase=getattr(getattr(self, "experience_10m_checkpoint_capture", None), "phase", "failed"),
+            decision="fallback",
+            completed_at=now,
+            effective_now=effective_now,
+            snapshot=self.experience_tracker.snapshot(effective_now),
+            fallback_reason=reason,
+            closed_by_esc=close_ui,
+            close_method="character_stat_hotkey" if close_ui else "",
+        )
+        self._stop_exp_10m_checkpoint(now, effective_now, reason)
+
+    def _stop_exp_10m_checkpoint(self, now: float, effective_now: float, reason: str) -> None:
+        self._cancel_exp_10m_checkpoint(close_ui=False)
+        self.experience_10m_checkpoint_stopped = True
+        self.next_experience_10m_checkpoint_at = 0.0
+        self.experience_10m_checkpoint_attempts = 0
+        if hasattr(self.experience_tracker, "exp_10m_gain"):
+            self.experience_tracker.exp_10m_gain = None
+        snapshot = self.experience_tracker.snapshot(effective_now)
+        snapshot.status = f"EXP-10 已停止：{reason}"
+        self.gui.set_experience_snapshot(snapshot)
+
+    def _clear_exp_10m_checkpoint_capture_state(self) -> None:
+        self._restore_experience_baseline_cursor()
+        self.experience_10m_checkpoint_capture = None
+
+    def _cancel_exp_10m_checkpoint(self, *, close_ui: bool) -> None:
+        job = getattr(self, "experience_10m_checkpoint_ocr_job", None)
+        if job is not None:
+            job.future.cancel()
+            self.experience_10m_checkpoint_ocr_job = None
+        state = getattr(self, "experience_10m_checkpoint_capture", None)
+        if close_ui and state is not None and state.opened_ui:
+            with contextlib.suppress(Exception):
+                self._close_experience_baseline_calibration_ui()
+        self._clear_exp_10m_checkpoint_capture_state()
+
+    def _log_exp_10m_checkpoint_event(
+        self,
+        *,
+        phase: str,
+        decision: str,
+        completed_at: float,
+        effective_now: float,
+        snapshot: ExperienceSnapshot,
+        reading: ExperienceTextReading | None = None,
+        roi_found: bool = False,
+        closed_by_esc: bool = False,
+        click_step: str = "",
+        fallback_reason: str = "",
+        close_method: str = "",
+        job_elapsed_ms: float | None = None,
+    ) -> None:
+        log_experience_debug(
+            {
+                "event": "experience_10m_checkpoint",
+                "phase": phase,
+                "source": "stat_window",
+                "roi_found": bool(roi_found),
+                "click_step": click_step,
+                "closed_by_esc": bool(closed_by_esc),
+                "close_method": close_method,
+                "decision": decision,
+                "fallback_reason": fallback_reason,
+                "completed_at": self._experience_debug_number(completed_at),
+                "effective_now": self._experience_debug_number(effective_now),
+                "job_elapsed_ms": self._experience_debug_number(job_elapsed_ms),
+                "success": bool(reading.success) if reading is not None else False,
+                "text": reading.text if reading is not None else "",
+                "raw_current_exp": reading.current_exp if reading is not None else None,
+                "current_exp": reading.current_exp if reading is not None else None,
+                "checkpoint_exp": self._experience_debug_number(
+                    getattr(self.experience_tracker, "exp_10m_checkpoint_exp", None)
+                ),
+                "exp_10m_gain": self._experience_debug_number(snapshot.exp_10m_gain),
+                "confidence": self._experience_debug_number(reading.confidence if reading is not None else None),
+                "reason": reading.reason if reading is not None else fallback_reason,
+                "tracker_status": str(getattr(self.experience_tracker, "last_status", snapshot.status)),
+                "sample_count": self._experience_debug_number(snapshot.sample_count),
+                "ocr_attempt_count": self._experience_debug_number(snapshot.ocr_attempt_count),
+                "ocr_success_count": self._experience_debug_number(snapshot.ocr_success_count),
+            }
+        )
 
     def _stat_window_baseline_exp_only_reading(self, reading: ExperienceTextReading) -> ExperienceTextReading:
         return ExperienceTextReading(
@@ -2123,8 +2747,9 @@ class AutoPotionController:
         if not hotkey:
             return False
         try:
+            parse_vk_key(hotkey)
             tap_hotkey(hotkey)
-        except Exception:
+        except (Exception, ValueError):
             return False
         return True
 
@@ -2286,20 +2911,23 @@ class AutoPotionController:
         if effective_now is None:
             effective_now = self._experience_effective_time(now)
         image_signature = self._experience_ocr_image_signature(image_frames)
+        continuity_hint = self._experience_ocr_continuity_hint(effective_now)
         if self._is_repeated_completed_experience_ocr_signature(image_signature):
             self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
             snapshot = self.experience_tracker.snapshot(effective_now)
             snapshot.status = "EXP ROI 未變化，保留統計"
             self.gui.set_experience_snapshot(snapshot)
             return
-        if self._is_repeated_failed_experience_ocr_signature(image_signature):
+        if (
+            self._is_repeated_failed_experience_ocr_signature(image_signature)
+            and not self._experience_level_up_recovery_expected(continuity_hint)
+        ):
             self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
             snapshot = self.experience_tracker.snapshot(effective_now)
             snapshot.status = "OCR ROI 未變化，保留統計" if snapshot.sample_count else "OCR ROI 未變化，等待畫面更新"
             self.gui.set_experience_snapshot(snapshot)
             return
 
-        continuity_hint = self._experience_ocr_continuity_hint(effective_now)
         copied_frames = [[self._copy_experience_ocr_image(image) for image in images] for images in image_frames]
         if continuity_hint is None:
             future = self.experience_ocr_executor.submit(
@@ -2336,6 +2964,11 @@ class AutoPotionController:
             captured_at=latest.captured_at,
             now=effective_now,
         )
+
+    def _experience_level_up_recovery_expected(self, hint: ExperienceOcrContinuityHint | None) -> bool:
+        if hint is None or hint.percent is None:
+            return False
+        return hint.percent >= 95.0
 
     def _copy_experience_ocr_image(self, image: np.ndarray | ExperienceOcrImage) -> np.ndarray | ExperienceOcrImage:
         if isinstance(image, ExperienceOcrImage):
@@ -2586,8 +3219,12 @@ class AutoPotionController:
                 "job_elapsed_ms": self._experience_debug_number(job_elapsed_ms),
                 "success": bool(reading.success),
                 "text": reading.text,
+                "raw_current_exp": reading.current_exp,
+                "raw_percent": self._experience_debug_number(reading.percent),
                 "current_exp": reading.current_exp,
                 "percent": self._experience_debug_number(reading.percent),
+                "snapshot_current_exp": self._experience_debug_number(snapshot.current_exp),
+                "snapshot_percent": self._experience_debug_number(snapshot.current_percent),
                 "confidence": self._experience_debug_number(reading.confidence),
                 "reason": reading.reason,
                 "needs_bar_percent_guard": bool(reading.needs_bar_percent_guard),
@@ -2636,6 +3273,7 @@ class AutoPotionController:
 
     def _stop_experience_ocr_job(self) -> None:
         self._cancel_experience_baseline_calibration(close_ui=True)
+        self._cancel_exp_10m_checkpoint(close_ui=True)
         self.experience_ocr_burst = None
         self._clear_failed_experience_ocr_signature()
         self._clear_completed_experience_ocr_signature()
@@ -4973,6 +5611,7 @@ class AutoPotionController:
         potion_worker = getattr(self, "potion_action_worker", None)
         if potion_worker is not None:
             potion_worker.stop()
+        self._close_media_files()
         try:
             self.experience_ocr_executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
@@ -4992,3 +5631,15 @@ class AutoPotionController:
             sys.stdout = self.original_stdout
         if self.original_stderr is not None:
             sys.stderr = self.original_stderr
+
+    def _close_media_files(self) -> None:
+        alias_paths = getattr(self, "_media_alias_paths", None)
+        if not isinstance(alias_paths, dict) or not alias_paths:
+            return
+        try:
+            winmm = ctypes.windll.winmm
+            buffer = ctypes.create_unicode_buffer(256)
+            for alias in tuple(alias_paths):
+                self._close_media_alias(winmm, buffer, alias)
+        except Exception:
+            alias_paths.clear()

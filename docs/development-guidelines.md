@@ -8,7 +8,7 @@
 - `.venv*/`、`.paddleocr/`、根目錄 `/models/`、`build/`、`dist/`、`release/`、`*.spec` 都是本機或打包產物，不應提交。
 - `.venv-paddleocr` 是可重建的本機 OCR 開發環境；需要時可刪除重建，但不得提交。
 - `maple_star/models/` 是正式原始碼目錄，必須可追蹤，不可被視為模型 cache。
-- `debug.log` 與 `experience_debug.log` 是本機診斷檔，程式會自動輪替保留固定備份數，避免長時間執行時無限增長。
+- `debug.log` 與 `experience_debug.log` 是本機診斷檔；每次 app 啟動會清空目前檔案與輪替備份，執行期間每個檔案達 1MB 會自動輪替並保留固定備份數，避免長時間執行時無限增長。
 - 未經使用者明確要求，不要執行打包。
 - 未經使用者明確要求，不要 commit。
 - 使用者要求 commit 時，先確認 staged 清單不含本機設定、venv、model cache 或打包產物。

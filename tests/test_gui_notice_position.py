@@ -139,6 +139,21 @@ class ToggleNoticePositionTests(unittest.TestCase):
         notice.lift.assert_called_once()
         gui.root.after.assert_called_once_with(1300, gui._destroy_toggle_notice)
 
+    def test_show_toggle_notice_reuses_active_notice_for_same_message(self):
+        gui = self.make_gui()
+        gui.closed = False
+        gui.toggle_notice_window = Mock()
+        gui.toggle_notice_after_id = "after-1"
+        gui.toggle_notice_message = "HP 疑似無藥水"
+        gui._destroy_toggle_notice = Mock()
+
+        gui.show_toggle_notice("HP 疑似無藥水")
+
+        gui.root.after_cancel.assert_called_once_with("after-1")
+        gui.root.after.assert_called_once_with(1300, gui._destroy_toggle_notice)
+        gui.toggle_notice_window.lift.assert_called_once()
+        gui._destroy_toggle_notice.assert_not_called()
+
     def test_combo_group_collapse_toggles_body_and_title_text(self):
         gui = self.make_gui()
         gui.settings = Mock()
