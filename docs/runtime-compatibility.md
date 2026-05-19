@@ -19,6 +19,7 @@
 - HP/MP 條與 EXP OCR 範圍需能隨遊戲視窗縮放或重開自動重新定位。
 - 不要依賴固定預設座標。
 - 底部 HUD 定位優先使用 `HP.` / `MP.` / `EXP.` label 的 multi-scale template matching，再用紅/藍/綠條色彩驗證；label 失敗時才回到舊的色條配對 fallback。
+- 沿用 cached/stale HP/MP ROI 前，需確認 HP/MP 成對幾何合理且兩條都能通過取色驗證；不可只因其中一條成功就沿用整組舊座標。
 - HP/MP 自動喝水前需允許短暫偵測失敗重試。
 - 實際送鍵前需做 confirm capture，確認失敗時可用相近的 unchecked fallback，但差異過大時必須放棄送鍵。
 - HP/MP 條不穩定 log 需節流，避免偵測抖動時洗掉 GUI Console 內真正重要的 OCR 與異常樣本資訊。

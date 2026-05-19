@@ -209,6 +209,12 @@ HUD_EXP_TEXT_RIGHT_PADDING_RATIO = 0.035
 BAR_PAIR_HP_MAX_LEFT_RATIO = 0.48
 BAR_PAIR_MIN_GAP_RATIO = 0.10
 BAR_PAIR_MAX_GAP_RATIO = 0.24
+BAR_PAIR_REUSE_MIN_GAP_RATIO = 0.06
+BAR_PAIR_REUSE_MAX_GAP_RATIO = 0.34
+BAR_PAIR_REUSE_MAX_CENTER_Y_DELTA_RATIO = 1.10
+BAR_PAIR_REUSE_WIDTH_RATIO_MIN = 0.55
+BAR_PAIR_REUSE_WIDTH_RATIO_MAX = 1.80
+BAR_PAIR_REUSE_HEIGHT_RATIO_MAX = 2.40
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MEDIA_VOLUME_PERCENT = 20
 MCI_MAX_VOLUME = 1000
@@ -1684,22 +1690,29 @@ class AutoPotionController:
         if cached is None:
             return False
         regions, track_regions, client_bounds = cached
+        if not self._bar_region_pair_geometry_is_valid(regions, track_regions, client_bounds):
+            return False
+        saw_non_empty_sample = False
         for bar_type in ("mp", "hp"):
             sample_region = track_regions.get(bar_type) or regions.get(bar_type)
             if sample_region is None:
-                continue
+                return False
             percent, reason, _tail_clear = self._sample_direct_bar_percent_from_region(
                 sample_region,
                 bar_type,
                 require_clear_tail=False,
             )
-            if percent is not None and reason != "OK:EmptyTrack":
-                self.bottom_bar_regions = regions
-                self.bottom_bar_track_regions = track_regions
-                self.bottom_bar_client_bounds = client_bounds
-                self.bottom_bar_regions_at = now
-                return True
-        return False
+            if percent is None:
+                return False
+            if reason != "OK:EmptyTrack":
+                saw_non_empty_sample = True
+        if not saw_non_empty_sample:
+            return False
+        self.bottom_bar_regions = regions
+        self.bottom_bar_track_regions = track_regions
+        self.bottom_bar_client_bounds = client_bounds
+        self.bottom_bar_regions_at = now
+        return True
 
     def _can_reuse_stale_bottom_bar_regions(
         self,
@@ -1711,7 +1724,10 @@ class AutoPotionController:
             return False
         if client_bounds is None or client_bounds != self._foreground_client_bounds():
             return False
+        if not self._bar_region_pair_geometry_is_valid(regions, track_regions, client_bounds):
+            return False
 
+        saw_non_empty_sample = False
         for bar_type in ("mp", "hp"):
             try:
                 percent, reason, _tail_clear = self._bar_percent_from_region_snapshot(
@@ -1721,10 +1737,74 @@ class AutoPotionController:
                     track_region=track_regions.get(bar_type),
                 )
             except Exception:
-                continue
-            if percent is not None and reason != "OK:EmptyTrack":
-                return True
-        return False
+                return False
+            if percent is None:
+                return False
+            if reason != "OK:EmptyTrack":
+                saw_non_empty_sample = True
+        return saw_non_empty_sample
+
+    def _bar_region_pair_geometry_is_valid(
+        self,
+        regions: dict[str, tuple[int, int, int, int]],
+        track_regions: dict[str, tuple[int, int, int, int]] | None = None,
+        client_bounds: tuple[int, int, int, int] | None = None,
+    ) -> bool:
+        track_regions = track_regions or {}
+        hp_region = track_regions.get("hp") or regions.get("hp")
+        mp_region = track_regions.get("mp") or regions.get("mp")
+        if hp_region is None or mp_region is None:
+            return False
+        if not self._bar_region_rect_is_valid(hp_region, client_bounds):
+            return False
+        if not self._bar_region_rect_is_valid(mp_region, client_bounds):
+            return False
+
+        hp_left, hp_top, hp_width, hp_height = hp_region
+        mp_left, mp_top, mp_width, mp_height = mp_region
+        if hp_width <= 0 or hp_height <= 0 or mp_width <= 0 or mp_height <= 0:
+            return False
+        width_ratio = min(hp_width, mp_width) / max(hp_width, mp_width)
+        if width_ratio < BAR_PAIR_REUSE_WIDTH_RATIO_MIN:
+            return False
+        height_ratio = max(hp_height, mp_height) / max(1, min(hp_height, mp_height))
+        if height_ratio > BAR_PAIR_REUSE_HEIGHT_RATIO_MAX:
+            return False
+
+        hp_center_y = hp_top + hp_height / 2.0
+        mp_center_y = mp_top + mp_height / 2.0
+        y_tolerance = max(10.0, max(hp_height, mp_height) * BAR_PAIR_REUSE_MAX_CENTER_Y_DELTA_RATIO)
+        if abs(hp_center_y - mp_center_y) > y_tolerance:
+            return False
+
+        client_width = client_bounds[2] if client_bounds is not None else max(mp_left + mp_width, hp_left + hp_width)
+        min_gap = max(24.0, client_width * BAR_PAIR_REUSE_MIN_GAP_RATIO)
+        max_gap = max(min_gap + 1.0, client_width * BAR_PAIR_REUSE_MAX_GAP_RATIO)
+        left_gap = mp_left - hp_left
+        if left_gap < min_gap or left_gap > max_gap:
+            return False
+        hp_left_in_client = hp_left - client_bounds[0] if client_bounds is not None else hp_left
+        if hp_left_in_client > client_width * (BAR_PAIR_HP_MAX_LEFT_RATIO + 0.08):
+            return False
+        return True
+
+    def _bar_region_rect_is_valid(
+        self,
+        region: tuple[int, int, int, int],
+        client_bounds: tuple[int, int, int, int] | None,
+    ) -> bool:
+        left, top, width, height = region
+        if width <= 0 or height <= 0:
+            return False
+        if client_bounds is None:
+            return True
+        client_left, client_top, client_width, client_height = client_bounds
+        return (
+            left >= client_left
+            and top >= client_top
+            and left + width <= client_left + client_width
+            and top + height <= client_top + client_height
+        )
 
     def _pause_experience_for_missing_hud(self, now: float) -> None:
         self._pause_experience_for_inactive_state(now, "HUD 未出現，保留統計")
@@ -1946,7 +2026,7 @@ class AutoPotionController:
         )
 
         if reading.success and reading.current_exp is not None:
-            tracker_reading = self._baseline_exp_only_reading(reading)
+            tracker_reading = reading
             self.experience_tracker.record_ocr_result(True)
             accepted = self.experience_tracker.add_reading(
                 effective_now,
@@ -2348,21 +2428,6 @@ class AutoPotionController:
                 "ocr_attempt_count": self._experience_debug_number(snapshot.ocr_attempt_count),
                 "ocr_success_count": self._experience_debug_number(snapshot.ocr_success_count),
             }
-        )
-
-    def _baseline_exp_only_reading(self, reading: ExperienceTextReading) -> ExperienceTextReading:
-        return ExperienceTextReading(
-            current_exp=reading.current_exp,
-            percent=None,
-            text=reading.text,
-            confidence=reading.confidence,
-            success=reading.success,
-            reason=reading.reason,
-            needs_bar_percent_guard=reading.needs_bar_percent_guard,
-            learning_case_id=reading.learning_case_id,
-            bar_percent=reading.bar_percent,
-            continuity_status=reading.continuity_status,
-            source=reading.source,
         )
 
     def _should_start_experience_baseline_calibration(self, now: float) -> bool:
@@ -4423,6 +4488,8 @@ class AutoPotionController:
         if cached is None:
             return None
         regions, track_regions, client_bounds = cached
+        if not self._bar_region_pair_geometry_is_valid(regions, track_regions, client_bounds):
+            return None
         region = track_regions.get(bar_type) or regions.get(bar_type)
         if region is None:
             return None
@@ -4464,6 +4531,11 @@ class AutoPotionController:
             use_cache
             and cached_client_bounds == client_bounds
             and now - self.bottom_bar_regions_at <= BAR_PAIR_CACHE_SECONDS
+            and self._bar_region_pair_geometry_is_valid(
+                self.bottom_bar_regions,
+                self.bottom_bar_track_regions,
+                client_bounds,
+            )
         ):
             return self.bottom_bar_regions
 
@@ -4526,10 +4598,18 @@ class AutoPotionController:
             if regions:
                 break
 
-        if regions:
+        if regions and self._bar_region_pair_geometry_is_valid(
+            regions,
+            getattr(self, "pending_bottom_bar_track_regions", {}),
+            client_bounds,
+        ):
             self.bottom_bar_regions = regions
             self.bottom_bar_track_regions = getattr(self, "pending_bottom_bar_track_regions", {})
             self.bottom_hud_layout = detected_layout
+        elif regions:
+            self.bottom_bar_regions = {}
+            self.bottom_bar_track_regions = {}
+            self.bottom_hud_layout = None
         elif allow_stale_on_failure and cached_client_bounds == client_bounds and old_regions:
             self.bottom_bar_regions = old_regions
             self.bottom_bar_track_regions = old_track_regions

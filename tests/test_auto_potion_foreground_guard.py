@@ -313,6 +313,52 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         sample.assert_called_once_with((175, 263, 100, 6), "hp", require_clear_tail=False)
         find_regions.assert_not_called()
 
+    def test_cached_bar_reuse_requires_both_hp_and_mp_to_sample(self):
+        controller = self.make_controller([])
+        controller.bottom_bar_regions = {
+            "hp": (120, 220, 110, 12),
+            "mp": (260, 220, 110, 12),
+        }
+        controller.bottom_bar_track_regions = {
+            "hp": (125, 223, 100, 6),
+            "mp": (265, 223, 100, 6),
+        }
+        controller._cache_bottom_bar_client_regions((100, 200, 800, 600))
+
+        with (
+            patch.object(controller, "_foreground_client_bounds", return_value=(100, 200, 800, 600)),
+            patch.object(
+                controller,
+                "_sample_direct_bar_percent_from_region",
+                side_effect=[
+                    (72.0, "OK:Direct", None),
+                    (None, "直接取色找不到符合顏色的填滿欄位", None),
+                ],
+            ) as sample,
+        ):
+            reused = controller._reuse_cached_bottom_bar_regions_with_direct_sample(10.0)
+
+        self.assertFalse(reused)
+        self.assertEqual(sample.call_count, 2)
+
+    def test_cached_bar_reuse_rejects_implausible_pair_geometry(self):
+        controller = self.make_controller([])
+        controller.bottom_bar_regions = {
+            "hp": (120, 220, 110, 12),
+            "mp": (260, 320, 110, 12),
+        }
+        controller.bottom_bar_track_regions = dict(controller.bottom_bar_regions)
+        controller._cache_bottom_bar_client_regions((100, 200, 800, 600))
+
+        with (
+            patch.object(controller, "_foreground_client_bounds", return_value=(100, 200, 800, 600)),
+            patch.object(controller, "_sample_direct_bar_percent_from_region") as sample,
+        ):
+            reused = controller._reuse_cached_bottom_bar_regions_with_direct_sample(10.0)
+
+        self.assertFalse(reused)
+        sample.assert_not_called()
+
     def test_direct_gdi_buffer_sampling_reads_synthetic_hp_percent(self):
         controller = self.make_controller([])
         region = (10, 20, 100, 9)
@@ -858,7 +904,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(controller.last_target_hwnd, 1234)
         controller.target_window_provider.assert_called_once()
 
-    def test_experience_baseline_uses_tooltip_before_character_stat_window(self):
+    def test_experience_baseline_uses_tooltip_percent_from_current_total(self):
         class DoneFuture:
             def __init__(self, result):
                 self._result = result
@@ -900,7 +946,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         controller._toggle_experience_stat_window.assert_not_called()
         self.assertEqual(controller.experience_tracker.samples[-1].current_exp, 15_261_854)
-        self.assertIsNone(controller.experience_tracker.samples[-1].percent)
+        self.assertEqual(controller.experience_tracker.samples[-1].percent, 17.84)
         self.assertFalse(controller.experience_tooltip_baseline_failed)
 
     def test_tooltip_baseline_failure_does_not_open_stat_window_when_disabled(self):
@@ -1732,10 +1778,10 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         }
         controller.bottom_bar_regions = dict(old_regions)
         controller.bottom_bar_track_regions = dict(old_track_regions)
-        controller.bottom_bar_client_bounds = (0, 0, 1000, 800)
+        controller.bottom_bar_client_bounds = (0, 0, 1000, 1000)
         controller.bottom_bar_regions_at = 0.0
         controller._find_bottom_bar_pair_regions = Mock(return_value={})
-        controller._foreground_client_bounds = Mock(return_value=(0, 0, 1000, 800))
+        controller._foreground_client_bounds = Mock(return_value=(0, 0, 1000, 1000))
         controller._bar_percent_from_region_snapshot = Mock(return_value=(72.0, "OK", None))
         controller._set_bar_detection_debug = Mock()
 
@@ -1747,13 +1793,51 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(controller.last_hp_drink_at, -999.0)
         self.assertEqual(controller.last_mp_drink_at, -999.0)
         controller._find_bottom_bar_pair_regions.assert_not_called()
-        controller._bar_percent_from_region_snapshot.assert_called_once_with(
+        self.assertEqual(controller._bar_percent_from_region_snapshot.call_count, 2)
+        controller._bar_percent_from_region_snapshot.assert_any_call(
             old_regions["mp"],
             "mp",
             require_clear_tail=False,
             track_region=old_track_regions["mp"],
         )
+        controller._bar_percent_from_region_snapshot.assert_any_call(
+            old_regions["hp"],
+            "hp",
+            require_clear_tail=False,
+            track_region=old_track_regions["hp"],
+        )
         controller._set_bar_detection_debug.assert_not_called()
+
+    def test_gameplay_hud_gate_rejects_stale_regions_when_one_bar_fails(self):
+        controller = self.make_controller([])
+        old_regions = {
+            "hp": (100, 900, 200, 16),
+            "mp": (360, 900, 200, 16),
+        }
+        old_track_regions = {
+            "hp": (102, 902, 190, 12),
+            "mp": (362, 902, 190, 12),
+        }
+        controller.bottom_bar_regions = dict(old_regions)
+        controller.bottom_bar_track_regions = dict(old_track_regions)
+        controller.bottom_bar_client_bounds = (0, 0, 1000, 1000)
+        controller.bottom_bar_regions_at = 0.0
+        controller._foreground_client_bounds = Mock(return_value=(0, 0, 1000, 1000))
+        controller._bar_percent_from_region_snapshot = Mock(
+            side_effect=[
+                (72.0, "OK", None),
+                (None, "找不到符合顏色的填滿欄位", None),
+            ]
+        )
+
+        self.assertFalse(
+            controller._can_reuse_stale_bottom_bar_regions(
+                old_regions,
+                old_track_regions,
+                (0, 0, 1000, 1000),
+            )
+        )
+        self.assertEqual(controller._bar_percent_from_region_snapshot.call_count, 2)
 
     def test_hp_threshold_100_does_not_tap_when_bar_is_full(self):
         controller = self.make_controller([])
