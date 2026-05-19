@@ -148,6 +148,29 @@ class ProcessEntry32(ctypes.Structure):
     ]
 
 
+class BitmapInfoHeader(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD),
+        ("biWidth", wintypes.LONG),
+        ("biHeight", wintypes.LONG),
+        ("biPlanes", wintypes.WORD),
+        ("biBitCount", wintypes.WORD),
+        ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD),
+        ("biXPelsPerMeter", wintypes.LONG),
+        ("biYPelsPerMeter", wintypes.LONG),
+        ("biClrUsed", wintypes.DWORD),
+        ("biClrImportant", wintypes.DWORD),
+    ]
+
+
+class BitmapInfo(ctypes.Structure):
+    _fields_ = [
+        ("bmiHeader", BitmapInfoHeader),
+        ("bmiColors", wintypes.DWORD * 3),
+    ]
+
+
 EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -231,6 +254,43 @@ user32.PeekMessageW.argtypes = [
 user32.PeekMessageW.restype = wintypes.BOOL
 user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
 user32.GetAsyncKeyState.restype = ctypes.c_short
+user32.GetDC.argtypes = [wintypes.HWND]
+user32.GetDC.restype = wintypes.HDC
+user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+user32.ReleaseDC.restype = ctypes.c_int
+gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+gdi32.CreateCompatibleDC.restype = wintypes.HDC
+gdi32.DeleteDC.argtypes = [wintypes.HDC]
+gdi32.DeleteDC.restype = wintypes.BOOL
+gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+gdi32.DeleteObject.restype = wintypes.BOOL
+gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+gdi32.SelectObject.restype = wintypes.HGDIOBJ
+gdi32.BitBlt.argtypes = [
+    wintypes.HDC,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    wintypes.HDC,
+    ctypes.c_int,
+    ctypes.c_int,
+    wintypes.DWORD,
+]
+gdi32.BitBlt.restype = wintypes.BOOL
+gdi32.GetDIBits.argtypes = [
+    wintypes.HDC,
+    wintypes.HBITMAP,
+    wintypes.UINT,
+    wintypes.UINT,
+    ctypes.c_void_p,
+    ctypes.POINTER(BitmapInfo),
+    wintypes.UINT,
+]
+gdi32.GetDIBits.restype = ctypes.c_int
 try:
     user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
 except Exception:

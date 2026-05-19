@@ -1634,6 +1634,13 @@ class ExperienceTests(unittest.TestCase):
 
         self.assertEqual(status, "level_up")
 
+    def test_experience_ocr_continuity_allows_level_wrap_range(self):
+        hint = ExperienceOcrContinuityHint(current_exp=49377752, percent=80.0, captured_at=30.0, now=35.0)
+
+        status = _experience_ocr_continuity_status(16287, 12.5, hint)
+
+        self.assertEqual(status, "level_up")
+
     def test_experience_ocr_continuity_guard_rejects_percent_regression_success(self):
         hint = ExperienceOcrContinuityHint(current_exp=36884521, percent=96.99, captured_at=10.0, now=39.828)
         reading = ExperienceTextReading(

@@ -63,7 +63,6 @@ from ..constants import (
     LOADING_GUARD_LOW_SATURATION_RATIO,
     LOADING_GUARD_MEAN_LUMINANCE,
     PICKUP_DISABLE_HOLD_SECONDS,
-    PICKUP_REASSERT_SECONDS,
     PM_REMOVE,
     POTION_EFFECT_AUTO_HOLD_BAR_TYPES,
     POTION_EFFECT_DAMAGE_GRACE_SECONDS,
@@ -80,7 +79,9 @@ from ..constants import (
     POTION_EFFECT_STABILITY_CONFIRMATION_VOLATILITY_TOLERANCE_PERCENT,
     POTION_EFFECT_WATCH_CHANGE_TOLERANCE_PERCENT,
     POTION_EFFECT_WATCH_VOLATILITY_TOLERANCE_PERCENT,
+    POTION_FAST_CAPTURE_INTERVAL_SECONDS,
     POTION_MIN_COOLDOWN_SECONDS,
+    POTION_NEAR_THRESHOLD_FAST_MARGIN_PERCENT,
     EMERGENCY_STOP_BEEP_PATTERN,
     PAUSE_BEEP_PATTERN,
     RESUME_BEEP_PATTERN,
@@ -111,6 +112,7 @@ from ..services.runtime_processes import (
     WorkerCrashed,
 )
 from ..models.experience import (
+    EXP_LEVEL_WRAP_HIGH_PERCENT,
     ExperienceEfficiencyTracker,
     ExperienceOcrContinuityHint,
     ExperienceOcrImage,
@@ -141,6 +143,7 @@ from ..views.settings_gui import AutoPotionSettingsGui, GuiConsoleWriter
 from ..models.settings import AutoPotionSettings
 from ..services.settings_store import load_settings, save_settings
 from ..adapters.win_input import (
+    BitmapInfo,
     Msg,
     Point,
     client_to_screen_point,
@@ -154,6 +157,7 @@ from ..adapters.win_input import (
     set_cursor_position,
     tap_hotkey,
     temporarily_make_window_topmost,
+    gdi32,
     user32,
     window_client_size,
 )
@@ -210,6 +214,11 @@ MEDIA_SOUND_ALIASES = (
 POTION_TIME_EPSILON_SECONDS = 1e-9
 POTION_PENDING_SEND_CAPTURE_GUARD_SECONDS = 0.20
 POTION_EXPERIENCE_DEFER_SECONDS = 1.0
+DIRECT_BAR_BIT_COUNT = 32
+DIRECT_BAR_BYTES_PER_PIXEL = 4
+DIB_RGB_COLORS = 0
+GDI_BI_RGB = 0
+GDI_SRCCOPY = 0x00CC0020
 STAT_WINDOW_EXP_LABEL_TEMPLATE_MATCH_THRESHOLD = 0.80
 STAT_WINDOW_EXP_LABEL_TEMPLATE_PATH = PROJECT_ROOT / "maple_star" / "assets" / "stat_window_exp_label.png"
 HUD_LABEL_TEMPLATE_PATHS = {
@@ -303,7 +312,6 @@ class AutoPotionController:
         self.pickup_disable_hold_started_at = -999.0
         self.pickup_enabled = False
         self.pickup_held_vk = 0
-        self.last_pickup_key_down_at = -999.0
         self.hp_potion_held_vk = 0
         self.mp_potion_held_vk = 0
         self.emergency_stop_requested = False
@@ -314,6 +322,9 @@ class AutoPotionController:
         }
         self.bottom_bar_regions: dict[str, tuple[int, int, int, int]] = {}
         self.bottom_bar_track_regions: dict[str, tuple[int, int, int, int]] = {}
+        self.bottom_bar_regions_client: dict[str, tuple[int, int, int, int]] = {}
+        self.bottom_bar_track_regions_client: dict[str, tuple[int, int, int, int]] = {}
+        self.bottom_bar_client_size: tuple[int, int] | None = None
         self.bottom_hud_layout: BottomHudLayout | None = None
         self.bottom_bar_regions_at = -999.0
         self.bottom_bar_client_bounds: tuple[int, int, int, int] | None = None
@@ -1018,24 +1029,17 @@ class AutoPotionController:
             self.gui.show_toggle_notice("拾取鍵設定無效")
             return
 
-        now = time.monotonic()
-        if self.pickup_held_vk == pickup_vk and now - self.last_pickup_key_down_at < PICKUP_REASSERT_SECONDS:
-            return
         if self.pickup_held_vk == pickup_vk:
-            key_down(pickup_vk)
-            self.last_pickup_key_down_at = now
             return
         self._release_pickup_key()
         key_down(pickup_vk)
         self.pickup_held_vk = pickup_vk
-        self.last_pickup_key_down_at = now
 
     def _release_pickup_key(self) -> None:
         held_vk = getattr(self, "pickup_held_vk", 0)
         if not held_vk:
             return
         self.pickup_held_vk = 0
-        self.last_pickup_key_down_at = -999.0
         key_up(held_vk)
 
     def _potion_held_vk(self, bar_type: str) -> int:
@@ -1436,6 +1440,7 @@ class AutoPotionController:
 
             hp_percent = self._capture_bar_percent("hp")
             mp_percent = self._capture_bar_percent("mp")
+            self.next_capture_at = now + self._capture_interval_after_potion_sample(hp_percent, mp_percent)
             self.gui.set_current_percentages(hp_percent, mp_percent)
             self.gui.set_bar_detection_debug(
                 self._bar_detection_debug_text("hp"),
@@ -1587,6 +1592,10 @@ class AutoPotionController:
         previous_regions = dict(getattr(self, "bottom_bar_regions", {}))
         previous_track_regions = dict(getattr(self, "bottom_bar_track_regions", {}))
         previous_client_bounds = getattr(self, "bottom_bar_client_bounds", None)
+        if self._reuse_cached_bottom_bar_regions_with_direct_sample(now):
+            self._set_gameplay_hud_active(True, now)
+            return True
+
         if self._can_reuse_stale_bottom_bar_regions(
             previous_regions,
             previous_track_regions,
@@ -1630,6 +1639,87 @@ class AutoPotionController:
                 require_clear_tail=False,
                 tail_clear=None,
             )
+        return False
+
+    def _cache_bottom_bar_client_regions(self, client_bounds: tuple[int, int, int, int]) -> None:
+        client_left, client_top, client_width, client_height = client_bounds
+        self.bottom_bar_client_size = (client_width, client_height)
+        self.bottom_bar_regions_client = {
+            bar_type: self._screen_region_to_client(region, client_left, client_top)
+            for bar_type, region in getattr(self, "bottom_bar_regions", {}).items()
+        }
+        self.bottom_bar_track_regions_client = {
+            bar_type: self._screen_region_to_client(region, client_left, client_top)
+            for bar_type, region in getattr(self, "bottom_bar_track_regions", {}).items()
+        }
+
+    def _screen_region_to_client(
+        self,
+        region: tuple[int, int, int, int],
+        client_left: int,
+        client_top: int,
+    ) -> tuple[int, int, int, int]:
+        left, top, width, height = region
+        return left - client_left, top - client_top, width, height
+
+    def _client_region_to_screen(
+        self,
+        region: tuple[int, int, int, int],
+        client_left: int,
+        client_top: int,
+    ) -> tuple[int, int, int, int]:
+        left, top, width, height = region
+        return client_left + left, client_top + top, width, height
+
+    def _cached_bottom_bar_screen_regions_for_current_client(
+        self,
+    ) -> tuple[
+        dict[str, tuple[int, int, int, int]],
+        dict[str, tuple[int, int, int, int]],
+        tuple[int, int, int, int],
+    ] | None:
+        try:
+            client_bounds = self._foreground_client_bounds()
+        except Exception:
+            return None
+        client_left, client_top, client_width, client_height = client_bounds
+        if getattr(self, "bottom_bar_client_size", None) != (client_width, client_height):
+            return None
+
+        client_regions = getattr(self, "bottom_bar_regions_client", {})
+        if "hp" not in client_regions or "mp" not in client_regions:
+            return None
+
+        regions = {
+            bar_type: self._client_region_to_screen(region, client_left, client_top)
+            for bar_type, region in client_regions.items()
+        }
+        track_regions = {
+            bar_type: self._client_region_to_screen(region, client_left, client_top)
+            for bar_type, region in getattr(self, "bottom_bar_track_regions_client", {}).items()
+        }
+        return regions, track_regions, client_bounds
+
+    def _reuse_cached_bottom_bar_regions_with_direct_sample(self, now: float) -> bool:
+        cached = self._cached_bottom_bar_screen_regions_for_current_client()
+        if cached is None:
+            return False
+        regions, track_regions, client_bounds = cached
+        for bar_type in ("mp", "hp"):
+            sample_region = track_regions.get(bar_type) or regions.get(bar_type)
+            if sample_region is None:
+                continue
+            percent, reason, _tail_clear = self._sample_direct_bar_percent_from_region(
+                sample_region,
+                bar_type,
+                require_clear_tail=False,
+            )
+            if percent is not None and reason != "OK:EmptyTrack":
+                self.bottom_bar_regions = regions
+                self.bottom_bar_track_regions = track_regions
+                self.bottom_bar_client_bounds = client_bounds
+                self.bottom_bar_regions_at = now
+                return True
         return False
 
     def _can_reuse_stale_bottom_bar_regions(
@@ -2912,7 +3002,10 @@ class AutoPotionController:
             effective_now = self._experience_effective_time(now)
         image_signature = self._experience_ocr_image_signature(image_frames)
         continuity_hint = self._experience_ocr_continuity_hint(effective_now)
-        if self._is_repeated_completed_experience_ocr_signature(image_signature):
+        if (
+            self._is_repeated_completed_experience_ocr_signature(image_signature)
+            and not self._experience_level_up_recovery_expected(continuity_hint)
+        ):
             self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
             snapshot = self.experience_tracker.snapshot(effective_now)
             snapshot.status = "EXP ROI 未變化，保留統計"
@@ -2968,7 +3061,7 @@ class AutoPotionController:
     def _experience_level_up_recovery_expected(self, hint: ExperienceOcrContinuityHint | None) -> bool:
         if hint is None or hint.percent is None:
             return False
-        return hint.percent >= 95.0
+        return hint.percent >= EXP_LEVEL_WRAP_HIGH_PERCENT
 
     def _copy_experience_ocr_image(self, image: np.ndarray | ExperienceOcrImage) -> np.ndarray | ExperienceOcrImage:
         if isinstance(image, ExperienceOcrImage):
@@ -3637,6 +3730,40 @@ class AutoPotionController:
             return True
         return now - self._last_potion_drink_at(bar_type) < POTION_EXPERIENCE_DEFER_SECONDS
 
+    def _capture_interval_after_potion_sample(self, hp_percent: float | None, mp_percent: float | None) -> float:
+        if not self._should_use_fast_potion_capture_interval(hp_percent, mp_percent):
+            return DEFAULT_CAPTURE_INTERVAL_SECONDS
+        return min(DEFAULT_CAPTURE_INTERVAL_SECONDS, POTION_FAST_CAPTURE_INTERVAL_SECONDS)
+
+    def _should_use_fast_potion_capture_interval(
+        self,
+        hp_percent: float | None,
+        mp_percent: float | None,
+    ) -> bool:
+        if not self.auto_drink_enabled or self._has_out_of_potion_hold():
+            return False
+        return self._potion_bar_near_threshold(
+            hp_percent,
+            self.settings.hp_enabled,
+            self.settings.hp_threshold_percent,
+        ) or self._potion_bar_near_threshold(
+            mp_percent,
+            self.settings.mp_enabled,
+            self.settings.mp_threshold_percent,
+        )
+
+    def _potion_bar_near_threshold(
+        self,
+        percent: float | None,
+        enabled: bool,
+        threshold_percent: float,
+    ) -> bool:
+        if not enabled or percent is None:
+            return False
+        if threshold_percent >= 100.0 and percent >= 100.0:
+            return False
+        return percent <= threshold_percent + POTION_NEAR_THRESHOLD_FAST_MARGIN_PERCENT
+
     def _defer_experience_for_potion_priority(self, now: float) -> None:
         if self.experience_ocr_burst is not None:
             self.experience_ocr_burst = None
@@ -4105,6 +4232,10 @@ class AutoPotionController:
         bar_type: str,
         require_clear_tail: bool = False,
     ) -> float | None:
+        direct_percent = self._capture_bar_percent_direct(bar_type, require_clear_tail=require_clear_tail)
+        if direct_percent is not None:
+            return direct_percent
+
         region = self._find_bottom_bar_pair_regions().get(bar_type)
         if region is None:
             self._set_bar_detection_debug(
@@ -4127,6 +4258,41 @@ class AutoPotionController:
             "自動定位",
             track_region=track_region,
         )
+
+    def _capture_bar_percent_direct(self, bar_type: str, *, require_clear_tail: bool = False) -> float | None:
+        if require_clear_tail:
+            return None
+        cached = self._cached_bottom_bar_screen_regions_for_current_client()
+        if cached is None:
+            return None
+        regions, track_regions, client_bounds = cached
+        region = track_regions.get(bar_type) or regions.get(bar_type)
+        if region is None:
+            return None
+
+        percent, reason, tail_clear = self._sample_direct_bar_percent_from_region(
+            region,
+            bar_type,
+            require_clear_tail=require_clear_tail,
+        )
+        if percent is None:
+            return None
+        self.bottom_bar_regions = regions
+        self.bottom_bar_track_regions = track_regions
+        self.bottom_bar_client_bounds = client_bounds
+        self.bottom_bar_regions_at = time.monotonic()
+        self._remember_stable_bar_sample(bar_type, percent, region)
+        self._set_bar_detection_debug(
+            bar_type,
+            source="直接取色",
+            region=region,
+            percent=percent,
+            success=True,
+            reason=reason,
+            require_clear_tail=require_clear_tail,
+            tail_clear=tail_clear,
+        )
+        return percent
 
     def _find_bottom_bar_pair_regions(
         self,
@@ -4214,7 +4380,12 @@ class AutoPotionController:
         else:
             self.bottom_bar_regions = {}
             self.bottom_bar_track_regions = {}
+            self.bottom_bar_regions_client = {}
+            self.bottom_bar_track_regions_client = {}
+            self.bottom_bar_client_size = None
             self.bottom_hud_layout = None
+        if self.bottom_bar_regions:
+            self._cache_bottom_bar_client_regions(client_bounds)
         return self.bottom_bar_regions
 
     def _bottom_bar_search_areas(self, client_bounds: tuple[int, int, int, int]) -> list[HudSearchArea]:
@@ -5155,6 +5326,94 @@ class AutoPotionController:
         ):
             return 0.0, "OK:EmptyTrack", True if require_clear_tail and percent_image is not None else tail_clear
         return percent, reason, tail_clear
+
+    def _sample_direct_bar_percent_from_region(
+        self,
+        region: tuple[int, int, int, int],
+        bar_type: str,
+        *,
+        require_clear_tail: bool = False,
+    ) -> tuple[float | None, str, bool | None]:
+        if require_clear_tail:
+            return None, "直接取色不做尾段遮擋確認", None
+
+        image = self._direct_bar_image_from_region(region)
+        if image is None:
+            return None, "直接取色讀取畫面失敗", None
+
+        mask = self._bar_color_mask(image, bar_type)
+        percent, reason, tail_clear = self._percent_from_bar_mask_result(
+            mask,
+            image,
+            require_clear_tail=False,
+        )
+        if (
+            percent is None
+            and reason == "找不到符合顏色的填滿欄位"
+            and self._bar_track_looks_empty(mask, image)
+        ):
+            return 0.0, "OK:EmptyTrack", None
+        if percent is None:
+            return None, f"直接取色{reason}", tail_clear
+        if reason == "OK":
+            reason = "OK:Direct"
+        elif reason == "OK:FullWidth":
+            reason = "OK:DirectFullWidth"
+        return percent, reason, tail_clear
+
+    def _direct_bar_image_from_region(self, region: tuple[int, int, int, int]) -> np.ndarray | None:
+        left, top, width, height = region
+        if width <= 0 or height <= 0:
+            return None
+
+        screen_dc = user32.GetDC(None)
+        if not screen_dc:
+            return None
+        memory_dc = gdi32.CreateCompatibleDC(screen_dc)
+        if not memory_dc:
+            user32.ReleaseDC(None, screen_dc)
+            return None
+
+        bitmap = gdi32.CreateCompatibleBitmap(screen_dc, width, height)
+        if not bitmap:
+            gdi32.DeleteDC(memory_dc)
+            user32.ReleaseDC(None, screen_dc)
+            return None
+
+        old_bitmap = gdi32.SelectObject(memory_dc, bitmap)
+        try:
+            if not gdi32.BitBlt(memory_dc, 0, 0, width, height, screen_dc, left, top, GDI_SRCCOPY):
+                return None
+
+            bitmap_info = BitmapInfo()
+            bitmap_info.bmiHeader.biSize = ctypes.sizeof(bitmap_info.bmiHeader)
+            bitmap_info.bmiHeader.biWidth = width
+            bitmap_info.bmiHeader.biHeight = -height
+            bitmap_info.bmiHeader.biPlanes = 1
+            bitmap_info.bmiHeader.biBitCount = DIRECT_BAR_BIT_COUNT
+            bitmap_info.bmiHeader.biCompression = GDI_BI_RGB
+            bitmap_info.bmiHeader.biSizeImage = width * height * DIRECT_BAR_BYTES_PER_PIXEL
+
+            buffer = (ctypes.c_ubyte * bitmap_info.bmiHeader.biSizeImage)()
+            copied_rows = gdi32.GetDIBits(
+                memory_dc,
+                bitmap,
+                0,
+                height,
+                ctypes.byref(buffer),
+                ctypes.byref(bitmap_info),
+                DIB_RGB_COLORS,
+            )
+            if copied_rows != height:
+                return None
+
+            return np.frombuffer(buffer, dtype=np.uint8).reshape((height, width, DIRECT_BAR_BYTES_PER_PIXEL)).copy()
+        finally:
+            if old_bitmap:
+                gdi32.SelectObject(memory_dc, old_bitmap)
+            gdi32.DeleteObject(bitmap)
+            gdi32.DeleteDC(memory_dc)
+            user32.ReleaseDC(None, screen_dc)
 
     def _bar_percent_inputs(
         self,
