@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import ctypes
+import threading
+import time
 from pathlib import Path
 from contextlib import contextmanager
 from ctypes import wintypes
+from typing import Callable
 
 from ..constants import (
     INPUT_KEYBOARD,
@@ -13,6 +16,20 @@ from ..constants import (
 INPUT_MOUSE = 0
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTUP = 0x0010
+WH_MOUSE_LL = 14
+HC_ACTION = 0
+LLMHF_INJECTED = 0x00000001
+PM_REMOVE = 0x0001
+MOUSE_LOCK_DRAIN_SECONDS = 0.02
+MOUSE_LOCK_THREAD_JOIN_SECONDS = 0.5
+MOUSE_ACTIVITY_THREAD_JOIN_SECONDS = 0.5
+MOUSE_ACTIVITY_POLL_SECONDS = 0.05
+MOUSE_PROGRAMMATIC_IGNORE_SECONDS = 0.25
+MOUSE_ACTIVITY_BUTTON_VKS = (0x01, 0x02, 0x04, 0x05, 0x06)
+MOUSE_ACTIVITY_ASYNC_DOWN_MASK = 0x8000
+_PROGRAMMATIC_MOUSE_IGNORE_UNTIL = 0.0
+_PROGRAMMATIC_MOUSE_LOCK = threading.Lock()
 
 GWL_EXSTYLE = -20
 WS_EX_TOPMOST = 0x00000008
@@ -133,6 +150,16 @@ class Msg(ctypes.Structure):
     ]
 
 
+class LowLevelMouseHookStruct(ctypes.Structure):
+    _fields_ = [
+        ("pt", Point),
+        ("mouseData", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
+    ]
+
+
 class ProcessEntry32(ctypes.Structure):
     _fields_ = [
         ("dwSize", wintypes.DWORD),
@@ -172,8 +199,11 @@ class BitmapInfo(ctypes.Structure):
 
 
 EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+LowLevelMouseProc = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -238,6 +268,24 @@ _get_window_long_ptr.argtypes = [wintypes.HWND, ctypes.c_int]
 _get_window_long_ptr.restype = ctypes.c_longlong
 user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(Input), ctypes.c_int]
 user32.SendInput.restype = wintypes.UINT
+user32.SetWindowsHookExW.argtypes = [ctypes.c_int, LowLevelMouseProc, wintypes.HINSTANCE, wintypes.DWORD]
+user32.SetWindowsHookExW.restype = wintypes.HHOOK
+user32.UnhookWindowsHookEx.argtypes = [wintypes.HHOOK]
+user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+user32.PeekMessageW.argtypes = [
+    ctypes.POINTER(Msg),
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.UINT,
+    wintypes.UINT,
+]
+user32.PeekMessageW.restype = wintypes.BOOL
+user32.TranslateMessage.argtypes = [ctypes.POINTER(Msg)]
+user32.TranslateMessage.restype = wintypes.BOOL
+user32.DispatchMessageW.argtypes = [ctypes.POINTER(Msg)]
+user32.DispatchMessageW.restype = wintypes.LPARAM
+user32.CallNextHookEx.argtypes = [wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+user32.CallNextHookEx.restype = ctypes.c_long
 user32.VkKeyScanW.argtypes = [wintypes.WCHAR]
 user32.VkKeyScanW.restype = ctypes.c_short
 user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
@@ -329,6 +377,17 @@ def mouse_input(flags: int) -> Input:
     )
 
 
+def release_mouse_buttons() -> None:
+    events = (Input * 2)(
+        mouse_input(MOUSEEVENTF_LEFTUP),
+        mouse_input(MOUSEEVENTF_RIGHTUP),
+    )
+    sent = user32.SendInput(2, events, ctypes.sizeof(Input))
+    if sent != 2:
+        raise ctypes.WinError(ctypes.get_last_error())
+    mark_programmatic_mouse_input()
+
+
 def key_down(vk_code: int) -> None:
     event = keyboard_input(vk_code)
     sent = user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(Input))
@@ -363,6 +422,182 @@ def get_cursor_position() -> tuple[int, int]:
 def set_cursor_position(x: int, y: int) -> None:
     if not user32.SetCursorPos(int(x), int(y)):
         raise ctypes.WinError(ctypes.get_last_error())
+    mark_programmatic_mouse_input()
+
+
+def mark_programmatic_mouse_input() -> None:
+    global _PROGRAMMATIC_MOUSE_IGNORE_UNTIL
+    with _PROGRAMMATIC_MOUSE_LOCK:
+        _PROGRAMMATIC_MOUSE_IGNORE_UNTIL = time.monotonic() + MOUSE_PROGRAMMATIC_IGNORE_SECONDS
+
+
+def programmatic_mouse_input_is_recent(now: float | None = None) -> bool:
+    check_at = time.monotonic() if now is None else float(now)
+    with _PROGRAMMATIC_MOUSE_LOCK:
+        return check_at <= _PROGRAMMATIC_MOUSE_IGNORE_UNTIL
+
+
+def pump_pending_windows_messages() -> int:
+    processed = 0
+    message = Msg()
+    while user32.PeekMessageW(ctypes.byref(message), None, 0, 0, PM_REMOVE):
+        user32.TranslateMessage(ctypes.byref(message))
+        user32.DispatchMessageW(ctypes.byref(message))
+        processed += 1
+    return processed
+
+
+def sleep_while_pumping_messages(seconds: float) -> None:
+    deadline = time.monotonic() + max(0.0, float(seconds))
+    while True:
+        pump_pending_windows_messages()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.005, remaining))
+
+
+class _LowLevelMouseInputLock:
+    def __init__(self) -> None:
+        self._ready = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="maple-star-mouse-lock", daemon=True)
+        self._hook_handle = wintypes.HHOOK()
+        self._proc: LowLevelMouseProc | None = None
+        self._error: BaseException | None = None
+
+    def start(self) -> None:
+        self._thread.start()
+        if not self._ready.wait(MOUSE_LOCK_THREAD_JOIN_SECONDS):
+            self.stop()
+            raise RuntimeError("滑鼠鎖定 hook 啟動逾時")
+        if self._error is not None:
+            raise self._error
+        if not self._hook_handle:
+            raise RuntimeError("滑鼠鎖定 hook 未啟動")
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(MOUSE_LOCK_THREAD_JOIN_SECONDS)
+
+    def _run(self) -> None:
+        hook_handle = wintypes.HHOOK()
+
+        @LowLevelMouseProc
+        def mouse_proc(n_code: int, w_param: int, l_param: int) -> int:
+            if n_code == HC_ACTION:
+                event = ctypes.cast(l_param, ctypes.POINTER(LowLevelMouseHookStruct)).contents
+                if not (int(event.flags) & LLMHF_INJECTED):
+                    return 1
+            return user32.CallNextHookEx(hook_handle, n_code, w_param, l_param)
+
+        self._proc = mouse_proc
+        hook_handle = user32.SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, kernel32.GetModuleHandleW(None), 0)
+        if not hook_handle:
+            self._error = ctypes.WinError(ctypes.get_last_error())
+            self._ready.set()
+            return
+        self._hook_handle = hook_handle
+        self._ready.set()
+        try:
+            while not self._stop.is_set():
+                pump_pending_windows_messages()
+                time.sleep(0.001)
+            pump_pending_windows_messages()
+        finally:
+            user32.UnhookWindowsHookEx(hook_handle)
+            self._hook_handle = wintypes.HHOOK()
+
+
+@contextmanager
+def temporary_mouse_input_lock():
+    release_mouse_buttons()
+    original_position = get_cursor_position()
+    mouse_lock = _LowLevelMouseInputLock()
+    mouse_lock.start()
+    try:
+        yield original_position
+    finally:
+        try:
+            set_cursor_position(*original_position)
+            time.sleep(MOUSE_LOCK_DRAIN_SECONDS)
+            set_cursor_position(*original_position)
+        finally:
+            mouse_lock.stop()
+            set_cursor_position(*original_position)
+
+
+class PhysicalMouseActivityObserver:
+    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+        self._clock = clock or time.monotonic
+        self._lock = threading.Lock()
+        self._last_activity_at = -999.0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_cursor_position: tuple[int, int] | None = None
+        self._last_button_state: tuple[bool, ...] | None = None
+
+    @property
+    def last_activity_at(self) -> float:
+        with self._lock:
+            return self._last_activity_at
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._poll_loop, name="maple-star-mouse-activity", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(MOUSE_ACTIVITY_THREAD_JOIN_SECONDS)
+        self._thread = None
+
+    def record_mouse_event(self, flags: int) -> bool:
+        if int(flags) & LLMHF_INJECTED:
+            return False
+        self._record_activity(self._clock())
+        return True
+
+    def poll_once(self) -> bool:
+        now = self._clock()
+        try:
+            cursor_position = get_cursor_position()
+            button_state = self._mouse_button_state()
+        except Exception:
+            return False
+        if self._last_cursor_position is None or self._last_button_state is None:
+            self._last_cursor_position = cursor_position
+            self._last_button_state = button_state
+            return False
+
+        changed = cursor_position != self._last_cursor_position or button_state != self._last_button_state
+        self._last_cursor_position = cursor_position
+        self._last_button_state = button_state
+        if not changed:
+            return False
+        if programmatic_mouse_input_is_recent(now):
+            return False
+        self._record_activity(now)
+        return True
+
+    def _record_activity(self, observed_at: float) -> None:
+        with self._lock:
+            self._last_activity_at = observed_at
+
+    def _poll_loop(self) -> None:
+        while not self._stop.is_set():
+            self.poll_once()
+            time.sleep(MOUSE_ACTIVITY_POLL_SECONDS)
+
+    def _mouse_button_state(self) -> tuple[bool, ...]:
+        return tuple(
+            bool(user32.GetAsyncKeyState(vk_code) & MOUSE_ACTIVITY_ASYNC_DOWN_MASK)
+            for vk_code in MOUSE_ACTIVITY_BUTTON_VKS
+        )
 
 
 def client_to_screen_point(hwnd: int, x: int, y: int) -> tuple[int, int]:

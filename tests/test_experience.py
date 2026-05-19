@@ -50,12 +50,15 @@ from maple_star.experience import (
     format_ocr_success_rate,
     format_rate_confidence,
     parse_stat_window_exp_text,
+    parse_experience_tooltip_text,
     parse_exp_percent_text,
     parse_current_exp_text,
     prepare_experience_ocr_image,
+    prepare_experience_tooltip_ocr_images,
     prepare_experience_ocr_images,
     reading_from_paddle_result,
     reading_from_stat_window_text,
+    reading_from_tooltip_text,
     save_experience_ocr_learning_case,
     suppress_subprocess_windows,
 )
@@ -89,6 +92,28 @@ class ExperienceTests(unittest.TestCase):
         self.assertIsNone(parse_stat_window_exp_text("MP 351/2856"))
         self.assertIsNone(parse_stat_window_exp_text("物理防禦力 3489(3189+300)"))
         self.assertFalse(reading_from_stat_window_text("HP 13916 / 14051", 0.95).success)
+
+    def test_tooltip_exp_parser_accepts_current_total_text(self):
+        self.assertEqual(parse_experience_tooltip_text("EXP: 15261854 / 85538273"), (15261854, 85538273, 17.84))
+        self.assertEqual(parse_experience_tooltip_text("ＥＸＰ：15,261,854／85,538,273"), (15261854, 85538273, 17.84))
+        self.assertEqual(parse_experience_tooltip_text("XP:32522194 /85538273"), (32522194, 85538273, 38.02))
+        self.assertEqual(parse_experience_tooltip_text("EXP:20470996 7 85538273"), (20470996, 85538273, 23.93))
+        self.assertEqual(parse_experience_tooltip_text("EXP:20960579785538273"), (20960579, 85538273, 24.5))
+
+        reading = reading_from_tooltip_text("EXP: 15261854 / 85538273", 0.93)
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 15261854)
+        self.assertEqual(reading.percent, 17.84)
+        self.assertEqual(reading.source, "tooltip")
+        self.assertEqual(reading.reason, "OK:Tooltip")
+
+    def test_tooltip_exp_parser_rejects_invalid_or_contaminated_text(self):
+        self.assertIsNone(parse_experience_tooltip_text("HP: 14875 / 15353"))
+        self.assertIsNone(parse_experience_tooltip_text("EXP: 20 / 0"))
+        self.assertIsNone(parse_experience_tooltip_text("EXP: 200 / 100"))
+        self.assertIsNone(parse_experience_tooltip_text("EXP: 15261854"))
+        self.assertFalse(reading_from_tooltip_text("MP: 2188 / 2937", 0.99).success)
 
     def test_paddle_reader_burst_uses_consensus_result(self):
         reader = PaddleExperienceTextReader()
@@ -413,6 +438,18 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(variants[0].shape[0], 18)
         self.assertGreater(variants[1].shape[0], variants[0].shape[0])
         self.assertGreater(variants[1].shape[1], variants[0].shape[1])
+
+    def test_prepare_experience_tooltip_ocr_images_crops_and_adds_binary_variant(self):
+        image = np.zeros((46, 340, 4), dtype=np.uint8)
+        image[:, :, :3] = (80, 70, 55)
+        image[:, :, 3] = 255
+        image[16:28, 28:260, :3] = 240
+
+        variants = prepare_experience_tooltip_ocr_images(image)
+
+        self.assertGreaterEqual(len(variants), 4)
+        self.assertLessEqual(variants[1].shape[0], image.shape[0])
+        self.assertGreater(variants[2].shape[0], variants[1].shape[0])
 
     def test_binary_fallback_removes_dense_horizontal_borders(self):
         image = np.zeros((30, 180, 4), dtype=np.uint8)

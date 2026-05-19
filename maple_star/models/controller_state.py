@@ -26,6 +26,7 @@ class ExperienceOcrJob:
     future: Future[ExperienceTextReading]
     image_signature: "ExperienceOcrImageSignature | None" = None
     image_frames: list[list[np.ndarray | ExperienceOcrImage]] | None = None
+    source: str = ""
 
 
 @dataclass
@@ -33,7 +34,7 @@ class ExperienceOcrBurst:
     started_at: float
     next_capture_at: float
     regions: list[tuple[int, int, int, int]]
-    image_frames: list[list[np.ndarray]]
+    image_frames: list[list[np.ndarray | ExperienceOcrImage]]
     capture_count: int
 
 

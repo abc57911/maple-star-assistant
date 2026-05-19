@@ -1696,6 +1696,8 @@ class PaddleExperienceTextReader:
         continuity_hint: ExperienceOcrContinuityHint | None = None,
     ) -> ExperienceTextReading:
         ocr_image = _coerce_experience_ocr_image(image)
+        if ocr_image.source_id.startswith("tooltip"):
+            return self.read_tooltip_exp(ocr_image)
         image_array = ocr_image.image
         bar_percent = estimate_experience_bar_percent(
             image_array,
@@ -1756,6 +1758,30 @@ class PaddleExperienceTextReader:
 
         final = best_reading or ExperienceTextReading(reason="能力值 EXP OCR 未取得文字", source="stat_window")
         return final
+
+    def read_tooltip_exp(self, image: np.ndarray | ExperienceOcrImage) -> ExperienceTextReading:
+        ocr_image = _coerce_experience_ocr_image(image)
+        if not self._ensure_ocr():
+            return ExperienceTextReading(
+                reason=self.unavailable_reason or "PaddleOCR 尚未初始化",
+                source="tooltip",
+            )
+
+        best_reading: ExperienceTextReading | None = None
+        variants = prepare_experience_tooltip_ocr_images(ocr_image.image)
+        for variant in variants:
+            try:
+                result = self._predict(variant)
+            except Exception as exc:
+                reading = ExperienceTextReading(reason=f"浮動 EXP OCR 辨識失敗：{exc}", source="tooltip")
+            else:
+                reading = reading_from_tooltip_paddle_result(result)
+            if reading.success:
+                return reading
+            if best_reading is None or reading.confidence > best_reading.confidence:
+                best_reading = reading
+
+        return best_reading or ExperienceTextReading(reason="浮動 EXP OCR 未取得文字", source="tooltip")
 
     def _read_with_paddle(
         self,
@@ -1879,6 +1905,10 @@ def read_experience_burst_frames_in_worker(
 
 def read_stat_window_exp_in_worker(image: np.ndarray | ExperienceOcrImage) -> ExperienceTextReading:
     return _experience_worker_reader().read_stat_window_exp(image)
+
+
+def read_experience_tooltip_in_worker(image: np.ndarray | ExperienceOcrImage) -> ExperienceTextReading:
+    return _experience_worker_reader().read_tooltip_exp(image)
 
 
 def prepare_experience_ocr_image(image: np.ndarray) -> np.ndarray:
@@ -2008,6 +2038,84 @@ def prepare_stat_window_exp_ocr_images(image: np.ndarray) -> list[np.ndarray]:
         seen.add(key)
         unique.append(variant)
     return unique
+
+
+def prepare_experience_tooltip_ocr_images(image: np.ndarray) -> list[np.ndarray]:
+    bgr = image[:, :, :3] if image.ndim >= 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if bgr.size == 0:
+        return [bgr]
+
+    cropped = _crop_experience_tooltip_text_image(bgr)
+    padding = max(5, round(max(1, cropped.shape[0]) * 0.24))
+    padded = cv2.copyMakeBorder(
+        cropped,
+        padding,
+        padding,
+        padding,
+        padding,
+        borderType=cv2.BORDER_REPLICATE,
+    )
+    scaled = cv2.resize(
+        padded,
+        (
+            max(1, padded.shape[1] * EXP_STAT_WINDOW_OCR_PREPARED_SCALE),
+            max(1, padded.shape[0] * EXP_STAT_WINDOW_OCR_PREPARED_SCALE),
+        ),
+        interpolation=cv2.INTER_CUBIC,
+    )
+    contrast = cv2.convertScaleAbs(scaled, alpha=1.55, beta=8)
+    sharpened = _sharpen_experience_text_image(contrast)
+    binary = _binarize_experience_tooltip_text_image(scaled)
+    variants = [bgr, cropped, scaled, contrast, sharpened]
+    if binary is not None:
+        variants.append(binary)
+
+    unique: list[np.ndarray] = []
+    seen: set[tuple[tuple[int, ...], bytes]] = set()
+    for variant in variants:
+        key = (tuple(int(part) for part in variant.shape), variant.tobytes())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(variant)
+    return unique
+
+
+def _crop_experience_tooltip_text_image(image: np.ndarray) -> np.ndarray:
+    bgr = image[:, :, :3]
+    sample = bgr.astype(np.float32)
+    blue = sample[:, :, 0]
+    green = sample[:, :, 1]
+    red = sample[:, :, 2]
+    luminance = red * 0.299 + green * 0.587 + blue * 0.114
+    chroma = np.maximum.reduce([red, green, blue]) - np.minimum.reduce([red, green, blue])
+    mask = (luminance >= 135.0) & (chroma <= 95.0)
+    ys, xs = np.nonzero(mask)
+    if not xs.size or not ys.size:
+        return bgr
+    top = max(0, int(ys.min()) - 4)
+    bottom = min(bgr.shape[0], int(ys.max()) + 5)
+    left = max(0, int(xs.min()) - 6)
+    right = min(bgr.shape[1], int(xs.max()) + 7)
+    if right - left < 20 or bottom - top < 8:
+        return bgr
+    return bgr[top:bottom, left:right].copy()
+
+
+def _binarize_experience_tooltip_text_image(image: np.ndarray) -> np.ndarray | None:
+    bgr = image[:, :, :3]
+    if bgr.size == 0:
+        return None
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    binary = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        17,
+        -4,
+    )
+    return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
 
 
 def _contrast_experience_text_image(image: np.ndarray) -> np.ndarray:
@@ -3821,6 +3929,14 @@ def reading_from_stat_window_paddle_result(result: object) -> ExperienceTextRead
     return reading_from_stat_window_text(text, confidence)
 
 
+def reading_from_tooltip_paddle_result(result: object) -> ExperienceTextReading:
+    text_items = extract_paddle_text_items(result)
+    text = " ".join(item_text for item_text, _score in text_items).strip()
+    confidence_values = [score for _item_text, score in text_items if score is not None]
+    confidence = float(np.mean(confidence_values)) if confidence_values else 0.0
+    return reading_from_tooltip_text(text, confidence)
+
+
 def reading_from_stat_window_text(text: str, confidence: float = 1.0) -> ExperienceTextReading:
     parsed = parse_stat_window_exp_text(text)
     if parsed is None:
@@ -3846,6 +3962,34 @@ def reading_from_stat_window_text(text: str, confidence: float = 1.0) -> Experie
         success=True,
         reason="OK:StatWindow",
         source="stat_window",
+    )
+
+
+def reading_from_tooltip_text(text: str, confidence: float = 1.0) -> ExperienceTextReading:
+    parsed = parse_experience_tooltip_text(text)
+    if parsed is None:
+        return ExperienceTextReading(
+            text=text,
+            confidence=confidence,
+            reason="浮動 EXP 解析失敗",
+            source="tooltip",
+        )
+    if confidence < EXP_STAT_WINDOW_OCR_ACCEPT_CONFIDENCE:
+        return ExperienceTextReading(
+            text=text,
+            confidence=confidence,
+            reason="浮動 EXP OCR 信心未達可信門檻",
+            source="tooltip",
+        )
+    current_exp, _total_exp, percent = parsed
+    return ExperienceTextReading(
+        current_exp=current_exp,
+        percent=percent,
+        text=text,
+        confidence=confidence,
+        success=True,
+        reason="OK:Tooltip",
+        source="tooltip",
     )
 
 
@@ -3885,6 +4029,84 @@ def parse_stat_window_exp_text(text: str) -> tuple[int, float] | None:
         percent = float(match.group(2).replace(",", "."))
         if 0.0 <= percent <= 100.0:
             return int(exp_digits), percent
+    return None
+
+
+def parse_experience_tooltip_text(text: str) -> tuple[int, int, float] | None:
+    if not text:
+        return None
+
+    preserved = unicodedata.normalize("NFKC", text)
+    preserved = preserved.translate(
+        str.maketrans(
+            {
+                "％": "%",
+                "﹪": "%",
+                "．": ".",
+                "。": ".",
+                "：": ":",
+                "，": ",",
+                "／": "/",
+            }
+        )
+    )
+    compact = normalize_exp_ocr_text(text)
+    upper = compact.upper()
+    if not upper:
+        return None
+    if re.search(r"(?:^|[^A-Z])(?:HP|MP)[:：]?\d", upper):
+        return None
+
+    if "EXP" in upper:
+        parse_source = upper[upper.rfind("EXP") + 3 :]
+    elif "XP" in upper:
+        if re.search(r"[A-Z]", re.sub(r"XP", "", upper)):
+            return None
+        parse_source = upper[upper.rfind("XP") + 2 :]
+    else:
+        if re.search(r"[A-Z]", upper):
+            return None
+        parse_source = upper
+
+    preserved_upper = preserved.upper()
+    if "EXP" in preserved_upper:
+        preserved_source = preserved_upper[preserved_upper.rfind("EXP") + 3 :]
+    elif "XP" in preserved_upper:
+        preserved_source = preserved_upper[preserved_upper.rfind("XP") + 2 :]
+    else:
+        preserved_source = preserved_upper
+
+    matches = list(re.finditer(r"([0-9][0-9,.]*)/([0-9][0-9,.]*)", parse_source))
+    matches.extend(re.finditer(r"([0-9][0-9,.]*)\s+7\s+([0-9][0-9,.]*)", preserved_source))
+    for match in reversed(matches):
+        current_segment = match.group(1)
+        total_segment = match.group(2)
+        if not _exp_number_separators_are_valid(current_segment):
+            continue
+        if not _exp_number_separators_are_valid(total_segment):
+            continue
+        current_digits = "".join(char for char in current_segment if char.isdigit())
+        total_digits = "".join(char for char in total_segment if char.isdigit())
+        if not current_digits or not total_digits:
+            continue
+        current_exp = int(current_digits)
+        total_exp = int(total_digits)
+        if total_exp <= 0 or current_exp < 0 or current_exp > total_exp:
+            continue
+        return current_exp, total_exp, round(current_exp / total_exp * 100.0, 2)
+
+    digits = "".join(char for char in parse_source if char.isdigit())
+    for total_length in range(7, min(12, len(digits) - 2) + 1):
+        separator_index = len(digits) - total_length - 1
+        if separator_index <= 0 or digits[separator_index] != "7":
+            continue
+        current_digits = digits[:separator_index]
+        total_digits = digits[separator_index + 1 :]
+        current_exp = int(current_digits)
+        total_exp = int(total_digits)
+        if total_exp <= 0 or current_exp > total_exp:
+            continue
+        return current_exp, total_exp, round(current_exp / total_exp * 100.0, 2)
     return None
 
 
@@ -4801,6 +5023,7 @@ def normalize_exp_ocr_text(text: str) -> str:
             "】": "]",
             "（": "(",
             "）": ")",
+            "／": "/",
             "×": "X",
             " ": "",
             "\t": "",

@@ -120,7 +120,7 @@ from ..models.experience import (
     ExperienceTextReading,
     PaddleExperienceTextReader,
     read_experience_burst_frames_in_worker,
-    read_stat_window_exp_in_worker,
+    read_experience_tooltip_in_worker,
 )
 from ..models.controller_state import (
     BarDetectionDebug,
@@ -145,6 +145,7 @@ from ..services.settings_store import load_settings, save_settings
 from ..adapters.win_input import (
     BitmapInfo,
     Msg,
+    PhysicalMouseActivityObserver,
     Point,
     client_to_screen_point,
     click_client_point,
@@ -155,7 +156,9 @@ from ..adapters.win_input import (
     key_up,
     parse_vk_key,
     set_cursor_position,
+    sleep_while_pumping_messages,
     tap_hotkey,
+    temporary_mouse_input_lock,
     temporarily_make_window_topmost,
     gdi32,
     user32,
@@ -172,6 +175,16 @@ EXPERIENCE_TEXT_HEIGHT_RATIO = 1.35
 EXPERIENCE_WIDE_TEXT_LEFT_RATIO = 0.34
 EXPERIENCE_WIDE_TEXT_RIGHT_PADDING_RATIO = 0.08
 EXPERIENCE_WIDE_TEXT_HEIGHT_RATIO = 1.65
+EXPERIENCE_TOOLTIP_SETTLE_SECONDS = 0.16
+EXPERIENCE_TOOLTIP_RETRY_SETTLE_SECONDS = 0.08
+EXPERIENCE_TOOLTIP_CAPTURE_ATTEMPTS = 3
+EXPERIENCE_TOOLTIP_CURSOR_TOLERANCE_PIXELS = 2
+EXPERIENCE_MOUSE_IDLE_DELAY_SECONDS = 5.0
+EXPERIENCE_TOOLTIP_CURSOR_RIGHT_PADDING_RATIO = 0.08
+EXPERIENCE_TOOLTIP_ROI_OFFSET_X = 8
+EXPERIENCE_TOOLTIP_ROI_OFFSET_Y = -28
+EXPERIENCE_TOOLTIP_ROI_WIDTH = 340
+EXPERIENCE_TOOLTIP_ROI_HEIGHT = 46
 EXPERIENCE_OCR_SIGNATURE_THUMB_WIDTH = 96
 EXPERIENCE_OCR_SIGNATURE_THUMB_HEIGHT = 18
 EXPERIENCE_OCR_SIGNATURE_CHANGED_PIXEL_DELTA = 4
@@ -347,12 +360,21 @@ class AutoPotionController:
         self.experience_baseline_ocr_job: ExperienceOcrJob | None = None
         self.experience_baseline_calibration_attempts = 0
         self.next_experience_baseline_calibration_at = 0.0
+        self.experience_tooltip_baseline_failed = False
         self.experience_10m_checkpoint_capture: ExperienceBaselineCalibration | None = None
         self.experience_10m_checkpoint_ocr_job: ExperienceOcrJob | None = None
         self.next_experience_10m_checkpoint_at = 0.0
         self.experience_10m_checkpoint_stopped = False
         self.experience_10m_checkpoint_attempts = 0
+        self.experience_10m_checkpoint_tooltip_failed = False
         self.experience_baseline_cursor_position: tuple[int, int] | None = None
+        self.mouse_activity_observer: PhysicalMouseActivityObserver | None = PhysicalMouseActivityObserver()
+        try:
+            self.mouse_activity_observer.start()
+        except Exception:
+            log_exception("滑鼠活動 observer 啟動失敗")
+            self.mouse_activity_observer = None
+        self.last_experience_mouse_idle_delay_log_at = -999.0
         self.last_completed_experience_ocr_signature: ExperienceOcrImageSignature | None = None
         self.last_failed_experience_ocr_signature: ExperienceOcrImageSignature | None = None
         self.last_experience_ocr_error_at = -999.0
@@ -1171,9 +1193,6 @@ class AutoPotionController:
     def toggle_experience_efficiency(self) -> None:
         now = time.monotonic()
         enabled = not self.settings.exp_efficiency_enabled
-        if enabled and not self._experience_stat_hotkey_is_configured():
-            self._show_experience_stat_hotkey_required("經驗統計啟用", beep=True)
-            return
         self.gui.set_exp_efficiency_enabled(enabled)
         if self._runtime_processes_active():
             runtime = getattr(self, "runtime_processes", None)
@@ -1496,9 +1515,6 @@ class AutoPotionController:
             self.next_settings_save_at = None
 
     def reset_experience_statistics(self) -> bool:
-        if not self._experience_stat_hotkey_is_configured():
-            self._show_experience_stat_hotkey_required("經驗統計重置", beep=True)
-            return False
         if self._runtime_processes_active():
             runtime = getattr(self, "runtime_processes", None)
             if runtime is not None:
@@ -1541,45 +1557,8 @@ class AutoPotionController:
     def _experience_clock_is_paused(self) -> bool:
         return getattr(self, "experience_pause_started_at", None) is not None
 
-    def _experience_stat_hotkey_is_configured(self) -> bool:
-        hotkey = getattr(self.settings, "character_stat_hotkey", "").strip()
-        if not hotkey:
-            return False
-        try:
-            parse_vk_key(hotkey)
-        except ValueError:
-            return False
-        return True
-
-    def _show_experience_stat_hotkey_required(self, action: str, *, beep: bool = False) -> None:
-        self.settings.exp_efficiency_enabled = False
-        self.gui.set_exp_efficiency_enabled(False)
-        self._stop_experience_ocr_job()
-        snapshot = self.experience_tracker.snapshot(self._experience_effective_time(time.monotonic()))
-        snapshot.status = "請先設定能力值快捷鍵"
-        self.gui.set_experience_snapshot(snapshot)
-        self.gui.set_status("請先設定能力值快捷鍵才能使用經驗統計")
-        self.gui.show_toggle_notice("請先設定能力值快捷鍵")
-        self.last_action = f"{action}：能力值快捷鍵未設定"
-        if beep:
-            self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
-        print(f"{action}：請先設定能力值快捷鍵")
-
     def _enforce_experience_prerequisites(self, now: float) -> bool:
-        if not getattr(self.settings, "exp_efficiency_enabled", False):
-            return True
-        if self._experience_stat_hotkey_is_configured():
-            return True
-        self.settings.exp_efficiency_enabled = False
-        self.gui.set_exp_efficiency_enabled(False)
-        self._stop_experience_ocr_job()
-        effective_now = self._pause_experience_clock(now)
-        snapshot = self.experience_tracker.snapshot(effective_now)
-        snapshot.status = "請先設定能力值快捷鍵"
-        self.gui.set_experience_snapshot(snapshot)
-        self.gui.set_status("請先設定能力值快捷鍵才能使用經驗統計")
-        self.last_action = "經驗統計：能力值快捷鍵未設定"
-        return False
+        return True
 
     def _set_gameplay_hud_active(self, active: bool, now: float) -> None:
         self.gameplay_hud_active = active
@@ -1773,12 +1752,78 @@ class AutoPotionController:
         if self._process_experience_ocr_job(now, effective_now=effective_now):
             return
 
+        if self._defer_experience_reading_for_mouse_activity(now, effective_now, phase="ocr_capture"):
+            return
+
         if self._continue_experience_ocr_burst(now, effective_now=effective_now):
             return
 
         if now < self.next_experience_capture_at:
             return
 
+        if self._start_experience_tooltip_ocr_capture(now, effective_now=effective_now):
+            return
+
+        self._start_bottom_experience_ocr_capture(now, effective_now=effective_now)
+
+    def _defer_experience_reading_for_mouse_activity(
+        self,
+        now: float,
+        effective_now: float,
+        *,
+        phase: str,
+    ) -> bool:
+        observer = getattr(self, "mouse_activity_observer", None)
+        last_activity_at = getattr(observer, "last_activity_at", -999.0) if observer is not None else -999.0
+        defer_until = float(last_activity_at) + EXPERIENCE_MOUSE_IDLE_DELAY_SECONDS
+        if now >= defer_until:
+            return False
+
+        self.next_experience_capture_at = max(self.next_experience_capture_at, defer_until)
+        snapshot = self.experience_tracker.snapshot(effective_now)
+        remaining = max(0.0, defer_until - now)
+        snapshot.status = f"滑鼠操作中，延後 EXP 讀取 {remaining:.1f}s"
+        self.gui.set_experience_snapshot(snapshot)
+        self._log_experience_mouse_idle_delay(now, effective_now, phase, last_activity_at, defer_until, snapshot)
+        return True
+
+    def _log_experience_mouse_idle_delay(
+        self,
+        now: float,
+        effective_now: float,
+        phase: str,
+        last_activity_at: float,
+        defer_until: float,
+        snapshot: ExperienceSnapshot,
+    ) -> None:
+        if now - float(getattr(self, "last_experience_mouse_idle_delay_log_at", -999.0)) < 0.5:
+            return
+        self.last_experience_mouse_idle_delay_log_at = now
+        log_experience_debug(
+            {
+                "event": "experience_mouse_idle_delay",
+                "phase": phase,
+                "source": "mouse",
+                "decision": "deferred",
+                "completed_at": self._experience_debug_number(now),
+                "effective_now": self._experience_debug_number(effective_now),
+                "last_mouse_activity_at": self._experience_debug_number(last_activity_at),
+                "defer_until": self._experience_debug_number(defer_until),
+                "idle_delay_seconds": self._experience_debug_number(EXPERIENCE_MOUSE_IDLE_DELAY_SECONDS),
+                "tracker_status": str(getattr(self.experience_tracker, "last_status", snapshot.status)),
+                "sample_count": self._experience_debug_number(snapshot.sample_count),
+                "sample_attempt_count": self._experience_debug_number(snapshot.sample_attempt_count),
+                "sample_accept_count": self._experience_debug_number(snapshot.sample_accept_count),
+                "ocr_attempt_count": self._experience_debug_number(snapshot.ocr_attempt_count),
+                "ocr_success_count": self._experience_debug_number(snapshot.ocr_success_count),
+            }
+        )
+
+    def _last_experience_tooltip_skip_was_mouse_drift(self) -> bool:
+        details = getattr(self, "last_experience_tooltip_capture_skip", None)
+        return isinstance(details, dict) and details.get("reason") == "浮動 EXP 擷取期間滑鼠偏移"
+
+    def _start_bottom_experience_ocr_capture(self, now: float, *, effective_now: float) -> bool:
         regions = self._experience_text_regions()
         if not regions:
             self._clear_failed_experience_ocr_signature()
@@ -1787,16 +1832,16 @@ class AutoPotionController:
             snapshot = self.experience_tracker.snapshot(effective_now)
             snapshot.status = "找不到 EXP 區域，保留統計" if snapshot.sample_count else "找不到 EXP 區域"
             self.gui.set_experience_snapshot(snapshot)
-            return
+            return False
 
         images = self._capture_experience_text_images(regions)
         if self._should_use_fast_experience_ocr_path():
-            self._submit_experience_ocr_burst(now, [images], effective_now=effective_now)
-            return
+            self._submit_experience_ocr_burst(now, [images], effective_now=effective_now, source="bottom")
+            return True
 
         if EXPERIENCE_BURST_CAPTURE_ATTEMPTS <= 1:
-            self._submit_experience_ocr_burst(now, [images], effective_now=effective_now)
-            return
+            self._submit_experience_ocr_burst(now, [images], effective_now=effective_now, source="bottom")
+            return True
 
         self.experience_ocr_burst = ExperienceOcrBurst(
             started_at=now,
@@ -1808,6 +1853,40 @@ class AutoPotionController:
         snapshot = self.experience_tracker.snapshot(effective_now)
         snapshot.status = f"擷取經驗樣本中 1/{EXPERIENCE_BURST_CAPTURE_ATTEMPTS}"
         self.gui.set_experience_snapshot(snapshot)
+        return True
+
+    def _start_experience_tooltip_ocr_capture(self, now: float, *, effective_now: float) -> bool:
+        ocr_image = self._capture_experience_tooltip_image()
+        if ocr_image is None:
+            self._log_experience_tooltip_capture_skip(
+                now,
+                effective_now,
+                phase="ocr_capture",
+            )
+            if self._last_experience_tooltip_skip_was_mouse_drift():
+                self.next_experience_capture_at = max(
+                    self.next_experience_capture_at,
+                    now + EXPERIENCE_MOUSE_IDLE_DELAY_SECONDS,
+                )
+                snapshot = self.experience_tracker.snapshot(effective_now)
+                snapshot.status = "滑鼠操作中，延後 EXP 讀取"
+                self.gui.set_experience_snapshot(snapshot)
+                return True
+            return False
+        image_signature = self._experience_ocr_image_signature([[ocr_image]])
+        future = self.experience_ocr_executor.submit(read_experience_tooltip_in_worker, ocr_image)
+        self.experience_ocr_job = ExperienceOcrJob(
+            submitted_at=now,
+            future=future,
+            image_signature=image_signature,
+            image_frames=[[ocr_image]],
+            source="tooltip",
+        )
+        self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
+        snapshot = self.experience_tracker.snapshot(effective_now)
+        snapshot.status = "讀取浮動 EXP"
+        self.gui.set_experience_snapshot(snapshot)
+        return True
 
     def _should_use_fast_experience_ocr_path(self) -> bool:
         tracker_samples = getattr(self.experience_tracker, "samples", [])
@@ -1827,46 +1906,11 @@ class AutoPotionController:
         if self._process_experience_baseline_ocr_job(now, effective_now=effective_now):
             return True
 
-        state = getattr(self, "experience_baseline_calibration", None)
-        if state is None:
-            if not self._should_start_experience_baseline_calibration(now):
-                return False
-            state = ExperienceBaselineCalibration(
-                phase="opening_stats",
-                attempt=int(getattr(self, "experience_baseline_calibration_attempts", 0)) + 1,
-                started_at=now,
-                next_step_at=now,
-            )
-            self.experience_baseline_calibration = state
-            self.experience_baseline_calibration_attempts = state.attempt
-            snapshot = self.experience_tracker.snapshot(effective_now)
-            snapshot.status = "按能力值快捷鍵校準 EXP 基準"
-            self.gui.set_experience_snapshot(snapshot)
-            self._log_experience_baseline_calibration_event(
-                phase=state.phase,
-                decision="started",
-                completed_at=now,
-                effective_now=effective_now,
-                snapshot=snapshot,
-                click_step="character_stat_hotkey",
-            )
-
-        if now - state.started_at > EXPERIENCE_BASELINE_CALIBRATION_TIMEOUT_SECONDS:
-            self._fail_experience_baseline_calibration(
-                now,
-                effective_now,
-                "能力值 baseline 校準逾時",
-                close_ui=state.opened_ui,
-            )
+        if not self._should_start_experience_baseline_calibration(now):
             return False
-        if now < state.next_step_at:
+        if self._defer_experience_reading_for_mouse_activity(now, effective_now, phase="tooltip_baseline"):
             return True
-
-        if state.phase == "opening_stats":
-            return self._advance_experience_baseline_open_stats(state, now, effective_now)
-        if state.phase == "locating_stat_exp_roi":
-            return self._advance_experience_baseline_capture_roi(state, now, effective_now)
-        return False
+        return self._try_start_experience_tooltip_baseline(now, effective_now)
 
     def _process_experience_baseline_ocr_job(
         self,
@@ -1884,7 +1928,7 @@ class AutoPotionController:
             elapsed_seconds = max(0.0, now - job.submitted_at)
             if elapsed_seconds >= EXPERIENCE_CAPTURE_INTERVAL_SECONDS:
                 snapshot = self.experience_tracker.snapshot(effective_now)
-                snapshot.status = f"能力值 EXP OCR 延遲：{elapsed_seconds:.1f}s"
+                snapshot.status = f"浮動 EXP baseline OCR 延遲：{elapsed_seconds:.1f}s"
                 self.gui.set_experience_snapshot(snapshot)
             return True
 
@@ -1892,17 +1936,17 @@ class AutoPotionController:
         try:
             reading = job.future.result()
         except Exception as exc:
-            log_exception("能力值 EXP OCR 背景工作失敗")
-            reading = ExperienceTextReading(reason=f"能力值 EXP OCR 背景工作失敗：{exc}", source="stat_window")
+            log_exception("浮動 EXP baseline OCR 背景工作失敗")
+            reading = ExperienceTextReading(reason=f"浮動 EXP baseline OCR 背景工作失敗：{exc}", source="tooltip")
         job_elapsed_ms = max(0.0, now - job.submitted_at) * 1000.0
         log_debug(
-            "EXP stat baseline OCR job "
+            "EXP tooltip baseline OCR job "
             f"elapsed_ms={job_elapsed_ms:.1f} result={'success' if reading.success else 'failure'} "
             f"{self._experience_reading_log_fields(reading)} | reason={reading.reason}"
         )
 
         if reading.success and reading.current_exp is not None:
-            tracker_reading = self._stat_window_baseline_exp_only_reading(reading)
+            tracker_reading = self._baseline_exp_only_reading(reading)
             self.experience_tracker.record_ocr_result(True)
             accepted = self.experience_tracker.add_reading(
                 effective_now,
@@ -1914,9 +1958,10 @@ class AutoPotionController:
             if accepted:
                 self._record_exp_10m_checkpoint(tracker_reading.current_exp, now)
                 snapshot = self.experience_tracker.snapshot(effective_now)
-                snapshot.status = "能力值 baseline 已校準"
+                snapshot.status = "浮動 EXP baseline 已校準"
                 self.next_experience_capture_at = now + BAR_CONFIRM_RETRY_DELAY_SECONDS
                 self._clear_failed_experience_ocr_signature()
+                self.experience_tooltip_baseline_failed = False
                 self._log_experience_baseline_calibration_event(
                     phase="ocr_baseline",
                     decision="accepted",
@@ -1926,7 +1971,7 @@ class AutoPotionController:
                     reading=tracker_reading,
                     roi_found=True,
                     closed_by_esc=False,
-                    close_method="character_stat_hotkey",
+                    close_method="tooltip",
                     job_elapsed_ms=job_elapsed_ms,
                 )
                 self._clear_experience_baseline_calibration_state()
@@ -1934,7 +1979,7 @@ class AutoPotionController:
                 return True
 
             self._log_experience_sample_rejection(now, self.experience_tracker.last_status, tracker_reading)
-            snapshot.status = "能力值 baseline 已拒絕，改用底部 EXP OCR"
+            snapshot.status = "浮動 EXP baseline 已拒絕，改用底部 EXP OCR"
             self._log_experience_baseline_calibration_event(
                 phase="ocr_baseline",
                 decision="rejected",
@@ -1944,7 +1989,7 @@ class AutoPotionController:
                 reading=tracker_reading,
                 roi_found=True,
                 closed_by_esc=False,
-                close_method="character_stat_hotkey",
+                close_method="tooltip",
                 fallback_reason=self.experience_tracker.last_status,
                 job_elapsed_ms=job_elapsed_ms,
             )
@@ -1955,24 +2000,56 @@ class AutoPotionController:
         self.experience_tracker.record_ocr_result(False)
         self._log_experience_ocr_error(now, reading.reason, reading.text)
         snapshot = self.experience_tracker.snapshot(effective_now)
-        if snapshot.sample_count == 0:
-            snapshot.status = "能力值 baseline OCR 失敗，改用底部 EXP OCR"
+        self.experience_tooltip_baseline_failed = False
+        snapshot.status = "浮動 EXP baseline 失敗，等待下一輪 EXP OCR"
         self._log_experience_baseline_calibration_event(
-            phase="ocr_baseline",
-            decision="ocr_failure",
+            phase="tooltip_baseline",
+            decision="tooltip_retry",
             completed_at=now,
             effective_now=effective_now,
             snapshot=snapshot,
             reading=reading,
             roi_found=True,
             closed_by_esc=False,
-            close_method="character_stat_hotkey",
+            close_method="tooltip",
             fallback_reason=reading.reason,
             job_elapsed_ms=job_elapsed_ms,
         )
-        self._finish_failed_experience_baseline_calibration(now)
         self.gui.set_experience_snapshot(snapshot)
         return False
+
+    def _try_start_experience_tooltip_baseline(self, now: float, effective_now: float) -> bool:
+        ocr_image = self._capture_experience_tooltip_image()
+        if ocr_image is None:
+            self._log_experience_tooltip_capture_skip(
+                now,
+                effective_now,
+                phase="tooltip_baseline",
+            )
+            return False
+        image_signature = self._experience_ocr_image_signature([[ocr_image]])
+        future = self.experience_ocr_executor.submit(read_experience_tooltip_in_worker, ocr_image)
+        self.experience_baseline_ocr_job = ExperienceOcrJob(
+            submitted_at=now,
+            future=future,
+            image_signature=image_signature,
+            image_frames=[[ocr_image]],
+            source="tooltip_baseline",
+        )
+        snapshot = self.experience_tracker.snapshot(effective_now)
+        snapshot.status = "讀取浮動 EXP baseline"
+        self.gui.set_experience_snapshot(snapshot)
+        self._log_experience_baseline_calibration_event(
+            phase="tooltip_baseline",
+            decision="captured",
+            completed_at=now,
+            effective_now=effective_now,
+            snapshot=snapshot,
+            roi_found=True,
+            click_step="tooltip_exp_roi",
+            close_method="tooltip",
+        )
+        return True
 
     def _process_exp_10m_checkpoint(
         self,
@@ -1986,41 +2063,11 @@ class AutoPotionController:
         if self._process_exp_10m_checkpoint_ocr_job(now, effective_now=effective_now):
             return True
 
-        state = getattr(self, "experience_10m_checkpoint_capture", None)
-        if state is None:
-            if not self._should_start_exp_10m_checkpoint(now):
-                return False
-            state = ExperienceBaselineCalibration(
-                phase="opening_stats",
-                attempt=int(getattr(self, "experience_10m_checkpoint_attempts", 0)) + 1,
-                started_at=now,
-                next_step_at=now,
-            )
-            self.experience_10m_checkpoint_capture = state
-            self.experience_10m_checkpoint_attempts = state.attempt
-            snapshot = self.experience_tracker.snapshot(effective_now)
-            snapshot.status = self._exp_10m_checkpoint_attempt_status("按能力值快捷鍵擷取 EXP-10", state.attempt)
-            self.gui.set_experience_snapshot(snapshot)
-            self._log_exp_10m_checkpoint_event(
-                phase=state.phase,
-                decision="started",
-                completed_at=now,
-                effective_now=effective_now,
-                snapshot=snapshot,
-                click_step="character_stat_hotkey",
-            )
-
-        if now - state.started_at > EXPERIENCE_BASELINE_CALIBRATION_TIMEOUT_SECONDS:
-            self._fail_exp_10m_checkpoint(now, effective_now, "能力值 EXP-10 擷取逾時", close_ui=state.opened_ui)
+        if not self._should_start_exp_10m_checkpoint(now):
+            return False
+        if self._defer_experience_reading_for_mouse_activity(now, effective_now, phase="tooltip_checkpoint"):
             return True
-        if now < state.next_step_at:
-            return True
-
-        if state.phase == "opening_stats":
-            return self._advance_exp_10m_checkpoint_open_stats(state, now, effective_now)
-        if state.phase == "locating_stat_exp_roi":
-            return self._advance_exp_10m_checkpoint_capture_roi(state, now, effective_now)
-        return False
+        return self._try_start_exp_10m_checkpoint_tooltip(now, effective_now)
 
     def _process_exp_10m_checkpoint_ocr_job(self, now: float, *, effective_now: float) -> bool:
         job = getattr(self, "experience_10m_checkpoint_ocr_job", None)
@@ -2042,10 +2089,10 @@ class AutoPotionController:
             reading = job.future.result()
         except Exception as exc:
             log_exception("EXP-10 OCR 背景工作失敗")
-            reading = ExperienceTextReading(reason=f"EXP-10 OCR 背景工作失敗：{exc}", source="stat_window")
+            reading = ExperienceTextReading(reason=f"EXP-10 OCR 背景工作失敗：{exc}", source="tooltip")
         job_elapsed_ms = max(0.0, now - job.submitted_at) * 1000.0
         log_debug(
-            "EXP-10 stat OCR job "
+            "EXP-10 tooltip OCR job "
             f"elapsed_ms={job_elapsed_ms:.1f} result={'success' if reading.success else 'failure'} "
             f"{self._experience_reading_log_fields(reading)} | reason={reading.reason}"
         )
@@ -2063,7 +2110,7 @@ class AutoPotionController:
                 snapshot=snapshot,
                 reading=reading,
                 roi_found=True,
-                close_method="character_stat_hotkey",
+                close_method="tooltip",
                 job_elapsed_ms=job_elapsed_ms,
             )
             self._clear_exp_10m_checkpoint_capture_state()
@@ -2073,95 +2120,54 @@ class AutoPotionController:
         self.experience_tracker.record_ocr_result(False)
         self._log_experience_ocr_error(now, reading.reason, reading.text)
         snapshot = self.experience_tracker.snapshot(effective_now)
+        self.experience_10m_checkpoint_tooltip_failed = False
+        self.next_experience_10m_checkpoint_at = now + EXPERIENCE_10M_CHECKPOINT_OCR_RETRY_DELAY_SECONDS
+        snapshot.status = "浮動 EXP-10 失敗，稍後重試"
         self._log_exp_10m_checkpoint_event(
-            phase="ocr_checkpoint",
-            decision="ocr_failure",
+            phase="tooltip_checkpoint",
+            decision="tooltip_retry",
             completed_at=now,
             effective_now=effective_now,
             snapshot=snapshot,
             reading=reading,
             roi_found=True,
-            close_method="character_stat_hotkey",
+            close_method="tooltip",
             fallback_reason=reading.reason,
             job_elapsed_ms=job_elapsed_ms,
         )
-        self._retry_or_stop_exp_10m_checkpoint_after_ocr_failure(now, effective_now, reading.reason)
-        return True
-
-    def _advance_exp_10m_checkpoint_open_stats(
-        self,
-        state: ExperienceBaselineCalibration,
-        now: float,
-        effective_now: float,
-    ) -> bool:
-        self._move_cursor_for_experience_baseline_capture()
-        if not self._toggle_experience_stat_window():
-            self._restore_experience_baseline_cursor()
-            self._fail_exp_10m_checkpoint(now, effective_now, "能力值快捷鍵設定無效", close_ui=False)
-            return True
-        state.opened_ui = True
-        state.phase = "locating_stat_exp_roi"
-        state.next_step_at = now + EXPERIENCE_BASELINE_CALIBRATION_STATS_SETTLE_SECONDS
-        snapshot = self.experience_tracker.snapshot(effective_now)
-        snapshot.status = self._exp_10m_checkpoint_attempt_status(
-            "按能力值快捷鍵開啟 EXP-10 視窗中",
-            state.attempt,
-        )
         self.gui.set_experience_snapshot(snapshot)
-        self._log_exp_10m_checkpoint_event(
-            phase=state.phase,
-            decision="hotkey",
-            completed_at=now,
-            effective_now=effective_now,
-            snapshot=snapshot,
-            click_step="character_stat_hotkey",
-        )
         return True
 
-    def _advance_exp_10m_checkpoint_capture_roi(
-        self,
-        state: ExperienceBaselineCalibration,
-        now: float,
-        effective_now: float,
-    ) -> bool:
-        try:
-            image, _bounds = self._capture_foreground_client_image()
-            roi = self._locate_stat_window_exp_roi(image)
-        except Exception:
-            self._restore_experience_baseline_cursor()
-            raise
-        if roi is None:
-            self._fail_exp_10m_checkpoint(now, effective_now, "找不到能力值 EXP ROI", close_ui=True)
-            return True
-
-        left, top, width, height = roi
-        crop = image[top : top + height, left : left + width].copy()
-        ocr_image = ExperienceOcrImage(crop, source_id="stat_window", roi_offset=roi)
+    def _try_start_exp_10m_checkpoint_tooltip(self, now: float, effective_now: float) -> bool:
+        ocr_image = self._capture_experience_tooltip_image()
+        if ocr_image is None:
+            self._log_experience_tooltip_capture_skip(
+                now,
+                effective_now,
+                phase="tooltip_checkpoint",
+            )
+            return False
         image_signature = self._experience_ocr_image_signature([[ocr_image]])
-        self._close_experience_baseline_calibration_ui()
-        state.opened_ui = False
-        self._restore_experience_baseline_cursor()
-        future = self.experience_ocr_executor.submit(read_stat_window_exp_in_worker, ocr_image)
+        future = self.experience_ocr_executor.submit(read_experience_tooltip_in_worker, ocr_image)
         self.experience_10m_checkpoint_ocr_job = ExperienceOcrJob(
             submitted_at=now,
             future=future,
             image_signature=image_signature,
             image_frames=[[ocr_image]],
+            source="tooltip_checkpoint",
         )
-        state.phase = "ocr_checkpoint"
-        state.next_step_at = now
         snapshot = self.experience_tracker.snapshot(effective_now)
-        snapshot.status = self._exp_10m_checkpoint_attempt_status("讀取能力值 EXP-10", state.attempt)
+        snapshot.status = self._exp_10m_checkpoint_attempt_status("讀取浮動 EXP-10")
         self.gui.set_experience_snapshot(snapshot)
         self._log_exp_10m_checkpoint_event(
-            phase=state.phase,
+            phase="tooltip_checkpoint",
             decision="captured",
             completed_at=now,
             effective_now=effective_now,
             snapshot=snapshot,
             roi_found=True,
-            close_method="character_stat_hotkey",
-            click_step="stat_exp_roi",
+            click_step="tooltip_exp_roi",
+            close_method="tooltip",
         )
         return True
 
@@ -2196,10 +2202,12 @@ class AutoPotionController:
         self.next_experience_10m_checkpoint_at = now + EXPERIENCE_10M_CHECKPOINT_INTERVAL_SECONDS
         self.experience_10m_checkpoint_stopped = False
         self.experience_10m_checkpoint_attempts = 0
+        self.experience_10m_checkpoint_tooltip_failed = False
 
     def _resume_exp_10m_checkpoint_schedule(self, now: float) -> None:
         self.experience_10m_checkpoint_stopped = False
         self.experience_10m_checkpoint_attempts = 0
+        self.experience_10m_checkpoint_tooltip_failed = False
         if isinstance(getattr(self.experience_tracker, "exp_10m_checkpoint_exp", None), int):
             self.next_experience_10m_checkpoint_at = now + EXPERIENCE_10M_CHECKPOINT_INTERVAL_SECONDS
 
@@ -2208,6 +2216,7 @@ class AutoPotionController:
         self.next_experience_10m_checkpoint_at = 0.0
         self.experience_10m_checkpoint_stopped = False
         self.experience_10m_checkpoint_attempts = 0
+        self.experience_10m_checkpoint_tooltip_failed = False
 
     def _exp_10m_checkpoint_attempt_status(self, message: str, attempt: int | None = None) -> str:
         attempt = int(attempt if attempt is not None else getattr(self, "experience_10m_checkpoint_attempts", 0))
@@ -2264,7 +2273,7 @@ class AutoPotionController:
             snapshot=self.experience_tracker.snapshot(effective_now),
             fallback_reason=reason,
             closed_by_esc=close_ui,
-            close_method="character_stat_hotkey" if close_ui else "",
+            close_method="",
         )
         self._stop_exp_10m_checkpoint(now, effective_now, reason)
 
@@ -2314,7 +2323,7 @@ class AutoPotionController:
             {
                 "event": "experience_10m_checkpoint",
                 "phase": phase,
-                "source": "stat_window",
+                "source": reading.source if reading is not None and reading.source else close_method or "tooltip",
                 "roi_found": bool(roi_found),
                 "click_step": click_step,
                 "closed_by_esc": bool(closed_by_esc),
@@ -2341,7 +2350,7 @@ class AutoPotionController:
             }
         )
 
-    def _stat_window_baseline_exp_only_reading(self, reading: ExperienceTextReading) -> ExperienceTextReading:
+    def _baseline_exp_only_reading(self, reading: ExperienceTextReading) -> ExperienceTextReading:
         return ExperienceTextReading(
             current_exp=reading.current_exp,
             percent=None,
@@ -2355,81 +2364,6 @@ class AutoPotionController:
             continuity_status=reading.continuity_status,
             source=reading.source,
         )
-
-    def _advance_experience_baseline_open_stats(
-        self,
-        state: ExperienceBaselineCalibration,
-        now: float,
-        effective_now: float,
-    ) -> bool:
-        self._move_cursor_for_experience_baseline_capture()
-        if not self._toggle_experience_stat_window():
-            self._restore_experience_baseline_cursor()
-            self._fail_experience_baseline_calibration(now, effective_now, "能力值快捷鍵設定無效", close_ui=False)
-            return False
-        state.opened_ui = True
-        state.phase = "locating_stat_exp_roi"
-        state.next_step_at = now + EXPERIENCE_BASELINE_CALIBRATION_STATS_SETTLE_SECONDS
-        snapshot = self.experience_tracker.snapshot(effective_now)
-        snapshot.status = "按能力值快捷鍵開啟視窗中"
-        self.gui.set_experience_snapshot(snapshot)
-        self._log_experience_baseline_calibration_event(
-            phase=state.phase,
-            decision="hotkey",
-            completed_at=now,
-            effective_now=effective_now,
-            snapshot=snapshot,
-            click_step="character_stat_hotkey",
-        )
-        return True
-
-    def _advance_experience_baseline_capture_roi(
-        self,
-        state: ExperienceBaselineCalibration,
-        now: float,
-        effective_now: float,
-    ) -> bool:
-        try:
-            image, _bounds = self._capture_foreground_client_image()
-            roi = self._locate_stat_window_exp_roi(image)
-        except Exception:
-            self._restore_experience_baseline_cursor()
-            raise
-        if roi is None:
-            self._fail_experience_baseline_calibration(now, effective_now, "找不到能力值 EXP ROI", close_ui=True)
-            return False
-
-        left, top, width, height = roi
-        crop = image[top : top + height, left : left + width].copy()
-        ocr_image = ExperienceOcrImage(crop, source_id="stat_window", roi_offset=roi)
-        image_signature = self._experience_ocr_image_signature([[ocr_image]])
-        self._close_experience_baseline_calibration_ui()
-        state.opened_ui = False
-        self._restore_experience_baseline_cursor()
-        future = self.experience_ocr_executor.submit(read_stat_window_exp_in_worker, ocr_image)
-        self.experience_baseline_ocr_job = ExperienceOcrJob(
-            submitted_at=now,
-            future=future,
-            image_signature=image_signature,
-            image_frames=[[ocr_image]],
-        )
-        state.phase = "ocr_baseline"
-        state.next_step_at = now
-        snapshot = self.experience_tracker.snapshot(effective_now)
-        snapshot.status = "讀取能力值 EXP baseline"
-        self.gui.set_experience_snapshot(snapshot)
-        self._log_experience_baseline_calibration_event(
-            phase=state.phase,
-            decision="captured",
-            completed_at=now,
-            effective_now=effective_now,
-            snapshot=snapshot,
-            roi_found=True,
-            closed_by_esc=False,
-            close_method="character_stat_hotkey",
-            click_step="stat_exp_roi",
-        )
-        return True
 
     def _should_start_experience_baseline_calibration(self, now: float) -> bool:
         if not getattr(self.settings, "exp_efficiency_enabled", False):
@@ -2830,18 +2764,10 @@ class AutoPotionController:
             set_cursor_position(*original_position)
 
     def _close_experience_baseline_calibration_ui(self) -> None:
-        self._toggle_experience_stat_window()
+        return None
 
     def _toggle_experience_stat_window(self) -> bool:
-        hotkey = getattr(self.settings, "character_stat_hotkey", "").strip()
-        if not hotkey:
-            return False
-        try:
-            parse_vk_key(hotkey)
-            tap_hotkey(hotkey)
-        except (Exception, ValueError):
-            return False
-        return True
+        return False
 
     def _fail_experience_baseline_calibration(
         self,
@@ -2865,7 +2791,7 @@ class AutoPotionController:
             snapshot=snapshot,
             fallback_reason=reason,
             closed_by_esc=close_ui,
-            close_method="character_stat_hotkey" if close_ui else "",
+            close_method="",
         )
         self._finish_failed_experience_baseline_calibration(now)
         self.gui.set_experience_snapshot(snapshot)
@@ -2894,6 +2820,7 @@ class AutoPotionController:
         self._cancel_experience_baseline_calibration(close_ui=True)
         self.experience_baseline_calibration_attempts = 0
         self.next_experience_baseline_calibration_at = 0.0
+        self.experience_tooltip_baseline_failed = False
 
     def _log_experience_baseline_calibration_event(
         self,
@@ -2915,7 +2842,7 @@ class AutoPotionController:
             {
                 "event": "experience_baseline_calibration",
                 "phase": phase,
-                "source": "stat_window",
+                "source": reading.source if reading is not None and reading.source else close_method or "tooltip",
                 "roi_found": bool(roi_found),
                 "click_step": click_step,
                 "closed_by_esc": bool(closed_by_esc),
@@ -2967,12 +2894,222 @@ class AutoPotionController:
             return True
 
         self.experience_ocr_burst = None
-        self._submit_experience_ocr_burst(now, burst.image_frames, effective_now=effective_now)
+        self._submit_experience_ocr_burst(now, burst.image_frames, effective_now=effective_now, source="bottom")
         return True
 
     def _capture_experience_text_image(self, region: tuple[int, int, int, int]) -> np.ndarray:
         left, top, width, height = region
         return np.asarray(self.sct.grab({"left": left, "top": top, "width": width, "height": height})).copy()
+
+    def _capture_experience_tooltip_image(self) -> ExperienceOcrImage | None:
+        self.last_experience_tooltip_capture_skip = None
+        self.last_experience_tooltip_capture_debug = None
+        cursor_point = self._experience_tooltip_cursor_point()
+        if cursor_point is None:
+            self._remember_experience_tooltip_capture_skip("找不到 EXP track 游標目標")
+            return None
+        roi = self._experience_tooltip_roi(cursor_point)
+        if roi is None:
+            self._remember_experience_tooltip_capture_skip("浮動 EXP ROI 無效", cursor_point=cursor_point)
+            return None
+        capture_debug: dict[str, object] = {
+            "cursor_point": cursor_point,
+            "roi": roi,
+            "attempts": [],
+        }
+        try:
+            with temporary_mouse_input_lock() as original_cursor_position:
+                capture_debug["original_cursor_position"] = original_cursor_position
+                attempts = max(1, EXPERIENCE_TOOLTIP_CAPTURE_ATTEMPTS)
+                for attempt_index in range(attempts):
+                    set_cursor_position(*cursor_point)
+                    sleep_seconds = (
+                        EXPERIENCE_TOOLTIP_SETTLE_SECONDS
+                        if attempt_index == 0
+                        else EXPERIENCE_TOOLTIP_RETRY_SETTLE_SECONDS
+                    )
+                    sleep_while_pumping_messages(sleep_seconds)
+                    cursor_before_grab = get_cursor_position()
+                    attempt_debug = {
+                        "attempt": attempt_index + 1,
+                        "cursor_before_grab": cursor_before_grab,
+                    }
+                    capture_debug["attempts"].append(attempt_debug)
+                    if not self._cursor_is_near(cursor_before_grab, cursor_point):
+                        attempt_debug["decision"] = "cursor_moved_before_grab"
+                        continue
+                    image = self._capture_experience_text_image(roi)
+                    cursor_after_grab = get_cursor_position()
+                    attempt_debug["cursor_after_grab"] = cursor_after_grab
+                    if not self._cursor_is_near(cursor_after_grab, cursor_point):
+                        attempt_debug["decision"] = "cursor_moved_after_grab"
+                        continue
+                    attempt_debug["decision"] = "captured"
+                    self.last_experience_tooltip_capture_debug = capture_debug
+                    return ExperienceOcrImage(image, source_id="tooltip", roi_offset=roi)
+        except Exception as exc:
+            self._remember_experience_tooltip_capture_skip(
+                f"浮動 EXP 擷取例外：{exc}",
+                cursor_point=cursor_point,
+                roi=roi,
+            )
+            log_debug(f"EXP tooltip capture skipped: {exc}")
+            return None
+        self._remember_experience_tooltip_capture_skip(
+            "浮動 EXP 擷取期間滑鼠偏移",
+            cursor_point=cursor_point,
+            roi=roi,
+            capture_debug=capture_debug,
+        )
+        return None
+
+    def _remember_experience_tooltip_capture_skip(
+        self,
+        reason: str,
+        *,
+        cursor_point: tuple[int, int] | None = None,
+        roi: tuple[int, int, int, int] | None = None,
+        capture_debug: dict[str, object] | None = None,
+    ) -> None:
+        layout = getattr(self, "bottom_hud_layout", None)
+        exp_track = getattr(layout, "exp_track_region", None) if layout is not None else None
+        track_regions = getattr(self, "bottom_bar_track_regions", {})
+        track_keys = sorted(str(key) for key in track_regions) if isinstance(track_regions, dict) else []
+        self.last_experience_tooltip_capture_skip = {
+            "reason": reason,
+            "cursor_point": cursor_point,
+            "roi": roi,
+            "exp_track_region": exp_track,
+            "has_bottom_hud_layout": layout is not None,
+            "bottom_bar_track_keys": track_keys,
+            "capture_debug": capture_debug,
+        }
+
+    def _log_experience_tooltip_capture_skip(
+        self,
+        now: float,
+        effective_now: float,
+        *,
+        phase: str,
+    ) -> None:
+        details = getattr(self, "last_experience_tooltip_capture_skip", None)
+        if not isinstance(details, dict):
+            details = {"reason": "浮動 EXP 擷取未取得影像"}
+        snapshot = self.experience_tracker.snapshot(effective_now)
+        log_experience_debug(
+            {
+                "event": "experience_tooltip_capture",
+                "phase": phase,
+                "source": "tooltip",
+                "decision": "skipped",
+                "reason": details.get("reason", ""),
+                "completed_at": self._experience_debug_number(now),
+                "effective_now": self._experience_debug_number(effective_now),
+                "cursor_point": list(details["cursor_point"]) if details.get("cursor_point") is not None else None,
+                "roi": list(details["roi"]) if details.get("roi") is not None else None,
+                "exp_track_region": (
+                    list(details["exp_track_region"]) if details.get("exp_track_region") is not None else None
+                ),
+                "has_bottom_hud_layout": bool(details.get("has_bottom_hud_layout")),
+                "bottom_bar_track_keys": details.get("bottom_bar_track_keys", []),
+                "capture_debug": self._experience_tooltip_capture_debug_payload(details.get("capture_debug")),
+                "tracker_status": str(getattr(self.experience_tracker, "last_status", snapshot.status)),
+                "sample_count": self._experience_debug_number(snapshot.sample_count),
+                "sample_attempt_count": self._experience_debug_number(snapshot.sample_attempt_count),
+                "sample_accept_count": self._experience_debug_number(snapshot.sample_accept_count),
+                "ocr_attempt_count": self._experience_debug_number(snapshot.ocr_attempt_count),
+                "ocr_success_count": self._experience_debug_number(snapshot.ocr_success_count),
+            }
+        )
+
+    def _cursor_is_near(self, actual: tuple[int, int], expected: tuple[int, int]) -> bool:
+        return (
+            abs(int(actual[0]) - int(expected[0])) <= EXPERIENCE_TOOLTIP_CURSOR_TOLERANCE_PIXELS
+            and abs(int(actual[1]) - int(expected[1])) <= EXPERIENCE_TOOLTIP_CURSOR_TOLERANCE_PIXELS
+        )
+
+    def _experience_tooltip_capture_debug_payload(self, value: object) -> dict[str, object] | None:
+        if not isinstance(value, dict):
+            return None
+
+        def point_payload(point: object) -> list[int] | None:
+            if not isinstance(point, (tuple, list)) or len(point) != 2:
+                return None
+            return [int(point[0]), int(point[1])]
+
+        attempts = []
+        for attempt in value.get("attempts", []):
+            if not isinstance(attempt, dict):
+                continue
+            attempts.append(
+                {
+                    "attempt": self._experience_debug_number(attempt.get("attempt")),
+                    "decision": str(attempt.get("decision", "")),
+                    "cursor_before_grab": point_payload(attempt.get("cursor_before_grab")),
+                    "cursor_after_grab": point_payload(attempt.get("cursor_after_grab")),
+                }
+            )
+        return {
+            "original_cursor_position": point_payload(value.get("original_cursor_position")),
+            "cursor_point": point_payload(value.get("cursor_point")),
+            "roi": list(value["roi"]) if isinstance(value.get("roi"), (tuple, list)) else None,
+            "attempts": attempts,
+        }
+
+    def _experience_tooltip_cursor_point(self) -> tuple[int, int] | None:
+        layout = getattr(self, "bottom_hud_layout", None)
+        exp_track = getattr(layout, "exp_track_region", None) if layout is not None else None
+        if exp_track is None:
+            track_regions = getattr(self, "bottom_bar_track_regions", {})
+            if isinstance(track_regions, dict):
+                exp_track = track_regions.get("exp")
+        if exp_track is None:
+            return None
+        left, top, width, height = exp_track
+        if width <= 0 or height <= 0:
+            return None
+        x = left + width - max(2, round(height * EXPERIENCE_TOOLTIP_CURSOR_RIGHT_PADDING_RATIO))
+        y = top + round(height * 0.50)
+        client_left, client_top, client_width, client_height = self._foreground_client_bounds()
+        if client_width <= 0 or client_height <= 0:
+            return None
+        return (
+            max(client_left, min(client_left + client_width - 1, int(x))),
+            max(client_top, min(client_top + client_height - 1, int(y))),
+        )
+
+    def _experience_tooltip_roi(self, cursor_point: tuple[int, int]) -> tuple[int, int, int, int] | None:
+        client_left, client_top, client_width, client_height = self._foreground_client_bounds()
+        if client_width <= 0 or client_height <= 0:
+            return None
+        left = cursor_point[0] + EXPERIENCE_TOOLTIP_ROI_OFFSET_X
+        top = cursor_point[1] + EXPERIENCE_TOOLTIP_ROI_OFFSET_Y
+        return self._clip_rect_to_client(
+            left,
+            top,
+            EXPERIENCE_TOOLTIP_ROI_WIDTH,
+            EXPERIENCE_TOOLTIP_ROI_HEIGHT,
+            (client_left, client_top, client_width, client_height),
+        )
+
+    def _clip_rect_to_client(
+        self,
+        left: int,
+        top: int,
+        width: int,
+        height: int,
+        client_bounds: tuple[int, int, int, int],
+    ) -> tuple[int, int, int, int] | None:
+        client_left, client_top, client_width, client_height = client_bounds
+        client_right = client_left + client_width
+        client_bottom = client_top + client_height
+        clipped_left = max(client_left, min(int(left), client_right - 1))
+        clipped_top = max(client_top, min(int(top), client_bottom - 1))
+        clipped_right = min(client_right, clipped_left + max(1, int(width)))
+        clipped_bottom = min(client_bottom, clipped_top + max(1, int(height)))
+        if clipped_right - clipped_left < 20 or clipped_bottom - clipped_top < 8:
+            return None
+        return clipped_left, clipped_top, clipped_right - clipped_left, clipped_bottom - clipped_top
 
     def _capture_experience_text_images(self, regions: list[tuple[int, int, int, int]]) -> list[ExperienceOcrImage]:
         images: list[ExperienceOcrImage] = []
@@ -2994,6 +3131,7 @@ class AutoPotionController:
         image_frames: list[list[np.ndarray | ExperienceOcrImage]],
         *,
         effective_now: float | None = None,
+        source: str = "bottom",
     ) -> None:
         if self._experience_clock_is_paused():
             self._stop_experience_ocr_job()
@@ -3038,6 +3176,7 @@ class AutoPotionController:
             future=future,
             image_signature=image_signature,
             image_frames=[[self._copy_experience_ocr_image(image) for image in images] for images in image_frames],
+            source=source,
         )
         self.next_experience_capture_at = now + EXPERIENCE_CAPTURE_INTERVAL_SECONDS
         snapshot = self.experience_tracker.snapshot(effective_now)
@@ -3190,7 +3329,7 @@ class AutoPotionController:
             reading = job.future.result()
         except Exception as exc:
             log_exception("OCR 背景工作失敗")
-            reading = ExperienceTextReading(reason=f"OCR 背景工作失敗：{exc}")
+            reading = ExperienceTextReading(reason=f"OCR 背景工作失敗：{exc}", source=job.source)
         job_elapsed_ms = max(0.0, now - job.submitted_at) * 1000.0
         self._log_experience_ocr_reading(reading)
         if reading.success and reading.current_exp is not None:
@@ -3271,6 +3410,24 @@ class AutoPotionController:
                 job_elapsed_ms=job_elapsed_ms,
             )
             self.gui.set_experience_snapshot(snapshot)
+            return True
+
+        if job.source == "tooltip":
+            self.experience_tracker.record_ocr_result(False)
+            self._log_experience_ocr_error(now, f"浮動 EXP 失敗，改用底部 EXP OCR：{reading.reason}", reading.text)
+            snapshot = self.experience_tracker.snapshot(effective_now)
+            snapshot.status = "浮動 EXP OCR 失敗，改用底部 EXP OCR"
+            self._log_experience_debug_reading(
+                job,
+                reading,
+                snapshot,
+                decision="tooltip_fallback",
+                completed_at=now,
+                effective_now=effective_now,
+                job_elapsed_ms=job_elapsed_ms,
+            )
+            self.gui.set_experience_snapshot(snapshot)
+            self._start_bottom_experience_ocr_capture(now, effective_now=effective_now)
             return True
 
         self._remember_failed_experience_ocr_signature(job)
@@ -5870,6 +6027,12 @@ class AutoPotionController:
         potion_worker = getattr(self, "potion_action_worker", None)
         if potion_worker is not None:
             potion_worker.stop()
+        mouse_observer = getattr(self, "mouse_activity_observer", None)
+        if mouse_observer is not None:
+            stop_mouse_observer = getattr(mouse_observer, "stop", None)
+            if callable(stop_mouse_observer):
+                stop_mouse_observer()
+            self.mouse_activity_observer = None
         self._close_media_files()
         try:
             self.experience_ocr_executor.shutdown(wait=False, cancel_futures=True)

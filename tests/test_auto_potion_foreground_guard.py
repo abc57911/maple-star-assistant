@@ -34,6 +34,7 @@ from maple_star.controllers.auto_potion_controller import (
     EXPERIENCE_10M_CHECKPOINT_INTERVAL_SECONDS,
     EXPERIENCE_10M_CHECKPOINT_OCR_MAX_ATTEMPTS,
     EXPERIENCE_10M_CHECKPOINT_OCR_RETRY_DELAY_SECONDS,
+    EXPERIENCE_MOUSE_IDLE_DELAY_SECONDS,
 )
 from maple_star.experience import (
     ExperienceEfficiencyTracker,
@@ -41,6 +42,7 @@ from maple_star.experience import (
     ExperienceSnapshot,
     ExperienceTextReading,
     read_experience_burst_frames_in_worker,
+    read_experience_tooltip_in_worker,
 )
 from maple_star.models.controller_state import BarDetectionDebug, HudSearchArea, OutOfPotionHold, PotionEffectAttempt
 from maple_star.services.control_hotkey_worker import CONTROL_HOTKEY_EXPERIENCE_TOGGLE, CONTROL_HOTKEY_PICKUP_TOGGLE
@@ -186,6 +188,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.control_hotkeys_suppressed_until_release = False
         controller.last_action = "啟動"
         controller.experience_tracker = ExperienceEfficiencyTracker()
+        controller.next_experience_capture_at = 0.0
         controller.experience_ocr_job = None
         controller.experience_ocr_burst = None
         controller.experience_10m_checkpoint_capture = None
@@ -194,6 +197,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.experience_10m_checkpoint_stopped = False
         controller.experience_10m_checkpoint_attempts = 0
         controller.experience_baseline_cursor_position = None
+        controller.experience_tooltip_baseline_failed = False
         controller.experience_pause_started_at = None
         controller.experience_total_paused_seconds = 0.0
         controller.runtime_processes_enabled = False
@@ -211,6 +215,10 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._play_toggle_beep = Mock()
         controller._capture_bar_percent = Mock(return_value=25.0)
         controller._refresh_gameplay_hud_state = Mock(return_value=True)
+        controller.bottom_hud_layout = None
+        controller.experience_10m_checkpoint_tooltip_failed = False
+        controller.mouse_activity_observer = SimpleNamespace(last_activity_at=-999.0)
+        controller.last_experience_mouse_idle_delay_log_at = -999.0
         return controller
 
     def seed_stable_potion_samples(self, controller, bar_type, now, percent):
@@ -497,6 +505,249 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertAlmostEqual(first_frame[1].bar_crop_left_ratio, 0.34)
         self.assertEqual(controller.sct.grab.call_count, EXPERIENCE_BURST_CAPTURE_ATTEMPTS * 2)
 
+    def test_experience_tooltip_capture_uses_exp_track_tail_and_restores_mouse_lock(self):
+        class FakeMouseLock:
+            def __enter__(self):
+                events.append("lock")
+                return (400, 500)
+
+            def __exit__(self, exc_type, exc, tb):
+                events.append("unlock")
+                return False
+
+        events = []
+        controller = self.make_controller([])
+        controller.bottom_hud_layout = SimpleNamespace(exp_track_region=(100, 200, 300, 20))
+        controller._foreground_client_bounds = Mock(return_value=(0, 0, 800, 600))
+        controller.sct = Mock()
+        controller.sct.grab.return_value = np.zeros((46, 340, 4), dtype=np.uint8)
+
+        with (
+            patch("maple_star.controllers.auto_potion_controller.temporary_mouse_input_lock", return_value=FakeMouseLock()),
+            patch("maple_star.controllers.auto_potion_controller.set_cursor_position") as set_cursor,
+            patch("maple_star.controllers.auto_potion_controller.sleep_while_pumping_messages") as sleep,
+            patch("maple_star.controllers.auto_potion_controller.get_cursor_position", return_value=(398, 210)),
+        ):
+            image = controller._capture_experience_tooltip_image()
+
+        self.assertIsNotNone(image)
+        assert image is not None
+        self.assertEqual(image.source_id, "tooltip")
+        self.assertEqual(image.roi_offset, (406, 182, 340, 46))
+        set_cursor.assert_called_once_with(398, 210)
+        sleep.assert_called_once()
+        self.assertEqual(events, ["lock", "unlock"])
+        controller.sct.grab.assert_called_once_with({"left": 406, "top": 182, "width": 340, "height": 46})
+
+    def test_experience_tooltip_capture_retries_when_cursor_moves_during_lock(self):
+        class FakeMouseLock:
+            def __enter__(self):
+                return (400, 500)
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        controller = self.make_controller([])
+        controller.bottom_hud_layout = SimpleNamespace(exp_track_region=(100, 200, 300, 20))
+        controller._foreground_client_bounds = Mock(return_value=(0, 0, 800, 600))
+        controller.sct = Mock()
+        controller.sct.grab.return_value = np.zeros((46, 340, 4), dtype=np.uint8)
+
+        with (
+            patch("maple_star.controllers.auto_potion_controller.temporary_mouse_input_lock", return_value=FakeMouseLock()),
+            patch("maple_star.controllers.auto_potion_controller.set_cursor_position") as set_cursor,
+            patch("maple_star.controllers.auto_potion_controller.sleep_while_pumping_messages") as sleep,
+            patch(
+                "maple_star.controllers.auto_potion_controller.get_cursor_position",
+                side_effect=[(430, 210), (398, 210), (398, 210)],
+            ),
+        ):
+            image = controller._capture_experience_tooltip_image()
+
+        self.assertIsNotNone(image)
+        self.assertEqual(set_cursor.call_count, 2)
+        self.assertEqual(sleep.call_count, 2)
+        controller.sct.grab.assert_called_once()
+        debug = controller.last_experience_tooltip_capture_debug
+        self.assertEqual(debug["attempts"][0]["decision"], "cursor_moved_before_grab")
+        self.assertEqual(debug["attempts"][1]["decision"], "captured")
+
+    def test_experience_tooltip_capture_skips_when_cursor_keeps_moving(self):
+        class FakeMouseLock:
+            def __enter__(self):
+                return (400, 500)
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        controller = self.make_controller([])
+        controller.bottom_hud_layout = SimpleNamespace(exp_track_region=(100, 200, 300, 20))
+        controller._foreground_client_bounds = Mock(return_value=(0, 0, 800, 600))
+        controller.sct = Mock()
+
+        with (
+            patch("maple_star.controllers.auto_potion_controller.temporary_mouse_input_lock", return_value=FakeMouseLock()),
+            patch("maple_star.controllers.auto_potion_controller.set_cursor_position"),
+            patch("maple_star.controllers.auto_potion_controller.sleep_while_pumping_messages"),
+            patch("maple_star.controllers.auto_potion_controller.get_cursor_position", return_value=(430, 210)),
+        ):
+            image = controller._capture_experience_tooltip_image()
+
+        self.assertIsNone(image)
+        self.assertEqual(controller.last_experience_tooltip_capture_skip["reason"], "浮動 EXP 擷取期間滑鼠偏移")
+        self.assertEqual(len(controller.last_experience_tooltip_capture_skip["capture_debug"]["attempts"]), 3)
+        controller.sct.grab.assert_not_called()
+
+    def test_experience_update_submits_tooltip_ocr_before_bottom_burst(self):
+        class ImmediateExecutor:
+            def submit(self, fn, *args, **kwargs):
+                self.call = (fn, args, kwargs)
+                return Mock()
+
+        controller = self.make_controller([])
+        controller.next_experience_capture_at = 0.0
+        controller.gameplay_hud_active = True
+        controller.experience_tracker.add_reading(1.0, 1_000_000, 10.0, confidence=0.95)
+        controller.experience_ocr_executor = ImmediateExecutor()
+        tooltip_image = ExperienceOcrImage(np.zeros((46, 340, 4), dtype=np.uint8), source_id="tooltip")
+        controller._capture_experience_tooltip_image = Mock(return_value=tooltip_image)
+        controller._start_bottom_experience_ocr_capture = Mock()
+
+        controller._update_experience_efficiency(5.0)
+
+        submitted_fn, submitted_args, _submitted_kwargs = controller.experience_ocr_executor.call
+        self.assertEqual(submitted_fn, read_experience_tooltip_in_worker)
+        self.assertIs(submitted_args[0], tooltip_image)
+        self.assertEqual(controller.experience_ocr_job.source, "tooltip")
+        controller._start_bottom_experience_ocr_capture.assert_not_called()
+
+    def test_experience_update_defers_capture_during_mouse_activity(self):
+        controller = self.make_controller([])
+        controller.next_experience_capture_at = 0.0
+        controller.gameplay_hud_active = True
+        controller.experience_tracker.add_reading(1.0, 1_000_000, 10.0, confidence=0.95)
+        controller.mouse_activity_observer = SimpleNamespace(last_activity_at=8.0)
+        controller._start_experience_tooltip_ocr_capture = Mock(return_value=True)
+        controller._start_bottom_experience_ocr_capture = Mock(return_value=True)
+
+        with patch("maple_star.controllers.auto_potion_controller.log_experience_debug") as exp_debug_log:
+            controller._update_experience_efficiency(10.0)
+
+        controller._start_experience_tooltip_ocr_capture.assert_not_called()
+        controller._start_bottom_experience_ocr_capture.assert_not_called()
+        self.assertAlmostEqual(controller.next_experience_capture_at, 8.0 + EXPERIENCE_MOUSE_IDLE_DELAY_SECONDS)
+        controller.gui.set_experience_snapshot.assert_called()
+        snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
+        self.assertIn("滑鼠操作中", snapshot.status)
+        payload = exp_debug_log.call_args.args[0]
+        self.assertEqual(payload["event"], "experience_mouse_idle_delay")
+        self.assertEqual(payload["phase"], "ocr_capture")
+        self.assertEqual(payload["decision"], "deferred")
+
+    def test_tooltip_mouse_drift_skip_does_not_fall_back_to_bottom_capture(self):
+        controller = self.make_controller([])
+        controller.next_experience_capture_at = 0.0
+        controller.gameplay_hud_active = True
+        controller.experience_tracker.add_reading(1.0, 1_000_000, 10.0, confidence=0.95)
+        controller._capture_experience_tooltip_image = Mock(return_value=None)
+        controller.last_experience_tooltip_capture_skip = {"reason": "浮動 EXP 擷取期間滑鼠偏移"}
+        controller._start_bottom_experience_ocr_capture = Mock(return_value=True)
+
+        controller._update_experience_efficiency(10.0)
+
+        controller._start_bottom_experience_ocr_capture.assert_not_called()
+        self.assertAlmostEqual(controller.next_experience_capture_at, 10.0 + EXPERIENCE_MOUSE_IDLE_DELAY_SECONDS)
+
+    def test_experience_update_resumes_capture_after_mouse_idle_delay(self):
+        controller = self.make_controller([])
+        controller.next_experience_capture_at = 0.0
+        controller.gameplay_hud_active = True
+        controller.experience_tracker.add_reading(1.0, 1_000_000, 10.0, confidence=0.95)
+        controller.mouse_activity_observer = SimpleNamespace(last_activity_at=8.0)
+        controller._start_experience_tooltip_ocr_capture = Mock(return_value=True)
+        controller._start_bottom_experience_ocr_capture = Mock(return_value=True)
+
+        controller._update_experience_efficiency(13.1)
+
+        controller._start_experience_tooltip_ocr_capture.assert_called_once_with(13.1, effective_now=13.1)
+        controller._start_bottom_experience_ocr_capture.assert_not_called()
+
+    def test_mouse_activity_defers_baseline_without_opening_stat_window(self):
+        controller = self.make_controller([])
+        controller.settings.exp_efficiency_enabled = True
+        controller.gameplay_hud_active = True
+        controller.mouse_activity_observer = SimpleNamespace(last_activity_at=8.0)
+        controller._capture_experience_tooltip_image = Mock()
+        controller._toggle_experience_stat_window = Mock()
+
+        handled = controller._process_experience_baseline_calibration(10.0, effective_now=10.0)
+
+        self.assertTrue(handled)
+        controller._capture_experience_tooltip_image.assert_not_called()
+        controller._toggle_experience_stat_window.assert_not_called()
+
+    def test_mouse_activity_defers_exp_10m_checkpoint_without_opening_stat_window(self):
+        controller = self.make_controller([])
+        controller.settings.exp_efficiency_enabled = True
+        controller.gameplay_hud_active = True
+        controller.experience_tracker.record_exp_10m_checkpoint(1_000_000)
+        controller.next_experience_10m_checkpoint_at = 10.0
+        controller.mouse_activity_observer = SimpleNamespace(last_activity_at=8.0)
+        controller._capture_experience_tooltip_image = Mock()
+        controller._toggle_experience_stat_window = Mock()
+
+        handled = controller._process_exp_10m_checkpoint(10.0, effective_now=10.0)
+
+        self.assertTrue(handled)
+        controller._capture_experience_tooltip_image.assert_not_called()
+        controller._toggle_experience_stat_window.assert_not_called()
+
+    def test_experience_tooltip_capture_skip_writes_experience_debug_reason(self):
+        controller = self.make_controller([])
+        controller.bottom_hud_layout = None
+        controller.bottom_bar_track_regions = {}
+        controller.experience_tracker = ExperienceEfficiencyTracker()
+
+        with patch("maple_star.controllers.auto_potion_controller.log_experience_debug") as exp_debug_log:
+            started = controller._start_experience_tooltip_ocr_capture(12.0, effective_now=11.5)
+
+        self.assertFalse(started)
+        exp_debug_log.assert_called_once()
+        payload = exp_debug_log.call_args.args[0]
+        self.assertEqual(payload["event"], "experience_tooltip_capture")
+        self.assertEqual(payload["phase"], "ocr_capture")
+        self.assertEqual(payload["source"], "tooltip")
+        self.assertEqual(payload["decision"], "skipped")
+        self.assertEqual(payload["reason"], "找不到 EXP track 游標目標")
+        self.assertFalse(payload["has_bottom_hud_layout"])
+        self.assertEqual(payload["bottom_bar_track_keys"], [])
+        self.assertIsNone(payload["cursor_point"])
+        self.assertIsNone(payload["roi"])
+
+    def test_tooltip_ocr_failure_falls_back_to_bottom_capture(self):
+        class DoneFuture:
+            def done(self):
+                return True
+
+            def result(self):
+                return ExperienceTextReading(reason="浮動 EXP 解析失敗", source="tooltip")
+
+            def cancel(self):
+                return False
+
+        controller = self.make_controller([])
+        controller.experience_ocr_job = ExperienceOcrJob(
+            submitted_at=10.0,
+            future=DoneFuture(),
+            source="tooltip",
+        )
+        controller._start_bottom_experience_ocr_capture = Mock(return_value=True)
+
+        self.assertTrue(controller._process_experience_ocr_job(10.5, effective_now=10.5))
+
+        controller._start_bottom_experience_ocr_capture.assert_called_once_with(10.5, effective_now=10.5)
+        self.assertIsNone(controller.experience_ocr_job)
+
     def test_experience_stat_window_roi_locator_uses_seventh_green_label(self):
         controller = self.make_controller([])
         image = np.zeros((800, 1000, 4), dtype=np.uint8)
@@ -607,7 +858,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(controller.last_target_hwnd, 1234)
         controller.target_window_provider.assert_called_once()
 
-    def test_experience_baseline_calibration_uses_character_stat_hotkey_and_closes_before_ocr(self):
+    def test_experience_baseline_uses_tooltip_before_character_stat_window(self):
         class DoneFuture:
             def __init__(self, result):
                 self._result = result
@@ -623,72 +874,66 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         class ImmediateExecutor:
             def submit(self, fn, *args, **kwargs):
-                return DoneFuture(fn(*args, **kwargs))
+                return DoneFuture(
+                    ExperienceTextReading(
+                        current_exp=15_261_854,
+                        percent=17.84,
+                        text="EXP: 15261854 / 85538273",
+                        confidence=0.96,
+                        success=True,
+                        reason="OK:Tooltip",
+                        source="tooltip",
+                    )
+                )
 
-        events = []
         controller = self.make_controller([])
-        controller.settings.character_stat_hotkey = "V"
         controller.settings.exp_efficiency_enabled = True
         controller.gameplay_hud_active = True
-        controller.experience_tracker = ExperienceEfficiencyTracker()
-        stat_window_read = Mock(
-            side_effect=lambda _image: events.append("ocr")
-            or ExperienceTextReading(
-                current_exp=31595874,
-                percent=77.0,
-                text="31595874(77%)",
-                confidence=0.94,
-                success=True,
-                reason="OK:StatWindow",
-                source="stat_window",
-            )
-        )
         controller.experience_ocr_executor = ImmediateExecutor()
-        controller._capture_foreground_client_image = Mock(
-            return_value=(np.full((800, 1000, 4), 255, dtype=np.uint8), (0, 0, 1000, 800))
+        controller._capture_experience_tooltip_image = Mock(
+            return_value=ExperienceOcrImage(np.zeros((46, 340, 4), dtype=np.uint8), source_id="tooltip")
         )
-        controller._locate_stat_window_exp_roi = Mock(return_value=(330, 330, 180, 28))
-        controller._toggle_experience_stat_window = Mock(side_effect=lambda: events.append("stat_hotkey") or True)
+        controller._toggle_experience_stat_window = Mock()
 
-        with (
-            patch.object(controller, "_move_cursor_for_experience_baseline_capture"),
-            patch("maple_star.controllers.auto_potion_controller.log_experience_debug") as exp_debug_log,
-            patch("maple_star.controllers.auto_potion_controller.read_stat_window_exp_in_worker", stat_window_read),
-        ):
-            self.assertTrue(controller._process_experience_baseline_calibration(10.0, effective_now=10.0))
-            self.assertTrue(controller._process_experience_baseline_calibration(10.3, effective_now=10.3))
-            self.assertTrue(controller._process_experience_baseline_calibration(10.4, effective_now=10.4))
+        self.assertTrue(controller._process_experience_baseline_calibration(10.0, effective_now=10.0))
+        self.assertTrue(controller._process_experience_baseline_calibration(10.1, effective_now=10.1))
 
-        self.assertEqual(events, ["stat_hotkey", "stat_hotkey", "ocr"])
-        self.assertEqual(controller._toggle_experience_stat_window.call_count, 2)
-        self.assertEqual(controller.experience_tracker.samples[-1].current_exp, 31595874)
+        controller._toggle_experience_stat_window.assert_not_called()
+        self.assertEqual(controller.experience_tracker.samples[-1].current_exp, 15_261_854)
         self.assertIsNone(controller.experience_tracker.samples[-1].percent)
-        self.assertIsNone(controller.experience_baseline_calibration)
-        self.assertIsNone(controller.experience_baseline_ocr_job)
-        payloads = [call.args[0] for call in exp_debug_log.call_args_list]
-        self.assertTrue(any(payload["decision"] == "accepted" for payload in payloads))
-        accepted = [payload for payload in payloads if payload["decision"] == "accepted"][-1]
-        self.assertEqual(accepted["event"], "experience_baseline_calibration")
-        self.assertEqual(accepted["source"], "stat_window")
-        self.assertEqual(accepted["close_method"], "character_stat_hotkey")
-        self.assertEqual(accepted["current_exp"], 31595874)
-        self.assertIsNone(accepted["percent"])
-        self.assertEqual(controller.experience_tracker.exp_10m_checkpoint_exp, 31595874)
-        self.assertAlmostEqual(
-            controller.next_experience_10m_checkpoint_at,
-            10.4 + EXPERIENCE_10M_CHECKPOINT_INTERVAL_SECONDS,
-        )
+        self.assertFalse(controller.experience_tooltip_baseline_failed)
 
-        accepted_bottom = controller.experience_tracker.add_reading(
-            11.0,
-            31595874,
-            77.95,
-            confidence=0.92,
-        )
-        self.assertTrue(accepted_bottom)
-        self.assertEqual(controller.experience_tracker.samples[-1].percent, 77.95)
+    def test_tooltip_baseline_failure_does_not_open_stat_window_when_disabled(self):
+        class DoneFuture:
+            def done(self):
+                return True
 
-    def test_exp_10m_checkpoint_moves_cursor_to_window_left_bottom_and_updates_exact_gain(self):
+            def result(self):
+                return ExperienceTextReading(reason="浮動 EXP 解析失敗", source="tooltip")
+
+            def cancel(self):
+                return False
+
+        class ImmediateExecutor:
+            def submit(self, fn, *args, **kwargs):
+                return DoneFuture()
+
+        controller = self.make_controller([])
+        controller.settings.exp_efficiency_enabled = True
+        controller.gameplay_hud_active = True
+        controller.experience_ocr_executor = ImmediateExecutor()
+        controller._capture_experience_tooltip_image = Mock(
+            return_value=ExperienceOcrImage(np.zeros((46, 340, 4), dtype=np.uint8), source_id="tooltip")
+        )
+        controller._toggle_experience_stat_window = Mock()
+
+        self.assertTrue(controller._process_experience_baseline_calibration(10.0, effective_now=10.0))
+        self.assertTrue(controller._process_experience_baseline_calibration(10.1, effective_now=10.1))
+
+        controller._toggle_experience_stat_window.assert_not_called()
+        self.assertFalse(controller.experience_tooltip_baseline_failed)
+
+    def test_exp_10m_checkpoint_uses_tooltip_before_character_stat_window(self):
         class DoneFuture:
             def __init__(self, result):
                 self._result = result
@@ -704,92 +949,74 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         class ImmediateExecutor:
             def submit(self, fn, *args, **kwargs):
-                return DoneFuture(fn(*args, **kwargs))
+                return DoneFuture(
+                    ExperienceTextReading(
+                        current_exp=1_123_456,
+                        percent=12.34,
+                        text="EXP: 1123456 / 9104182",
+                        confidence=0.95,
+                        success=True,
+                        reason="OK:Tooltip",
+                        source="tooltip",
+                    )
+                )
 
-        events = []
         controller = self.make_controller([])
-        controller.settings.character_stat_hotkey = "V"
         controller.settings.exp_efficiency_enabled = True
         controller.gameplay_hud_active = True
-        controller.experience_tracker = ExperienceEfficiencyTracker()
         controller.experience_tracker.record_exp_10m_checkpoint(1_000_000)
         controller.next_experience_10m_checkpoint_at = 610.0
         controller.experience_ocr_executor = ImmediateExecutor()
-        controller._capture_foreground_client_image = Mock(
-            return_value=(np.full((800, 1000, 4), 255, dtype=np.uint8), (0, 0, 1000, 800))
+        controller._capture_experience_tooltip_image = Mock(
+            return_value=ExperienceOcrImage(np.zeros((46, 340, 4), dtype=np.uint8), source_id="tooltip")
         )
-        controller._locate_stat_window_exp_roi = Mock(return_value=(330, 330, 180, 28))
-        controller._toggle_experience_stat_window = Mock(side_effect=lambda: events.append("stat_hotkey") or True)
-        cursor_moves = []
-        stat_window_read = Mock(
-            side_effect=lambda _image: events.append("ocr")
-            or ExperienceTextReading(
-                current_exp=1_123_456,
-                percent=12.0,
-                text="1123456(12%)",
-                confidence=0.94,
-                success=True,
-                reason="OK:StatWindow",
-                source="stat_window",
-            )
-        )
+        controller._toggle_experience_stat_window = Mock()
 
-        with (
-            patch.object(controller, "_experience_baseline_target_hwnd", return_value=4321),
-            patch("maple_star.controllers.auto_potion_controller.get_cursor_position", return_value=(400, 500)),
-            patch("maple_star.controllers.auto_potion_controller.window_client_size", return_value=(1000, 800)),
-            patch(
-                "maple_star.controllers.auto_potion_controller.client_to_screen_point",
-                side_effect=lambda hwnd, x, y: (x + 10, y + 20),
-            ) as client_to_screen,
-            patch(
-                "maple_star.controllers.auto_potion_controller.set_cursor_position",
-                side_effect=lambda x, y: cursor_moves.append((x, y)),
-            ),
-            patch("maple_star.controllers.auto_potion_controller.read_stat_window_exp_in_worker", stat_window_read),
-        ):
-            self.assertTrue(controller._process_exp_10m_checkpoint(610.0, effective_now=600.0))
-            self.assertTrue(controller._process_exp_10m_checkpoint(610.3, effective_now=600.3))
-            self.assertTrue(controller._process_exp_10m_checkpoint(610.4, effective_now=600.4))
+        self.assertTrue(controller._process_exp_10m_checkpoint(610.0, effective_now=600.0))
+        self.assertTrue(controller._process_exp_10m_checkpoint(610.1, effective_now=600.1))
 
-        self.assertEqual(events, ["stat_hotkey", "stat_hotkey", "ocr"])
-        client_to_screen.assert_called_once_with(4321, 8, 792)
-        self.assertEqual(cursor_moves, [(18, 812), (400, 500)])
+        controller._toggle_experience_stat_window.assert_not_called()
         self.assertEqual(controller.experience_tracker.exp_10m_checkpoint_exp, 1_123_456)
         self.assertEqual(controller.experience_tracker.exp_10m_gain, 123_456)
-        self.assertIsNone(controller.experience_10m_checkpoint_capture)
-        self.assertIsNone(controller.experience_10m_checkpoint_ocr_job)
-        self.assertAlmostEqual(
-            controller.next_experience_10m_checkpoint_at,
-            610.4 + EXPERIENCE_10M_CHECKPOINT_INTERVAL_SECONDS,
-        )
+        self.assertFalse(controller.experience_10m_checkpoint_tooltip_failed)
 
-    def test_exp_10m_checkpoint_failure_stops_only_exp_10m(self):
+    def test_exp_10m_tooltip_failure_retries_without_stat_window_when_disabled(self):
+        class DoneFuture:
+            def done(self):
+                return True
+
+            def result(self):
+                return ExperienceTextReading(reason="浮動 EXP 解析失敗", source="tooltip")
+
+            def cancel(self):
+                return False
+
+        class ImmediateExecutor:
+            def submit(self, fn, *args, **kwargs):
+                return DoneFuture()
+
         controller = self.make_controller([])
-        controller.settings.character_stat_hotkey = "V"
         controller.settings.exp_efficiency_enabled = True
         controller.gameplay_hud_active = True
-        controller.experience_tracker = ExperienceEfficiencyTracker()
         controller.experience_tracker.record_exp_10m_checkpoint(1_000_000)
-        controller.next_experience_10m_checkpoint_at = 20.0
-        controller._capture_foreground_client_image = Mock(
-            return_value=(np.full((800, 1000, 4), 255, dtype=np.uint8), (0, 0, 1000, 800))
+        controller.next_experience_10m_checkpoint_at = 610.0
+        controller.experience_ocr_executor = ImmediateExecutor()
+        controller._capture_experience_tooltip_image = Mock(
+            return_value=ExperienceOcrImage(np.zeros((46, 340, 4), dtype=np.uint8), source_id="tooltip")
         )
-        controller._locate_stat_window_exp_roi = Mock(return_value=None)
-        controller._toggle_experience_stat_window = Mock(return_value=True)
+        controller._toggle_experience_stat_window = Mock()
 
-        with patch.object(controller, "_move_cursor_for_experience_baseline_capture"):
-            self.assertTrue(controller._process_exp_10m_checkpoint(20.0, effective_now=20.0))
-            self.assertTrue(controller._process_exp_10m_checkpoint(20.3, effective_now=20.3))
+        self.assertTrue(controller._process_exp_10m_checkpoint(610.0, effective_now=600.0))
+        self.assertTrue(controller._process_exp_10m_checkpoint(610.1, effective_now=600.1))
 
-        self.assertTrue(controller.experience_10m_checkpoint_stopped)
-        self.assertTrue(controller.settings.exp_efficiency_enabled)
-        self.assertEqual(controller.next_experience_10m_checkpoint_at, 0.0)
-        snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
-        self.assertEqual(snapshot.status, "EXP-10 已停止：找不到能力值 EXP ROI")
-        self.assertIsNone(snapshot.exp_10m_gain)
+        controller._toggle_experience_stat_window.assert_not_called()
+        self.assertFalse(controller.experience_10m_checkpoint_tooltip_failed)
+        self.assertAlmostEqual(
+            controller.next_experience_10m_checkpoint_at,
+            610.1 + EXPERIENCE_10M_CHECKPOINT_OCR_RETRY_DELAY_SECONDS,
+        )
 
-    def test_exp_10m_checkpoint_ocr_failure_retries_before_stopping(self):
+    def test_exp_10m_checkpoint_ocr_failure_retries_without_stopping(self):
         class DoneFuture:
             def __init__(self, result):
                 self._result = result
@@ -809,13 +1036,12 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.experience_tracker.record_exp_10m_checkpoint(1_000_000)
         failure = ExperienceTextReading(text="--", confidence=0.0, success=False, reason="OCR 失敗")
 
-        controller.experience_10m_checkpoint_attempts = 1
-        controller.experience_10m_checkpoint_capture = SimpleNamespace(
-            phase="ocr_checkpoint",
-            opened_ui=False,
-            attempt=1,
+        controller.experience_10m_checkpoint_attempts = EXPERIENCE_10M_CHECKPOINT_OCR_MAX_ATTEMPTS
+        controller.experience_10m_checkpoint_ocr_job = ExperienceOcrJob(
+            20.0,
+            DoneFuture(failure),
+            source="tooltip_checkpoint",
         )
-        controller.experience_10m_checkpoint_ocr_job = ExperienceOcrJob(20.0, DoneFuture(failure))
 
         with patch("builtins.print"):
             self.assertTrue(controller._process_exp_10m_checkpoint_ocr_job(20.5, effective_now=20.5))
@@ -825,81 +1051,11 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             controller.next_experience_10m_checkpoint_at,
             20.5 + EXPERIENCE_10M_CHECKPOINT_OCR_RETRY_DELAY_SECONDS,
         )
-        self.assertEqual(controller.experience_10m_checkpoint_attempts, 1)
+        self.assertEqual(controller.experience_10m_checkpoint_attempts, EXPERIENCE_10M_CHECKPOINT_OCR_MAX_ATTEMPTS)
         self.assertEqual(controller.experience_tracker.exp_10m_gain, 100_000)
-        controller._play_toggle_beep.assert_called_once()
+        controller._play_toggle_beep.assert_not_called()
         snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
-        self.assertEqual(
-            snapshot.status,
-            f"EXP-10 OCR 失敗，10 秒後重試（第 2/{EXPERIENCE_10M_CHECKPOINT_OCR_MAX_ATTEMPTS} 次）",
-        )
-
-        controller.experience_10m_checkpoint_attempts = EXPERIENCE_10M_CHECKPOINT_OCR_MAX_ATTEMPTS
-        controller.experience_10m_checkpoint_capture = SimpleNamespace(
-            phase="ocr_checkpoint",
-            opened_ui=False,
-            attempt=EXPERIENCE_10M_CHECKPOINT_OCR_MAX_ATTEMPTS,
-        )
-        controller.experience_10m_checkpoint_ocr_job = ExperienceOcrJob(31.0, DoneFuture(failure))
-
-        with patch("builtins.print"):
-            self.assertTrue(controller._process_exp_10m_checkpoint_ocr_job(31.5, effective_now=31.5))
-
-        self.assertTrue(controller.experience_10m_checkpoint_stopped)
-        self.assertEqual(controller.next_experience_10m_checkpoint_at, 0.0)
-        self.assertEqual(controller.experience_10m_checkpoint_attempts, 0)
-        self.assertEqual(controller.experience_tracker.exp_10m_gain, 100_000)
-        self.assertEqual(controller._play_toggle_beep.call_count, 2)
-        snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
-        self.assertEqual(
-            snapshot.status,
-            f"EXP-10 OCR 失敗已達 {EXPERIENCE_10M_CHECKPOINT_OCR_MAX_ATTEMPTS} 次，保留上一筆統計",
-        )
-
-    def test_experience_baseline_calibration_failure_closes_and_falls_back_to_bottom_ocr(self):
-        controller = self.make_controller([])
-        controller.settings.character_stat_hotkey = "V"
-        controller.settings.exp_efficiency_enabled = True
-        controller.gameplay_hud_active = True
-        controller.experience_tracker = ExperienceEfficiencyTracker()
-        controller._capture_foreground_client_image = Mock(
-            return_value=(np.full((800, 1000, 4), 255, dtype=np.uint8), (0, 0, 1000, 800))
-        )
-        controller._locate_stat_window_exp_roi = Mock(return_value=None)
-        controller._toggle_experience_stat_window = Mock(return_value=True)
-
-        with (
-            patch.object(controller, "_move_cursor_for_experience_baseline_capture"),
-            patch("maple_star.controllers.auto_potion_controller.log_experience_debug") as exp_debug_log,
-        ):
-            self.assertTrue(controller._process_experience_baseline_calibration(20.0, effective_now=20.0))
-            self.assertFalse(controller._process_experience_baseline_calibration(20.3, effective_now=20.3))
-
-        self.assertEqual(controller._toggle_experience_stat_window.call_count, 2)
-        self.assertEqual(controller.experience_tracker.samples, [])
-        self.assertEqual(controller.next_experience_capture_at, 0.0)
-        payload = exp_debug_log.call_args.args[0]
-        self.assertEqual(payload["decision"], "fallback")
-        self.assertEqual(payload["fallback_reason"], "找不到能力值 EXP ROI")
-
-    def test_experience_baseline_moves_cursor_to_window_left_bottom_and_restores(self):
-        controller = self.make_controller([])
-        controller.target_window_provider = Mock(return_value=1234)
-
-        with (
-            patch("maple_star.controllers.auto_potion_controller.get_cursor_position", return_value=(400, 500)) as get_cursor,
-            patch("maple_star.controllers.auto_potion_controller.window_client_size", return_value=(1920, 1080)),
-            patch("maple_star.controllers.auto_potion_controller.client_to_screen_point", return_value=(19, 1094)) as to_screen,
-            patch("maple_star.controllers.auto_potion_controller.set_cursor_position") as set_cursor,
-        ):
-            controller._move_cursor_for_experience_baseline_capture()
-            controller._restore_experience_baseline_cursor()
-
-        get_cursor.assert_called_once()
-        to_screen.assert_called_once_with(1234, 8, 1072)
-        self.assertEqual(set_cursor.call_args_list[0].args, (19, 1094))
-        self.assertEqual(set_cursor.call_args_list[1].args, (400, 500))
-        self.assertIsNone(controller.experience_baseline_cursor_position)
+        self.assertEqual(snapshot.status, "浮動 EXP-10 失敗，稍後重試")
 
     def test_clear_experience_baseline_state_restores_cursor(self):
         controller = self.make_controller([])
@@ -3211,7 +3367,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(controller.last_action, "F9 經驗統計重置")
         print_mock.assert_called_once_with("F9：經驗統計已重置")
 
-    def test_toggle_experience_efficiency_requires_character_stat_hotkey(self):
+    def test_toggle_experience_efficiency_does_not_require_character_stat_hotkey(self):
         controller = self.make_controller([])
         controller.settings.exp_efficiency_enabled = False
         controller.settings.character_stat_hotkey = ""
@@ -3219,12 +3375,11 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         with patch("builtins.print") as print_mock:
             controller.toggle_experience_efficiency()
 
-        self.assertFalse(controller.settings.exp_efficiency_enabled)
-        controller.gui.set_exp_efficiency_enabled.assert_called_once_with(False)
-        controller.gui.set_status.assert_called_once_with("請先設定能力值快捷鍵才能使用經驗統計")
-        print_mock.assert_called_once_with("經驗統計啟用：請先設定能力值快捷鍵")
+        controller.gui.set_exp_efficiency_enabled.assert_called_once_with(True)
+        controller.gui.set_status.assert_called_once_with("經驗統計已啟用")
+        print_mock.assert_called_once_with("F10：經驗統計已啟用")
 
-    def test_reset_experience_statistics_requires_character_stat_hotkey(self):
+    def test_reset_experience_statistics_does_not_require_character_stat_hotkey(self):
         controller = self.make_controller([])
         controller.settings.character_stat_hotkey = ""
         controller.experience_tracker = ExperienceEfficiencyTracker()
@@ -3233,24 +3388,23 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         with patch("builtins.print") as print_mock:
             result = controller.reset_experience_statistics()
 
-        self.assertFalse(result)
-        self.assertEqual(len(controller.experience_tracker.samples), 1)
-        controller.gui.set_status.assert_called_once_with("請先設定能力值快捷鍵才能使用經驗統計")
-        print_mock.assert_called_once_with("經驗統計重置：請先設定能力值快捷鍵")
+        self.assertTrue(result)
+        self.assertEqual(len(controller.experience_tracker.samples), 0)
+        controller.gui.set_status.assert_not_called()
+        print_mock.assert_not_called()
 
-    def test_direct_experience_checkbox_is_reverted_without_character_stat_hotkey(self):
+    def test_direct_experience_checkbox_is_allowed_without_character_stat_hotkey(self):
         controller = self.make_controller([])
         controller.settings.exp_efficiency_enabled = True
         controller.settings.character_stat_hotkey = ""
         controller.experience_tracker = Mock()
         controller.experience_tracker.snapshot.return_value = ExperienceSnapshot(sample_count=0)
 
-        self.assertFalse(controller._enforce_experience_prerequisites(100.0))
+        self.assertTrue(controller._enforce_experience_prerequisites(100.0))
 
-        controller.gui.set_exp_efficiency_enabled.assert_called_once_with(False)
-        snapshot = controller.gui.set_experience_snapshot.call_args.args[0]
-        self.assertEqual(snapshot.status, "請先設定能力值快捷鍵")
-        self.assertFalse(controller.settings.exp_efficiency_enabled)
+        controller.gui.set_exp_efficiency_enabled.assert_not_called()
+        controller.gui.set_experience_snapshot.assert_not_called()
+        self.assertTrue(controller.settings.exp_efficiency_enabled)
 
     def test_pickup_toggle_holds_and_releases_configured_key_with_sounds(self):
         controller = self.make_controller([])

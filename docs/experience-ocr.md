@@ -33,8 +33,10 @@
 - OCR 背景工作需維持單 worker、低頻率擷取。
 - 調整 `EXPERIENCE_CAPTURE_INTERVAL_SECONDS` 或 OCR 前處理時，需注意 CPU 佔用。
 - EXP OCR 應優先抓 UI 顯示的 EXP 數字與百分比，不使用 EXP 綠條自行推算百分比。
-- 建立初始 baseline 時可先使用能力值快捷鍵開啟白底 EXP row 作為高可信 EXP 數字來源；成功擷取 ROI 後需立即用同一個能力值快捷鍵關閉視窗，再以截圖 crop 執行 OCR。
-- 能力值視窗 baseline 只把 EXP 數字送入統計，不採用能力值窗的整數百分比；成功後仍回到底部 EXP OCR 做日常更新與精確百分比追蹤。
+- 日常更新、初始 baseline 與 EXP-10 checkpoint 應先嘗試滑鼠指向 EXP 條尾端產生的浮動 EXP tooltip；tooltip 擷取或 OCR 失敗時只可等待下一輪或 fallback 到既有底部 EXP OCR。
+- 偵測到實體滑鼠移動、點擊或滾輪時，EXP 讀取需延後到滑鼠閒置 5 秒後再執行；此延後只暫停取樣，不暫停經驗統計時間。
+- 擷取浮動 EXP tooltip 時仍需短暫彈起左右鍵、保存原座標，並在同一個短鎖定區間內完成游標定位、tooltip 停留、ROI 截圖；若截圖前後游標偏離 EXP 目標點，需丟棄該張 ROI 並重試，截圖完成後立即解除鎖定並還原滑鼠位置；OCR 解析應在截圖後的背景工作執行。
+- 能力值窗 EXP 讀取已棄用；經驗統計不應要求能力值快捷鍵，也不應開啟能力值窗作為 baseline 或 EXP-10 fallback。
 - EXP OCR 前處理的主路徑應保留完整文字 ROI、補邊並放大。
 - Pixel OCR 百分比數字需先以白字前景 mask 與 glyph topology 判讀；`6/8/0/9/3/5` 這類近似 glyph 若無法由拓樸與模板同向支持，應 fail closed，不可只靠綠條或最高模板分數改寫。
 - 二值化與 parser 容錯只作為 fallback，不應用 parser 掩蓋可在影像層修正的問題。
