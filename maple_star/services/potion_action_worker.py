@@ -47,6 +47,9 @@ class PotionActionWorker:
     def hold(self, bar_type: str, vk_code: int) -> None:
         self.action_queue.put(PotionAction("hold", bar_type, vk_code=vk_code))
 
+    def refresh_hold(self, bar_type: str, vk_code: int) -> None:
+        self.action_queue.put(PotionAction("refresh_hold", bar_type, vk_code=vk_code))
+
     def release(self, bar_type: str, vk_code: int) -> None:
         self.action_queue.put(PotionAction("release", bar_type, vk_code=vk_code))
 
@@ -98,6 +101,15 @@ def _apply_potion_action(action: PotionAction, held: dict[str, int]) -> None:
         if current_vk == action.vk_code:
             return
         if current_vk:
+            key_up(current_vk)
+            held.pop(action.bar_type, None)
+        key_down(action.vk_code)
+        held[action.bar_type] = action.vk_code
+        return
+
+    if action.action == "refresh_hold":
+        current_vk = held.get(action.bar_type, 0)
+        if current_vk and current_vk != action.vk_code:
             key_up(current_vk)
             held.pop(action.bar_type, None)
         key_down(action.vk_code)

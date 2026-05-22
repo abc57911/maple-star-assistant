@@ -179,20 +179,24 @@ class RuntimeProcessCoordinator:
         self._potion_statuses = self._ctx.Queue()
         self._experience_commands = self._ctx.Queue()
         self._experience_statuses = self._ctx.Queue()
-        settings_payload = settings.to_json_dict()
-        self._potion_process = self._ctx.Process(
-            target=_run_potion_runtime_process,
-            args=(self._potion_commands, self._potion_statuses, settings_payload, int(target_hwnd or 0)),
-            name="MapleStarPotionRuntime",
-            daemon=True,
-        )
+        self._settings_payload = settings.to_json_dict()
+        self._target_hwnd = int(target_hwnd or 0)
+        self._potion_process = self._new_potion_process()
         self._experience_process = self._ctx.Process(
             target=_run_experience_stats_process,
-            args=(self._experience_commands, self._experience_statuses, settings_payload, int(target_hwnd or 0)),
+            args=(self._experience_commands, self._experience_statuses, self._settings_payload, self._target_hwnd),
             name="MapleStarExperienceStats",
             daemon=True,
         )
         self._started = False
+
+    def _new_potion_process(self) -> mp.Process:
+        return self._ctx.Process(
+            target=_run_potion_runtime_process,
+            args=(self._potion_commands, self._potion_statuses, self._settings_payload, self._target_hwnd),
+            name="MapleStarPotionRuntime",
+            daemon=True,
+        )
 
     def start(self) -> None:
         if self._started:
@@ -202,12 +206,14 @@ class RuntimeProcessCoordinator:
         self._started = True
 
     def send_settings(self, settings: AutoPotionSettings) -> None:
-        command = SettingsUpdated(settings.to_json_dict())
+        self._settings_payload = settings.to_json_dict()
+        command = SettingsUpdated(self._settings_payload)
         self._potion_commands.put(command)
         self._experience_commands.put(command)
 
     def send_target_window(self, hwnd: int) -> None:
-        command = TargetWindowUpdated(int(hwnd or 0))
+        self._target_hwnd = int(hwnd or 0)
+        command = TargetWindowUpdated(self._target_hwnd)
         self._potion_commands.put(command)
         self._experience_commands.put(command)
 
@@ -228,6 +234,20 @@ class RuntimeProcessCoordinator:
 
     def experience_alive(self) -> bool:
         return self._experience_process.is_alive()
+
+    def restart_potion(self, settings: AutoPotionSettings, target_hwnd: int = 0, timeout: float = 1.0) -> None:
+        self._settings_payload = settings.to_json_dict()
+        self._target_hwnd = int(target_hwnd or 0)
+        self._potion_commands.put(PotionControl(False, False, emergency_stop=True, release_all=True))
+        self._potion_commands.put(Shutdown())
+        self._potion_process.join(timeout=timeout)
+        if self._potion_process.is_alive():
+            self._potion_process.terminate()
+            self._potion_process.join(timeout=timeout)
+        self._potion_commands = self._ctx.Queue()
+        self._potion_statuses = self._ctx.Queue()
+        self._potion_process = self._new_potion_process()
+        self._potion_process.start()
 
     def stop(self, timeout: float = 1.0) -> None:
         if not self._started:

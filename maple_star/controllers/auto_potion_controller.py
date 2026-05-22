@@ -19,6 +19,7 @@ import numpy as np
 
 from ..constants import (
     ASYNC_KEY_DOWN_MASK,
+    AUTO_DRINK_DISABLE_HOLD_SECONDS,
     BAR_COLUMN_FILL_MIN_RATIO,
     BAR_CONFIRM_CAPTURE_ATTEMPTS,
     BAR_CONFIRM_FALLBACK_MAX_DELTA_PERCENT,
@@ -79,6 +80,7 @@ from ..constants import (
     POTION_EFFECT_STABILITY_CONFIRMATION_VOLATILITY_TOLERANCE_PERCENT,
     POTION_EFFECT_WATCH_CHANGE_TOLERANCE_PERCENT,
     POTION_EFFECT_WATCH_VOLATILITY_TOLERANCE_PERCENT,
+    POTION_CONTINUOUS_HOLD_REFRESH_SECONDS,
     POTION_FAST_CAPTURE_INTERVAL_SECONDS,
     POTION_MIN_COOLDOWN_SECONDS,
     POTION_NEAR_THRESHOLD_FAST_MARGIN_PERCENT,
@@ -178,6 +180,7 @@ EXPERIENCE_WIDE_TEXT_HEIGHT_RATIO = 1.65
 EXPERIENCE_TOOLTIP_SETTLE_SECONDS = 0.16
 EXPERIENCE_TOOLTIP_RETRY_SETTLE_SECONDS = 0.08
 EXPERIENCE_TOOLTIP_CAPTURE_ATTEMPTS = 3
+EXPERIENCE_TOOLTIP_OCR_FALLBACK_FAILURES = 3
 EXPERIENCE_TOOLTIP_CURSOR_TOLERANCE_PIXELS = 2
 EXPERIENCE_MOUSE_IDLE_DELAY_SECONDS = 5.0
 EXPERIENCE_TOOLTIP_CURSOR_RIGHT_PADDING_RATIO = 0.08
@@ -233,6 +236,8 @@ MEDIA_SOUND_ALIASES = (
 POTION_TIME_EPSILON_SECONDS = 1e-9
 POTION_PENDING_SEND_CAPTURE_GUARD_SECONDS = 0.20
 POTION_EXPERIENCE_DEFER_SECONDS = 1.0
+POTION_BLOCKED_SOUND_INTERVAL_SECONDS = 3.0
+RUNTIME_POTION_STATUS_TIMEOUT_SECONDS = 2.0
 DIRECT_BAR_BIT_COUNT = 32
 DIRECT_BAR_BYTES_PER_PIXEL = 4
 DIB_RGB_COLORS = 0
@@ -296,6 +301,7 @@ class AutoPotionController:
         self.mp_potion_damage_pressure_active = False
         self.hp_out_of_potion_hold: OutOfPotionHold | None = None
         self.mp_out_of_potion_hold: OutOfPotionHold | None = None
+        self.last_potion_blocked_sound_at = -999.0
         self.last_error_at = -999.0
         self.last_unstable_bar_at = -999.0
         self.auto_drink_enabled = True
@@ -328,11 +334,14 @@ class AutoPotionController:
         self.last_experience_toggle_hotkey_at = -999.0
         self.last_experience_reset_hotkey_at = -999.0
         self.last_pickup_toggle_hotkey_at = -999.0
+        self.auto_drink_disable_hold_started_at = -999.0
         self.pickup_disable_hold_started_at = -999.0
         self.pickup_enabled = False
         self.pickup_held_vk = 0
         self.hp_potion_held_vk = 0
         self.mp_potion_held_vk = 0
+        self.hp_potion_hold_refreshed_at = -999.0
+        self.mp_potion_hold_refreshed_at = -999.0
         self.emergency_stop_requested = False
         self.last_action = "啟動"
         self.last_bar_debug: dict[str, BarDetectionDebug] = {
@@ -362,6 +371,7 @@ class AutoPotionController:
             )
         self.experience_ocr_job: ExperienceOcrJob | None = None
         self.experience_ocr_burst: ExperienceOcrBurst | None = None
+        self.experience_tooltip_ocr_failures = 0
         self.experience_baseline_calibration: ExperienceBaselineCalibration | None = None
         self.experience_baseline_ocr_job: ExperienceOcrJob | None = None
         self.experience_baseline_calibration_attempts = 0
@@ -438,6 +448,7 @@ class AutoPotionController:
         self.runtime_target_hwnd = target_hwnd
         self.runtime_settings_snapshot = None
         self.runtime_control_state = None
+        self.last_runtime_potion_status_at = time.monotonic()
 
     def _send_runtime_settings_if_needed(self) -> None:
         runtime = getattr(self, "runtime_processes", None)
@@ -473,6 +484,7 @@ class AutoPotionController:
         previous_state = getattr(self, "runtime_control_state", None)
         if previous_state is None or state[:2] != previous_state[:2]:
             self.runtime_potion_generation = int(getattr(self, "runtime_potion_generation", 0)) + 1
+            self.last_runtime_potion_status_at = time.monotonic()
         if previous_state is None or state[1:] != previous_state[1:]:
             self.runtime_experience_generation = int(getattr(self, "runtime_experience_generation", 0)) + 1
         self.runtime_control_state = state
@@ -520,6 +532,7 @@ class AutoPotionController:
         self._send_runtime_controls_if_needed()
         self._drain_runtime_statuses()
         self._report_runtime_worker_failures()
+        self._recover_stale_runtime_potion_process(now)
 
     def _drain_runtime_statuses(self) -> None:
         runtime = getattr(self, "runtime_processes", None)
@@ -643,6 +656,44 @@ class AutoPotionController:
         if not runtime.experience_alive() and not getattr(self, "runtime_experience_crash_reported", False):
             self._apply_worker_crash(WorkerCrashed("experience", "process exited"))
 
+    def _recover_stale_runtime_potion_process(self, now: float) -> None:
+        if not self._runtime_processes_active():
+            return
+        if not self.scripts_enabled or not self.auto_drink_enabled:
+            self.last_runtime_potion_status_at = now
+            return
+        if getattr(self, "runtime_potion_crash_reported", False):
+            return
+        last_status_at = getattr(self, "last_runtime_potion_status_at", -999.0)
+        if last_status_at < 0:
+            self.last_runtime_potion_status_at = now
+            return
+        if now - last_status_at + POTION_TIME_EPSILON_SECONDS < RUNTIME_POTION_STATUS_TIMEOUT_SECONDS:
+            return
+
+        runtime = getattr(self, "runtime_processes", None)
+        restart = getattr(runtime, "restart_potion", None)
+        if not callable(restart):
+            self._apply_worker_crash(WorkerCrashed("potion", "status timeout"))
+            return
+        try:
+            target_hwnd = self._target_window_handle()
+            restart(self.settings, target_hwnd)
+        except Exception as exc:
+            log_exception("喝水 process 重啟失敗")
+            self._apply_worker_crash(WorkerCrashed("potion", f"restart failed: {exc}"))
+            return
+
+        self.runtime_target_hwnd = target_hwnd
+        self.runtime_settings_snapshot = None
+        self.runtime_control_state = None
+        self.gameplay_hud_active = False
+        self.last_runtime_potion_status_at = now
+        self.gui.set_status("喝水 process 無回報，已自動重啟")
+        self.gui.show_toggle_notice("喝水 process 已重啟")
+        self._send_runtime_settings_if_needed()
+        self._send_runtime_controls_if_needed()
+
     def _control_hotkey_vk(self, hotkey: str, fallback: str) -> int:
         try:
             return parse_vk_key(hotkey)
@@ -732,6 +783,8 @@ class AutoPotionController:
             self.experience_toggle_hotkey_was_down = False
             self.experience_reset_hotkey_was_down = False
             self.pickup_toggle_hotkey_was_down = False
+            self.auto_drink_disable_hold_started_at = -999.0
+            self.pickup_disable_hold_started_at = -999.0
             self._release_pickup_key()
             self._release_all_potion_keys()
             self.control_hotkeys_suppressed_until_release = False
@@ -763,6 +816,7 @@ class AutoPotionController:
             if cached_down is not None:
                 self._apply_control_hotkey_down_states(cached_down)
                 now = time.monotonic()
+                self._process_pending_auto_drink_disable(now)
                 self._process_pending_pickup_disable(now)
                 if worker_events:
                     for event in worker_events:
@@ -770,6 +824,7 @@ class AutoPotionController:
                 return
             if worker_events:
                 now = time.monotonic()
+                self._process_pending_auto_drink_disable(now)
                 self._process_pending_pickup_disable(now)
                 for event in worker_events:
                     self._dispatch_control_hotkey_event(event, now)
@@ -835,7 +890,9 @@ class AutoPotionController:
             pickup_toggle_triggered = True
         self.pickup_toggle_hotkey_was_down = pickup_toggle_is_down
 
-        self._process_pending_pickup_disable(time.monotonic())
+        now = time.monotonic()
+        self._process_pending_auto_drink_disable(now)
+        self._process_pending_pickup_disable(now)
         if emergency_stop_triggered:
             self.emergency_stop()
         elif toggle_triggered:
@@ -944,6 +1001,10 @@ class AutoPotionController:
         if now - self.last_toggle_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
             return
         self.last_toggle_hotkey_at = now
+        if self.auto_drink_enabled and not self._has_out_of_potion_hold():
+            self.auto_drink_disable_hold_started_at = now
+            print(f"自動喝水停用確認：按住 {self.settings.toggle_hotkey} {AUTO_DRINK_DISABLE_HOLD_SECONDS:.2f} 秒")
+            return
         self.toggle_auto_drink_enabled()
 
     def _try_toggle_experience_efficiency(self, now: float) -> None:
@@ -979,6 +1040,22 @@ class AutoPotionController:
             print(f"拾取停用確認：按住 {self.settings.pickup_toggle_hotkey} {PICKUP_DISABLE_HOLD_SECONDS:.2f} 秒")
             return
         self.toggle_pickup_enabled()
+
+    def _process_pending_auto_drink_disable(self, now: float) -> None:
+        started_at = getattr(self, "auto_drink_disable_hold_started_at", -999.0)
+        if started_at < 0:
+            return
+        if not self.auto_drink_enabled or self._has_out_of_potion_hold():
+            self.auto_drink_disable_hold_started_at = -999.0
+            return
+        if not self.toggle_hotkey_was_down:
+            self.auto_drink_disable_hold_started_at = -999.0
+            print("自動喝水停用取消：熱鍵未持續按住")
+            return
+        if now - started_at + POTION_TIME_EPSILON_SECONDS < AUTO_DRINK_DISABLE_HOLD_SECONDS:
+            return
+        self.auto_drink_disable_hold_started_at = -999.0
+        self.toggle_auto_drink_enabled()
 
     def _process_pending_pickup_disable(self, now: float) -> None:
         started_at = getattr(self, "pickup_disable_hold_started_at", -999.0)
@@ -1079,11 +1156,21 @@ class AutoPotionController:
         else:
             self.mp_potion_held_vk = vk_code
 
+    def _potion_hold_refreshed_at(self, bar_type: str) -> float:
+        return getattr(self, "hp_potion_hold_refreshed_at" if bar_type == "hp" else "mp_potion_hold_refreshed_at", -999.0)
+
+    def _set_potion_hold_refreshed_at(self, bar_type: str, now: float) -> None:
+        if bar_type == "hp":
+            self.hp_potion_hold_refreshed_at = now
+        else:
+            self.mp_potion_hold_refreshed_at = now
+
     def _release_potion_key(self, bar_type: str) -> None:
         held_vk = self._potion_held_vk(bar_type)
         if not held_vk:
             return
         self._set_potion_held_vk(bar_type, 0)
+        self._set_potion_hold_refreshed_at(bar_type, -999.0)
         worker = getattr(self, "potion_action_worker", None)
         if worker is not None:
             worker.release(bar_type, held_vk)
@@ -1097,17 +1184,21 @@ class AutoPotionController:
             self._send_runtime_release_all_potions()
             self.hp_potion_held_vk = 0
             self.mp_potion_held_vk = 0
+            self.hp_potion_hold_refreshed_at = -999.0
+            self.mp_potion_hold_refreshed_at = -999.0
             return
         worker = getattr(self, "potion_action_worker", None)
         if worker is not None and (self.hp_potion_held_vk or self.mp_potion_held_vk):
             worker.release_all()
             self.hp_potion_held_vk = 0
             self.mp_potion_held_vk = 0
+            self.hp_potion_hold_refreshed_at = -999.0
+            self.mp_potion_hold_refreshed_at = -999.0
             return
         self._release_potion_key("hp")
         self._release_potion_key("mp")
 
-    def _hold_potion_key(self, bar_type: str, label: str, key_name: str) -> bool:
+    def _hold_potion_key(self, bar_type: str, label: str, key_name: str, now: float) -> bool:
         try:
             vk_code = parse_vk_key(key_name)
         except ValueError:
@@ -1117,15 +1208,26 @@ class AutoPotionController:
             return False
 
         if self._potion_held_vk(bar_type) == vk_code:
+            if now - self._potion_hold_refreshed_at(bar_type) < POTION_CONTINUOUS_HOLD_REFRESH_SECONDS:
+                return True
+            self._refresh_potion_hold_key(bar_type, vk_code)
+            self._set_potion_hold_refreshed_at(bar_type, now)
             return True
         self._release_potion_key(bar_type)
+        self._refresh_potion_hold_key(bar_type, vk_code)
+        self._set_potion_held_vk(bar_type, vk_code)
+        self._set_potion_hold_refreshed_at(bar_type, now)
+        return True
+
+    def _refresh_potion_hold_key(self, bar_type: str, vk_code: int) -> None:
         worker = getattr(self, "potion_action_worker", None)
         if worker is not None:
-            worker.hold(bar_type, vk_code)
+            if self._potion_held_vk(bar_type) == vk_code:
+                worker.refresh_hold(bar_type, vk_code)
+            else:
+                worker.hold(bar_type, vk_code)
         else:
             key_down(vk_code)
-        self._set_potion_held_vk(bar_type, vk_code)
-        return True
 
     def _log_potion_key_trigger_interval(self, label: str, key_name: str, previous_at: float, now: float) -> None:
         return
@@ -1138,6 +1240,7 @@ class AutoPotionController:
         tap_hotkey(key_name)
 
     def toggle_auto_drink_enabled(self) -> None:
+        self.auto_drink_disable_hold_started_at = -999.0
         if self._runtime_processes_active():
             if self.auto_drink_enabled and self._has_out_of_potion_hold():
                 self._clear_potion_effect_state()
@@ -1335,6 +1438,12 @@ class AutoPotionController:
                 self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
         except Exception:
             self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
+
+    def _play_potion_blocked_sound(self, now: float) -> None:
+        if now - self.last_potion_blocked_sound_at < POTION_BLOCKED_SOUND_INTERVAL_SECONDS:
+            return
+        self.last_potion_blocked_sound_at = now
+        self._play_media_file(AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop")
 
     def _preload_media_files(self) -> None:
         try:
@@ -1902,6 +2011,14 @@ class AutoPotionController:
     def _last_experience_tooltip_skip_was_mouse_drift(self) -> bool:
         details = getattr(self, "last_experience_tooltip_capture_skip", None)
         return isinstance(details, dict) and details.get("reason") == "浮動 EXP 擷取期間滑鼠偏移"
+
+    def _record_experience_tooltip_ocr_failure(self) -> int:
+        failures = int(getattr(self, "experience_tooltip_ocr_failures", 0)) + 1
+        self.experience_tooltip_ocr_failures = failures
+        return failures
+
+    def _clear_experience_tooltip_ocr_failures(self) -> None:
+        self.experience_tooltip_ocr_failures = 0
 
     def _start_bottom_experience_ocr_capture(self, now: float, *, effective_now: float) -> bool:
         regions = self._experience_text_regions()
@@ -3398,6 +3515,8 @@ class AutoPotionController:
         job_elapsed_ms = max(0.0, now - job.submitted_at) * 1000.0
         self._log_experience_ocr_reading(reading)
         if reading.success and reading.current_exp is not None:
+            if job.source == "tooltip":
+                self._clear_experience_tooltip_ocr_failures()
             tracker_samples = getattr(self.experience_tracker, "samples", None)
             has_tracker_samples = not isinstance(tracker_samples, list) or bool(tracker_samples)
             if reading.needs_bar_percent_guard and not has_tracker_samples:
@@ -3478,10 +3597,43 @@ class AutoPotionController:
             return True
 
         if job.source == "tooltip":
+            failure_count = self._record_experience_tooltip_ocr_failure()
             self.experience_tracker.record_ocr_result(False)
-            self._log_experience_ocr_error(now, f"浮動 EXP 失敗，改用底部 EXP OCR：{reading.reason}", reading.text)
             snapshot = self.experience_tracker.snapshot(effective_now)
-            snapshot.status = "浮動 EXP OCR 失敗，改用底部 EXP OCR"
+            if failure_count < EXPERIENCE_TOOLTIP_OCR_FALLBACK_FAILURES:
+                self._log_experience_ocr_error(
+                    now,
+                    (
+                        f"浮動 EXP 失敗，等待重試 "
+                        f"{failure_count}/{EXPERIENCE_TOOLTIP_OCR_FALLBACK_FAILURES}：{reading.reason}"
+                    ),
+                    reading.text,
+                )
+                snapshot.status = (
+                    f"浮動 EXP OCR 失敗，等待重試 "
+                    f"{failure_count}/{EXPERIENCE_TOOLTIP_OCR_FALLBACK_FAILURES}"
+                )
+                self._log_experience_debug_reading(
+                    job,
+                    reading,
+                    snapshot,
+                    decision="tooltip_retry",
+                    completed_at=now,
+                    effective_now=effective_now,
+                    job_elapsed_ms=job_elapsed_ms,
+                )
+                self.gui.set_experience_snapshot(snapshot)
+                return True
+
+            self._log_experience_ocr_error(
+                now,
+                (
+                    f"浮動 EXP 連續失敗 {failure_count} 次，改用底部 EXP OCR："
+                    f"{reading.reason}"
+                ),
+                reading.text,
+            )
+            snapshot.status = "浮動 EXP OCR 連續失敗，改用底部 EXP OCR"
             self._log_experience_debug_reading(
                 job,
                 reading,
@@ -3492,6 +3644,7 @@ class AutoPotionController:
                 job_elapsed_ms=job_elapsed_ms,
             )
             self.gui.set_experience_snapshot(snapshot)
+            self._clear_experience_tooltip_ocr_failures()
             self._start_bottom_experience_ocr_capture(now, effective_now=effective_now)
             return True
 
@@ -3807,6 +3960,7 @@ class AutoPotionController:
         if not self._is_target_window_active_before_send(label, now):
             if continuous_enabled:
                 self._release_potion_key(bar_type)
+            self._play_potion_blocked_sound(now)
             return
 
         if self._can_use_fast_repeat_potion_sample(bar_type):
@@ -3818,6 +3972,7 @@ class AutoPotionController:
             if continuous_enabled:
                 self._release_potion_key(bar_type)
             self._log_unstable_bar(now, label)
+            self._play_potion_blocked_sound(now)
             return
         if not should_drink_for_threshold(percent, threshold_percent):
             self._release_potion_key(bar_type)
@@ -3826,12 +3981,14 @@ class AutoPotionController:
         if not self._is_target_window_active_before_send(label, now):
             if continuous_enabled:
                 self._release_potion_key(bar_type)
+            self._play_potion_blocked_sound(now)
             return
 
         if continuous_enabled:
             previous_at = self._last_potion_drink_at(bar_type)
             was_held = self._potion_held_vk(bar_type) != 0
-            if not self._hold_potion_key(bar_type, label, key_name):
+            if not self._hold_potion_key(bar_type, label, key_name, now):
+                self._play_potion_blocked_sound(now)
                 return
             if not was_held:
                 self._log_potion_key_trigger_interval(label, key_name, previous_at, now)
