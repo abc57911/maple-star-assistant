@@ -112,6 +112,8 @@ from ..services.runtime_processes import (
     PotionStatus,
     RuntimeProcessCoordinator,
     WorkerCrashed,
+    _experience_status_signature,
+    _potion_status_signature,
 )
 from ..models.experience import (
     EXP_LEVEL_WRAP_HIGH_PERCENT,
@@ -183,6 +185,7 @@ EXPERIENCE_TOOLTIP_CAPTURE_ATTEMPTS = 3
 EXPERIENCE_TOOLTIP_OCR_FALLBACK_FAILURES = 3
 EXPERIENCE_TOOLTIP_CURSOR_TOLERANCE_PIXELS = 2
 EXPERIENCE_MOUSE_IDLE_DELAY_SECONDS = 5.0
+EXPERIENCE_MOUSE_IDLE_STATUS_UPDATE_SECONDS = EXPERIENCE_CAPTURE_INTERVAL_SECONDS
 EXPERIENCE_TOOLTIP_CURSOR_RIGHT_PADDING_RATIO = 0.08
 EXPERIENCE_TOOLTIP_ROI_OFFSET_X = 8
 EXPERIENCE_TOOLTIP_ROI_OFFSET_Y = -28
@@ -254,6 +257,98 @@ _STAT_WINDOW_EXP_LABEL_TEMPLATE: np.ndarray | None = None
 _HUD_LABEL_TEMPLATE_CACHE: dict[str, np.ndarray] = {}
 
 
+class DirectBarCaptureContext:
+    def __init__(self) -> None:
+        self.screen_dc = 0
+        self.memory_dc = 0
+        self.bitmap = 0
+        self.old_bitmap = 0
+        self.size: tuple[int, int] | None = None
+        self.bitmap_info = BitmapInfo()
+        self.buffer: object | None = None
+
+    def capture(self, left: int, top: int, width: int, height: int) -> np.ndarray | None:
+        if width <= 0 or height <= 0:
+            return None
+        if not self._ensure_size(width, height):
+            return None
+        if not gdi32.BitBlt(self.memory_dc, 0, 0, width, height, self.screen_dc, left, top, GDI_SRCCOPY):
+            return None
+        assert self.buffer is not None
+        copied_rows = gdi32.GetDIBits(
+            self.memory_dc,
+            self.bitmap,
+            0,
+            height,
+            ctypes.byref(self.buffer),
+            ctypes.byref(self.bitmap_info),
+            DIB_RGB_COLORS,
+        )
+        if copied_rows != height:
+            return None
+        return np.frombuffer(self.buffer, dtype=np.uint8).reshape((height, width, DIRECT_BAR_BYTES_PER_PIXEL)).copy()
+
+    def _ensure_size(self, width: int, height: int) -> bool:
+        if not self.screen_dc:
+            self.screen_dc = user32.GetDC(None)
+            if not self.screen_dc:
+                return False
+        if not self.memory_dc:
+            self.memory_dc = gdi32.CreateCompatibleDC(self.screen_dc)
+            if not self.memory_dc:
+                self.close()
+                return False
+        if self.size == (width, height) and self.bitmap and self.buffer is not None:
+            return True
+
+        self._delete_bitmap()
+        bitmap = gdi32.CreateCompatibleBitmap(self.screen_dc, width, height)
+        if not bitmap:
+            self.close()
+            return False
+        old_bitmap = gdi32.SelectObject(self.memory_dc, bitmap)
+        if not old_bitmap:
+            gdi32.DeleteObject(bitmap)
+            self.close()
+            return False
+
+        size_image = width * height * DIRECT_BAR_BYTES_PER_PIXEL
+        bitmap_info = BitmapInfo()
+        bitmap_info.bmiHeader.biSize = ctypes.sizeof(bitmap_info.bmiHeader)
+        bitmap_info.bmiHeader.biWidth = width
+        bitmap_info.bmiHeader.biHeight = -height
+        bitmap_info.bmiHeader.biPlanes = 1
+        bitmap_info.bmiHeader.biBitCount = DIRECT_BAR_BIT_COUNT
+        bitmap_info.bmiHeader.biCompression = GDI_BI_RGB
+        bitmap_info.bmiHeader.biSizeImage = size_image
+
+        self.bitmap = bitmap
+        self.old_bitmap = old_bitmap
+        self.size = (width, height)
+        self.bitmap_info = bitmap_info
+        self.buffer = (ctypes.c_ubyte * size_image)()
+        return True
+
+    def _delete_bitmap(self) -> None:
+        if self.bitmap:
+            if self.old_bitmap:
+                gdi32.SelectObject(self.memory_dc, self.old_bitmap)
+            gdi32.DeleteObject(self.bitmap)
+        self.bitmap = 0
+        self.old_bitmap = 0
+        self.size = None
+        self.buffer = None
+
+    def close(self) -> None:
+        self._delete_bitmap()
+        if self.memory_dc:
+            gdi32.DeleteDC(self.memory_dc)
+            self.memory_dc = 0
+        if self.screen_dc:
+            user32.ReleaseDC(None, self.screen_dc)
+            self.screen_dc = 0
+
+
 class AutoPotionController:
     def __init__(
         self,
@@ -266,6 +361,7 @@ class AutoPotionController:
         experience_executor: object | None = None,
         runtime_processes_enabled: bool = True,
         save_settings_on_cleanup: bool = True,
+        experience_only_runtime: bool = False,
     ) -> None:
         self.is_target_window_active = is_target_window_active
         self.target_window_provider = target_window_provider
@@ -274,6 +370,8 @@ class AutoPotionController:
         self.gui.set_bar_preview_provider(self.capture_bar_preview_images)
         self.gui.set_experience_reset_handler(self.reset_experience_statistics)
         self.sct = mss.mss()
+        self.experience_only_runtime = experience_only_runtime
+        self.direct_bar_capture_context = DirectBarCaptureContext()
         self.next_capture_at = 0.0
         self.next_experience_capture_at = 0.0
         self.experience_pause_started_at: float | None = None
@@ -391,6 +489,8 @@ class AutoPotionController:
             log_exception("滑鼠活動 observer 啟動失敗")
             self.mouse_activity_observer = None
         self.last_experience_mouse_idle_delay_log_at = -999.0
+        self.last_experience_mouse_idle_status_at = -999.0
+        self.last_experience_mouse_idle_status_key: tuple[str, int] | None = None
         self.last_completed_experience_ocr_signature: ExperienceOcrImageSignature | None = None
         self.last_failed_experience_ocr_signature: ExperienceOcrImageSignature | None = None
         self.last_experience_ocr_error_at = -999.0
@@ -415,6 +515,8 @@ class AutoPotionController:
         self.runtime_experience_crash_reported = False
         self.last_runtime_potion_status_at = -999.0
         self.last_runtime_experience_alert_status = ""
+        self.last_applied_potion_status_signature: tuple[object, ...] | None = None
+        self.last_applied_experience_status_signature: tuple[object, ...] | None = None
         self._media_alias_paths: dict[str, Path] = {}
         self._preload_media_files()
         if start_control_hotkey_worker:
@@ -591,6 +693,10 @@ class AutoPotionController:
         return True
 
     def _apply_experience_status(self, status: ExperienceStatus) -> None:
+        signature = _experience_status_signature(status)
+        if signature == getattr(self, "last_applied_experience_status_signature", None):
+            return
+        self.last_applied_experience_status_signature = signature
         self.gui.set_experience_snapshot(status.snapshot)
         snapshot_status = str(getattr(status.snapshot, "status", "") or "")
         if not snapshot_status.startswith("EXP-10 OCR 失敗"):
@@ -601,6 +707,15 @@ class AutoPotionController:
         self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
 
     def _apply_potion_status(self, status: PotionStatus) -> None:
+        self.last_runtime_potion_status_at = time.monotonic()
+        signature = _potion_status_signature(status)
+        if (
+            signature == getattr(self, "last_applied_potion_status_signature", None)
+            and not status.notice
+            and not status.console_lines
+        ):
+            return
+        self.last_applied_potion_status_signature = signature
         self.gameplay_hud_active = status.gameplay_hud_active
         self.gui.set_current_percentages(status.hp_percent, status.mp_percent)
         self.gui.set_bar_detection_debug(status.hp_debug, status.mp_debug)
@@ -616,7 +731,6 @@ class AutoPotionController:
             self.last_action = status.action
         for line in status.console_lines:
             print(line)
-        self.last_runtime_potion_status_at = time.monotonic()
 
     def _apply_runtime_bar_detection_region(
         self,
@@ -894,15 +1008,15 @@ class AutoPotionController:
         self._process_pending_auto_drink_disable(now)
         self._process_pending_pickup_disable(now)
         if emergency_stop_triggered:
-            self.emergency_stop()
+            self._try_emergency_stop(now)
         elif toggle_triggered:
-            self._try_toggle_scripts_enabled(time.monotonic())
+            self._try_toggle_scripts_enabled(now)
         elif experience_toggle_triggered:
-            self._try_toggle_experience_efficiency(time.monotonic())
+            self._try_toggle_experience_efficiency(now)
         elif experience_reset_triggered:
-            self._try_reset_experience_statistics(time.monotonic())
+            self._try_reset_experience_statistics(now)
         elif pickup_toggle_triggered:
-            self._try_toggle_pickup(time.monotonic())
+            self._try_toggle_pickup(now)
 
     def _drain_control_hotkey_worker_events(self) -> list[str]:
         worker = getattr(self, "control_hotkey_worker", None)
@@ -922,7 +1036,7 @@ class AutoPotionController:
 
     def _dispatch_control_hotkey_event(self, event: str, now: float) -> None:
         if event == CONTROL_HOTKEY_EMERGENCY_STOP:
-            self.emergency_stop()
+            self._try_emergency_stop(now)
         elif event == CONTROL_HOTKEY_TOGGLE:
             self._try_toggle_scripts_enabled(now)
         elif event == CONTROL_HOTKEY_EXPERIENCE_TOGGLE:
@@ -997,10 +1111,27 @@ class AutoPotionController:
         self.emergency_stop_requested = False
         return True
 
+    def _control_hotkey_requires_game_foreground(self, action: str) -> bool:
+        if self.is_target_window_active():
+            return True
+        message = f"請先切回楓星遊戲再{action}"
+        self.gui.set_status(message)
+        self.gui.show_toggle_notice(message)
+        self.last_action = message
+        print(message)
+        return False
+
+    def _try_emergency_stop(self, now: float) -> None:
+        if not self._control_hotkey_requires_game_foreground("切換總開關"):
+            return
+        self.emergency_stop()
+
     def _try_toggle_scripts_enabled(self, now: float) -> None:
         if now - self.last_toggle_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
             return
         self.last_toggle_hotkey_at = now
+        if not self._control_hotkey_requires_game_foreground("切換自動喝水"):
+            return
         if self.auto_drink_enabled and not self._has_out_of_potion_hold():
             self.auto_drink_disable_hold_started_at = now
             print(f"自動喝水停用確認：按住 {self.settings.toggle_hotkey} {AUTO_DRINK_DISABLE_HOLD_SECONDS:.2f} 秒")
@@ -1011,6 +1142,8 @@ class AutoPotionController:
         if now - self.last_experience_toggle_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
             return
         self.last_experience_toggle_hotkey_at = now
+        if not self._control_hotkey_requires_game_foreground("切換經驗統計"):
+            return
         self.toggle_experience_efficiency()
 
     def _try_reset_experience_statistics(self, now: float) -> None:
@@ -1029,6 +1162,8 @@ class AutoPotionController:
         if now - self.last_pickup_toggle_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
             return
         self.last_pickup_toggle_hotkey_at = now
+        if not self._control_hotkey_requires_game_foreground("切換拾取"):
+            return
         print(
             "拾取切換熱鍵："
             f"enabled={self.pickup_enabled} "
@@ -1055,6 +1190,8 @@ class AutoPotionController:
         if now - started_at + POTION_TIME_EPSILON_SECONDS < AUTO_DRINK_DISABLE_HOLD_SECONDS:
             return
         self.auto_drink_disable_hold_started_at = -999.0
+        if not self._control_hotkey_requires_game_foreground("停用自動喝水"):
+            return
         self.toggle_auto_drink_enabled()
 
     def _process_pending_pickup_disable(self, now: float) -> None:
@@ -1071,6 +1208,8 @@ class AutoPotionController:
         if now - started_at + POTION_TIME_EPSILON_SECONDS < PICKUP_DISABLE_HOLD_SECONDS:
             return
         self.pickup_disable_hold_started_at = -999.0
+        if not self._control_hotkey_requires_game_foreground("停用拾取"):
+            return
         self.toggle_pickup_enabled()
 
     def toggle_pickup_enabled(self) -> None:
@@ -1523,6 +1662,10 @@ class AutoPotionController:
             return
 
         target_window_active = self.is_target_window_active()
+        if getattr(self, "experience_only_runtime", False):
+            self._update_experience_only_runtime(now, target_window_active)
+            return
+
         if target_window_active:
             self._sync_pickup_key_state()
             self._process_due_potion_sends(now)
@@ -1572,8 +1715,7 @@ class AutoPotionController:
                 )
                 return
 
-            hp_percent = self._capture_bar_percent("hp")
-            mp_percent = self._capture_bar_percent("mp")
+            hp_percent, mp_percent = self._capture_bar_percents()
             self.next_capture_at = now + self._capture_interval_after_potion_sample(hp_percent, mp_percent)
             self.gui.set_current_percentages(hp_percent, mp_percent)
             self.gui.set_bar_detection_debug(
@@ -1618,6 +1760,72 @@ class AutoPotionController:
                 print(f"自動喝水錯誤：{exc}")
                 self.gui.set_status(f"錯誤：{exc}")
                 self.last_error_at = now
+
+    def _update_experience_only_runtime(self, now: float, target_window_active: bool) -> None:
+        if not target_window_active:
+            self._set_gameplay_hud_active(False, now)
+            self._pause_experience_for_inactive_state(now, "等待楓星前景，保留統計")
+            return
+
+        try:
+            if not self.settings.exp_efficiency_enabled:
+                self._stop_experience_ocr_job()
+                effective_now = self._pause_experience_clock(now)
+                snapshot = self.experience_tracker.snapshot(effective_now)
+                snapshot.status = "已停用，保留統計" if snapshot.sample_count else "已停用"
+                self.gui.set_experience_snapshot(snapshot)
+                return
+
+            transition_pause_reason = self._transition_pause_reason(now)
+            if transition_pause_reason:
+                self._set_gameplay_hud_active(False, now)
+                self._pause_experience_for_missing_hud(now)
+                self.gui.set_status(transition_pause_reason)
+                return
+
+            if self._experience_runtime_needs_hud_refresh(now):
+                if not self._refresh_gameplay_hud_state(now):
+                    self._pause_experience_for_missing_hud(now)
+                    self.gui.set_status("未偵測到遊戲 HUD，暫停 EXP 取樣")
+                    return
+            elif self._experience_runtime_has_cached_hud():
+                self._set_gameplay_hud_active(True, now)
+
+            self._update_experience_efficiency(now)
+        except Exception as exc:
+            if now - self.last_error_at >= 2.0:
+                print(f"EXP runtime 錯誤：{exc}")
+                self.gui.set_status(f"EXP runtime 錯誤：{exc}")
+                self.last_error_at = now
+
+    def _experience_runtime_needs_hud_refresh(self, now: float) -> bool:
+        if not self._experience_runtime_has_cached_hud():
+            return True
+        if getattr(self, "experience_ocr_job", None) is not None:
+            return False
+        if getattr(self, "experience_ocr_burst", None) is not None:
+            return False
+        if getattr(self, "experience_baseline_ocr_job", None) is not None:
+            return False
+        if getattr(self, "experience_10m_checkpoint_ocr_job", None) is not None:
+            return False
+        if now >= float(getattr(self, "next_experience_capture_at", 0.0)):
+            return True
+        if now >= float(getattr(self, "next_experience_baseline_calibration_at", 0.0)):
+            samples = getattr(self.experience_tracker, "samples", [])
+            if isinstance(samples, list) and not samples:
+                return True
+        checkpoint_exp = getattr(self.experience_tracker, "exp_10m_checkpoint_exp", None)
+        if isinstance(checkpoint_exp, int) and now >= float(getattr(self, "next_experience_10m_checkpoint_at", 0.0)):
+            return True
+        return False
+
+    def _experience_runtime_has_cached_hud(self) -> bool:
+        cached = self._cached_bottom_bar_screen_regions_for_current_client()
+        if cached is None:
+            return False
+        regions, track_regions, client_bounds = cached
+        return self._bar_region_pair_geometry_is_valid(regions, track_regions, client_bounds)
 
     def _save_settings_when_idle(self, now: float) -> None:
         snapshot = self.settings.snapshot()
@@ -1971,10 +2179,22 @@ class AutoPotionController:
         self.next_experience_capture_at = max(self.next_experience_capture_at, defer_until)
         snapshot = self.experience_tracker.snapshot(effective_now)
         remaining = max(0.0, defer_until - now)
-        snapshot.status = f"滑鼠操作中，延後 EXP 讀取 {remaining:.1f}s"
-        self.gui.set_experience_snapshot(snapshot)
+        remaining_seconds = int(math.ceil(remaining))
+        snapshot.status = f"滑鼠操作中，延後 EXP 讀取 {remaining_seconds:d}s"
+        status_key = (phase, 0)
+        if self._should_publish_experience_mouse_idle_status(now, status_key):
+            self.gui.set_experience_snapshot(snapshot)
         self._log_experience_mouse_idle_delay(now, effective_now, phase, last_activity_at, defer_until, snapshot)
         return True
+
+    def _should_publish_experience_mouse_idle_status(self, now: float, status_key: tuple[str, int]) -> bool:
+        last_key = getattr(self, "last_experience_mouse_idle_status_key", None)
+        last_at = float(getattr(self, "last_experience_mouse_idle_status_at", -999.0))
+        if status_key != last_key or now - last_at >= EXPERIENCE_MOUSE_IDLE_STATUS_UPDATE_SECONDS:
+            self.last_experience_mouse_idle_status_key = status_key
+            self.last_experience_mouse_idle_status_at = now
+            return True
+        return False
 
     def _log_experience_mouse_idle_delay(
         self,
@@ -2400,6 +2620,11 @@ class AutoPotionController:
         self.experience_10m_checkpoint_stopped = False
         self.experience_10m_checkpoint_attempts = 0
         self.experience_10m_checkpoint_tooltip_failed = False
+
+    def _seed_exp_10m_checkpoint_if_needed(self, current_exp: int, now: float) -> None:
+        if isinstance(getattr(self.experience_tracker, "exp_10m_checkpoint_exp", None), int):
+            return
+        self._record_exp_10m_checkpoint(current_exp, now)
 
     def _resume_exp_10m_checkpoint_schedule(self, now: float) -> None:
         self.experience_10m_checkpoint_stopped = False
@@ -3583,6 +3808,7 @@ class AutoPotionController:
             else:
                 self._clear_failed_experience_ocr_signature()
                 self._remember_completed_experience_ocr_signature(job)
+            self._seed_exp_10m_checkpoint_if_needed(reading.current_exp, now)
             snapshot = self.experience_tracker.snapshot(effective_now)
             self._log_experience_debug_reading(
                 job,
@@ -4637,6 +4863,95 @@ class AutoPotionController:
             "自動定位",
             track_region=track_region,
         )
+
+    def _capture_bar_percents(self) -> tuple[float | None, float | None]:
+        direct = self._capture_bar_percents_direct()
+        if direct is not None:
+            return direct
+        return self._capture_bar_percent("hp"), self._capture_bar_percent("mp")
+
+    def _capture_bar_percents_direct(self) -> tuple[float | None, float | None] | None:
+        cached = self._cached_bottom_bar_screen_regions_for_current_client()
+        if cached is None:
+            return None
+        regions, track_regions, client_bounds = cached
+        if not self._bar_region_pair_geometry_is_valid(regions, track_regions, client_bounds):
+            return None
+        sample_regions = {
+            bar_type: track_regions.get(bar_type) or regions.get(bar_type)
+            for bar_type in ("hp", "mp")
+        }
+        if sample_regions["hp"] is None or sample_regions["mp"] is None:
+            return None
+
+        union = self._union_direct_bar_regions(sample_regions["hp"], sample_regions["mp"])
+        if union is None:
+            return None
+        image = self._direct_bar_image_from_region(union)
+        if image is None:
+            return None
+
+        results: dict[str, float] = {}
+        for bar_type in ("hp", "mp"):
+            region = sample_regions[bar_type]
+            assert region is not None
+            crop = self._crop_direct_bar_image(image, union, region)
+            if crop is None:
+                return None
+            percent, reason, tail_clear = self._sample_direct_bar_percent_from_image(crop, bar_type)
+            if percent is None:
+                return None
+            results[bar_type] = percent
+            self._remember_stable_bar_sample(bar_type, percent, region)
+            self._set_bar_detection_debug(
+                bar_type,
+                source="直接取色",
+                region=region,
+                percent=percent,
+                success=True,
+                reason=reason,
+                require_clear_tail=False,
+                tail_clear=tail_clear,
+            )
+
+        self.bottom_bar_regions = regions
+        self.bottom_bar_track_regions = track_regions
+        self.bottom_bar_client_bounds = client_bounds
+        self.bottom_bar_regions_at = time.monotonic()
+        return results.get("hp"), results.get("mp")
+
+    def _union_direct_bar_regions(
+        self,
+        first: tuple[int, int, int, int] | None,
+        second: tuple[int, int, int, int] | None,
+    ) -> tuple[int, int, int, int] | None:
+        if first is None or second is None:
+            return None
+        left = min(first[0], second[0])
+        top = min(first[1], second[1])
+        right = max(first[0] + first[2], second[0] + second[2])
+        bottom = max(first[1] + first[3], second[1] + second[3])
+        width = right - left
+        height = bottom - top
+        if width <= 0 or height <= 0:
+            return None
+        return left, top, width, height
+
+    def _crop_direct_bar_image(
+        self,
+        image: np.ndarray,
+        source_region: tuple[int, int, int, int],
+        target_region: tuple[int, int, int, int],
+    ) -> np.ndarray | None:
+        source_left, source_top, source_width, source_height = source_region
+        target_left, target_top, target_width, target_height = target_region
+        x = target_left - source_left
+        y = target_top - source_top
+        if x < 0 or y < 0 or target_width <= 0 or target_height <= 0:
+            return None
+        if x + target_width > source_width or y + target_height > source_height:
+            return None
+        return image[y : y + target_height, x : x + target_width]
 
     def _capture_bar_percent_direct(self, bar_type: str, *, require_clear_tail: bool = False) -> float | None:
         if require_clear_tail:
@@ -5735,6 +6050,13 @@ class AutoPotionController:
         if image is None:
             return None, "直接取色讀取畫面失敗", None
 
+        return self._sample_direct_bar_percent_from_image(image, bar_type)
+
+    def _sample_direct_bar_percent_from_image(
+        self,
+        image: np.ndarray,
+        bar_type: str,
+    ) -> tuple[float | None, str, bool | None]:
         mask = self._bar_color_mask(image, bar_type)
         percent, reason, tail_clear = self._percent_from_bar_mask_result(
             mask,
@@ -5760,54 +6082,11 @@ class AutoPotionController:
         if width <= 0 or height <= 0:
             return None
 
-        screen_dc = user32.GetDC(None)
-        if not screen_dc:
-            return None
-        memory_dc = gdi32.CreateCompatibleDC(screen_dc)
-        if not memory_dc:
-            user32.ReleaseDC(None, screen_dc)
-            return None
-
-        bitmap = gdi32.CreateCompatibleBitmap(screen_dc, width, height)
-        if not bitmap:
-            gdi32.DeleteDC(memory_dc)
-            user32.ReleaseDC(None, screen_dc)
-            return None
-
-        old_bitmap = gdi32.SelectObject(memory_dc, bitmap)
-        try:
-            if not gdi32.BitBlt(memory_dc, 0, 0, width, height, screen_dc, left, top, GDI_SRCCOPY):
-                return None
-
-            bitmap_info = BitmapInfo()
-            bitmap_info.bmiHeader.biSize = ctypes.sizeof(bitmap_info.bmiHeader)
-            bitmap_info.bmiHeader.biWidth = width
-            bitmap_info.bmiHeader.biHeight = -height
-            bitmap_info.bmiHeader.biPlanes = 1
-            bitmap_info.bmiHeader.biBitCount = DIRECT_BAR_BIT_COUNT
-            bitmap_info.bmiHeader.biCompression = GDI_BI_RGB
-            bitmap_info.bmiHeader.biSizeImage = width * height * DIRECT_BAR_BYTES_PER_PIXEL
-
-            buffer = (ctypes.c_ubyte * bitmap_info.bmiHeader.biSizeImage)()
-            copied_rows = gdi32.GetDIBits(
-                memory_dc,
-                bitmap,
-                0,
-                height,
-                ctypes.byref(buffer),
-                ctypes.byref(bitmap_info),
-                DIB_RGB_COLORS,
-            )
-            if copied_rows != height:
-                return None
-
-            return np.frombuffer(buffer, dtype=np.uint8).reshape((height, width, DIRECT_BAR_BYTES_PER_PIXEL)).copy()
-        finally:
-            if old_bitmap:
-                gdi32.SelectObject(memory_dc, old_bitmap)
-            gdi32.DeleteObject(bitmap)
-            gdi32.DeleteDC(memory_dc)
-            user32.ReleaseDC(None, screen_dc)
+        context = getattr(self, "direct_bar_capture_context", None)
+        if context is None:
+            context = DirectBarCaptureContext()
+            self.direct_bar_capture_context = context
+        return context.capture(left, top, width, height)
 
     def _bar_percent_inputs(
         self,
@@ -6271,6 +6550,12 @@ class AutoPotionController:
                 stop_mouse_observer()
             self.mouse_activity_observer = None
         self._close_media_files()
+        direct_capture_context = getattr(self, "direct_bar_capture_context", None)
+        if direct_capture_context is not None:
+            try:
+                direct_capture_context.close()
+            except Exception:
+                pass
         try:
             self.experience_ocr_executor.shutdown(wait=False, cancel_futures=True)
         except Exception:

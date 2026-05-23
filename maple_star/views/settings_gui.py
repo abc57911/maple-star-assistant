@@ -2056,32 +2056,40 @@ class AutoPotionSettingsGui:
             return
         value_var.set(value)
 
+    def _set_text_if_changed(self, var: tk.StringVar, value: str) -> None:
+        if var.get() != value:
+            var.set(value)
+
     def set_current_percentages(self, hp_percent: float | None, mp_percent: float | None) -> None:
-        self.hp_current.set("HP: --%" if hp_percent is None else f"HP: {hp_percent:.0f}%")
-        self.mp_current.set("MP: --%" if mp_percent is None else f"MP: {mp_percent:.0f}%")
+        self._set_text_if_changed(self.hp_current, "HP: --%" if hp_percent is None else f"HP: {hp_percent:.0f}%")
+        self._set_text_if_changed(self.mp_current, "MP: --%" if mp_percent is None else f"MP: {mp_percent:.0f}%")
 
     def set_bar_detection_debug(self, hp_debug: str, mp_debug: str) -> None:
-        self.hp_detection_status.set(hp_debug)
-        self.mp_detection_status.set(mp_debug)
+        self._set_text_if_changed(self.hp_detection_status, hp_debug)
+        self._set_text_if_changed(self.mp_detection_status, mp_debug)
 
     def set_experience_snapshot(self, snapshot: ExperienceSnapshot) -> None:
         percent = "" if snapshot.current_percent is None else f" ({snapshot.current_percent:.2f}%)"
         ocr_success = format_ocr_success_rate(snapshot.ocr_success_count, snapshot.ocr_attempt_count)
-        self.exp_current_status.set(f"EXP：{format_exp(snapshot.current_exp)}{percent}    OCR：{ocr_success}")
-        self.exp_rate_10m_status.set(f"10m：{format_exp_rate(snapshot.xp_per_10m)}")
-        self.exp_rate_1h_status.set(f"1h：{format_exp_rate(snapshot.xp_per_hour)}")
-        self.exp_10m_gain_status.set(f"EXP-10：{format_exp_10m_gain(snapshot.exp_10m_gain)}")
-        self.exp_eta_status.set(
-            f"升級預估：{format_eta(snapshot.eta_seconds)}    時間：{format_duration(snapshot.elapsed_seconds)}"
+        self._set_text_if_changed(
+            self.exp_current_status,
+            f"EXP：{format_exp(snapshot.current_exp)}{percent}    OCR：{ocr_success}",
+        )
+        self._set_text_if_changed(self.exp_rate_10m_status, f"10m：{format_exp_rate(snapshot.xp_per_10m)}")
+        self._set_text_if_changed(self.exp_rate_1h_status, f"1h：{format_exp_rate(snapshot.xp_per_hour)}")
+        self._set_text_if_changed(self.exp_10m_gain_status, f"EXP-10：{format_exp_10m_gain(snapshot.exp_10m_gain)}")
+        self._set_text_if_changed(
+            self.exp_eta_status,
+            f"升級預估：{format_eta(snapshot.eta_seconds)}    時間：{format_duration(snapshot.elapsed_seconds)}",
         )
         sample_accept = format_ocr_success_rate(snapshot.sample_accept_count, snapshot.sample_attempt_count)
         confidence = format_rate_confidence(snapshot.rate_confidence)
-        self.exp_quality_status.set(f"樣本：{sample_accept}    信賴度：{confidence}")
-        self.exp_reader_status.set(f"狀態：{snapshot.status}")
+        self._set_text_if_changed(self.exp_quality_status, f"樣本：{sample_accept}    信賴度：{confidence}")
+        self._set_text_if_changed(self.exp_reader_status, f"狀態：{snapshot.status}")
 
     def set_status(self, message: str) -> None:
-        self.status.set(message)
-        self.runtime_status_message.set(f"狀態：{message or '--'}")
+        self._set_text_if_changed(self.status, message)
+        self._set_text_if_changed(self.runtime_status_message, f"狀態：{message or '--'}")
 
     def set_runtime_info(
         self,
@@ -2093,11 +2101,11 @@ class AutoPotionSettingsGui:
         held_keys: str,
         last_action: str,
     ) -> None:
-        self.runtime_script_status.set(f"自動喝水：{'啟用' if scripts_enabled else '暫停'}")
         foreground_label = "楓星" if target_active else (foreground_title or "--")
         if len(foreground_label) > 24:
             foreground_label = foreground_label[:23] + "..."
-        self.runtime_foreground_status.set(f"前景：{foreground_label}")
+        self._set_text_if_changed(self.runtime_script_status, f"自動喝水：{'啟用' if scripts_enabled else '暫停'}")
+        self._set_text_if_changed(self.runtime_foreground_status, f"前景：{foreground_label}")
 
     def _create_auxiliary_window(
         self,

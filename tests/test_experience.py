@@ -15,6 +15,9 @@ from unittest.mock import Mock, patch
 import cv2
 import numpy as np
 
+RUN_SLOW_OCR_TESTS = os.environ.get("MAPLE_STAR_RUN_SLOW_OCR_TESTS", "").lower() in {"1", "true", "yes", "on"}
+SLOW_OCR_SKIP_REASON = "設定 MAPLE_STAR_RUN_SLOW_OCR_TESTS=1 才執行慢速 OCR fixture 測試"
+
 from maple_star.experience import (
     ExperienceEfficiencyTracker,
     ExperienceOcrContinuityHint,
@@ -446,10 +449,12 @@ class ExperienceTests(unittest.TestCase):
         image[16:28, 28:260, :3] = 240
 
         variants = prepare_experience_tooltip_ocr_images(image)
+        retry_variants = prepare_experience_tooltip_ocr_images(image, include_retry=True)
 
         self.assertGreaterEqual(len(variants), 4)
         self.assertLessEqual(variants[1].shape[0], image.shape[0])
         self.assertGreater(variants[2].shape[0], variants[1].shape[0])
+        self.assertGreater(len(retry_variants), len(variants))
 
     def test_binary_fallback_removes_dense_horizontal_borders(self):
         image = np.zeros((30, 180, 4), dtype=np.uint8)
@@ -1455,6 +1460,7 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(reading.current_exp, 40327237)
         self.assertEqual(reading.percent, 94.32)
 
+    @unittest.skipUnless(RUN_SLOW_OCR_TESTS, SLOW_OCR_SKIP_REASON)
     def test_pixel_reader_has_no_false_accepts_on_labeled_fixtures(self):
         fixture_dir = Path(__file__).with_name("fixtures") / "experience_ocr"
         manifest = json.loads((fixture_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -2958,6 +2964,7 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(calls[-1]["lang"], PADDLEOCR_LANGUAGE)
         self.assertFalse(calls[-1]["use_angle_cls"])
 
+    @unittest.skipUnless(RUN_SLOW_OCR_TESTS, SLOW_OCR_SKIP_REASON)
     def test_paddle_fallback_reaches_90_percent_accuracy_on_labeled_fixtures(self):
         fixture_dir = Path(__file__).with_name("fixtures") / "experience_ocr"
         manifest_path = fixture_dir / "manifest.json"
@@ -3104,6 +3111,66 @@ class ExperienceTests(unittest.TestCase):
         startupinfo = calls[0]["startupinfo"]
         self.assertTrue(startupinfo.dwFlags & subprocess.STARTF_USESHOWWINDOW)
         self.assertEqual(startupinfo.wShowWindow, 0)
+
+    def test_tooltip_ocr_success_stops_after_first_variant_and_logs_telemetry(self):
+        reader = PaddleExperienceTextReader()
+        reader.ocr = object()
+        reader._predict = Mock(return_value={"dummy": True})
+        image = ExperienceOcrImage(np.zeros((46, 340, 4), dtype=np.uint8), source_id="tooltip")
+        reading = ExperienceTextReading(
+            text="EXP: 100 / 1000",
+            confidence=0.95,
+            success=True,
+            current_exp=100,
+            percent=10.0,
+            reason="OK",
+            source="tooltip",
+        )
+
+        with (
+            patch("maple_star.models.experience.reading_from_tooltip_paddle_result", return_value=reading),
+            patch("maple_star.models.experience.log_experience_debug") as log_debug,
+        ):
+            result = reader.read_tooltip_exp(image)
+
+        self.assertTrue(result.success)
+        self.assertEqual(reader._predict.call_count, 1)
+        self.assertEqual(reader.last_tooltip_ocr_telemetry["predict_count"], 1)
+        self.assertEqual(reader.last_tooltip_ocr_telemetry["selected_variant_index"], 0)
+        log_debug.assert_called_once()
+
+    def test_tooltip_ocr_retry_variants_run_only_after_base_variants_fail(self):
+        reader = PaddleExperienceTextReader()
+        reader.ocr = object()
+        reader._predict = Mock(return_value={"dummy": True})
+        image_array = np.zeros((46, 340, 4), dtype=np.uint8)
+        image_array[:, :, :3] = (80, 70, 55)
+        image_array[16:28, 28:260, :3] = 240
+        image = ExperienceOcrImage(image_array, source_id="tooltip")
+        base_count = len(prepare_experience_tooltip_ocr_images(image_array))
+        failure = ExperienceTextReading(text="bad", confidence=0.1, reason="浮動 EXP 解析失敗", source="tooltip")
+        success = ExperienceTextReading(
+            text="EXP: 500 / 1000",
+            confidence=0.95,
+            success=True,
+            current_exp=500,
+            percent=50.0,
+            reason="OK",
+            source="tooltip",
+        )
+
+        with (
+            patch(
+                "maple_star.models.experience.reading_from_tooltip_paddle_result",
+                side_effect=[failure] * base_count + [success],
+            ),
+            patch("maple_star.models.experience.log_experience_debug"),
+        ):
+            result = reader.read_tooltip_exp(image)
+
+        self.assertTrue(result.success)
+        self.assertEqual(reader._predict.call_count, base_count + 1)
+        self.assertEqual(reader.last_tooltip_ocr_telemetry["selected_variant_index"], base_count)
 
     def test_tracker_reports_exp_rates_and_eta(self):
         tracker = ExperienceEfficiencyTracker()

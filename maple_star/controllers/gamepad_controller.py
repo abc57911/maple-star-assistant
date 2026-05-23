@@ -45,6 +45,7 @@ POLL_INTERVAL_SECONDS = 0.01
 MACRO_TIMING_GUARD_SECONDS = 0.12
 WINDOW_INTERACTION_LOOP_DELAY_MS = 120
 CONTROL_HOTKEY_PUMP_DELAY_MS = 10
+RUNTIME_INFO_REFRESH_INTERVAL_SECONDS = 0.25
 
 TRACKED_HELD_KEYS: set[int] = set()
 
@@ -446,6 +447,8 @@ def main() -> None:
                 statuses.append(status_text)
         return " / ".join(statuses) if statuses else "--"
 
+    last_runtime_info_refreshed_at = 0.0
+
     def refresh_runtime_info() -> None:
         title = foreground_window_title()
         active = is_target_window_active()
@@ -457,6 +460,13 @@ def main() -> None:
             held_keys=tracked_held_keys_text(),
             last_action=auto_potion.last_action,
         )
+
+    def maybe_refresh_runtime_info(now: float) -> None:
+        nonlocal last_runtime_info_refreshed_at
+        if now - last_runtime_info_refreshed_at < RUNTIME_INFO_REFRESH_INTERVAL_SECONDS:
+            return
+        last_runtime_info_refreshed_at = now
+        refresh_runtime_info()
 
     def next_binding_deadline_at() -> float | None:
         if auto_potion.is_key_capture_blocking_actions():
@@ -608,7 +618,7 @@ def main() -> None:
 
             if not window_interaction_active:
                 update_active_bindings()
-                refresh_runtime_info()
+                maybe_refresh_runtime_info(now)
                 process_controller_events()
                 report_controller_worker_if_dead()
         except Exception as exc:

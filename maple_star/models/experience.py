@@ -22,6 +22,7 @@ import cv2
 import numpy as np
 
 from ..constants import EXPERIENCE_BURST_CONSENSUS_MIN_COUNT
+from ..adapters.debug_logging import log_experience_debug
 
 
 EXP_SAMPLE_HISTORY_SECONDS = 3600.0
@@ -1768,20 +1769,64 @@ class PaddleExperienceTextReader:
             )
 
         best_reading: ExperienceTextReading | None = None
-        variants = prepare_experience_tooltip_ocr_images(ocr_image.image)
-        for variant in variants:
-            try:
-                result = self._predict(variant)
-            except Exception as exc:
-                reading = ExperienceTextReading(reason=f"浮動 EXP OCR 辨識失敗：{exc}", source="tooltip")
-            else:
-                reading = reading_from_tooltip_paddle_result(result)
-            if reading.success:
-                return reading
-            if best_reading is None or reading.confidence > best_reading.confidence:
-                best_reading = reading
+        selected_variant_index: int | None = None
+        predict_count = 0
+        started_at = time.perf_counter()
 
-        return best_reading or ExperienceTextReading(reason="浮動 EXP OCR 未取得文字", source="tooltip")
+        def read_variants(variants: list[np.ndarray], *, offset: int = 0) -> ExperienceTextReading | None:
+            nonlocal best_reading, selected_variant_index, predict_count
+            for local_index, variant in enumerate(variants):
+                variant_index = offset + local_index
+                try:
+                    result = self._predict(variant)
+                    predict_count += 1
+                except Exception as exc:
+                    reading = ExperienceTextReading(reason=f"浮動 EXP OCR 辨識失敗：{exc}", source="tooltip")
+                else:
+                    reading = reading_from_tooltip_paddle_result(result)
+                if reading.success:
+                    selected_variant_index = variant_index
+                    return reading
+                if best_reading is None or reading.confidence > best_reading.confidence:
+                    best_reading = reading
+            return None
+
+        base_variants = prepare_experience_tooltip_ocr_images(ocr_image.image)
+        full_variant_count = len(base_variants)
+        reading = read_variants(base_variants)
+        if reading is None:
+            full_variants = prepare_experience_tooltip_ocr_images(ocr_image.image, include_retry=True)
+            full_variant_count = len(full_variants)
+            retry_variants = full_variants[len(base_variants) :]
+            reading = read_variants(retry_variants, offset=len(base_variants))
+        final = reading or best_reading or ExperienceTextReading(reason="浮動 EXP OCR 未取得文字", source="tooltip")
+        self.last_tooltip_ocr_telemetry = {
+            "predict_count": predict_count,
+            "variant_count": full_variant_count,
+            "selected_variant_index": selected_variant_index,
+            "elapsed_ms": max(0.0, (time.perf_counter() - started_at) * 1000.0),
+            "success": bool(final.success),
+            "reason": final.reason,
+        }
+        self._log_tooltip_ocr_telemetry(self.last_tooltip_ocr_telemetry)
+        return final
+
+    def _log_tooltip_ocr_telemetry(self, telemetry: dict[str, object]) -> None:
+        try:
+            log_experience_debug(
+                {
+                    "event": "experience_tooltip_ocr",
+                    "source": "tooltip",
+                    "predict_count": telemetry.get("predict_count"),
+                    "variant_count": telemetry.get("variant_count"),
+                    "selected_variant_index": telemetry.get("selected_variant_index"),
+                    "elapsed_ms": telemetry.get("elapsed_ms"),
+                    "success": telemetry.get("success"),
+                    "reason": telemetry.get("reason"),
+                }
+            )
+        except Exception:
+            pass
 
     def _read_with_paddle(
         self,
@@ -2040,7 +2085,7 @@ def prepare_stat_window_exp_ocr_images(image: np.ndarray) -> list[np.ndarray]:
     return unique
 
 
-def prepare_experience_tooltip_ocr_images(image: np.ndarray) -> list[np.ndarray]:
+def prepare_experience_tooltip_ocr_images(image: np.ndarray, *, include_retry: bool = False) -> list[np.ndarray]:
     bgr = image[:, :, :3] if image.ndim >= 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     if bgr.size == 0:
         return [bgr]
@@ -2063,12 +2108,14 @@ def prepare_experience_tooltip_ocr_images(image: np.ndarray) -> list[np.ndarray]
         ),
         interpolation=cv2.INTER_CUBIC,
     )
-    contrast = cv2.convertScaleAbs(scaled, alpha=1.55, beta=8)
-    sharpened = _sharpen_experience_text_image(contrast)
     binary = _binarize_experience_tooltip_text_image(scaled)
-    variants = [bgr, cropped, scaled, contrast, sharpened]
+    variants = [bgr, cropped, scaled]
     if binary is not None:
         variants.append(binary)
+    if include_retry:
+        contrast = cv2.convertScaleAbs(scaled, alpha=1.55, beta=8)
+        sharpened = _sharpen_experience_text_image(contrast)
+        variants.extend([contrast, sharpened])
 
     unique: list[np.ndarray] = []
     seen: set[tuple[tuple[int, ...], bytes]] = set()

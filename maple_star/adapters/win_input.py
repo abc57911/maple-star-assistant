@@ -511,7 +511,6 @@ class _LowLevelMouseInputLock:
 
 @contextmanager
 def temporary_mouse_input_lock():
-    release_mouse_buttons()
     original_position = get_cursor_position()
     mouse_lock = _LowLevelMouseInputLock()
     mouse_lock.start()

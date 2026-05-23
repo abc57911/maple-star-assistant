@@ -53,7 +53,6 @@ class TemporaryMouseInputLockTests(unittest.TestCase):
                 events.append("stop")
 
         with (
-            patch("maple_star.adapters.win_input.release_mouse_buttons", side_effect=lambda: events.append("release")),
             patch("maple_star.adapters.win_input.get_cursor_position", side_effect=lambda: events.append("get") or (123, 456)),
             patch("maple_star.adapters.win_input.set_cursor_position", side_effect=lambda x, y: events.append(f"set:{x},{y}")),
             patch("maple_star.adapters.win_input.time.sleep", side_effect=lambda _seconds: events.append("drain")),
@@ -66,7 +65,6 @@ class TemporaryMouseInputLockTests(unittest.TestCase):
         self.assertEqual(
             events,
             [
-                "release",
                 "get",
                 "start",
                 "inside",

@@ -8,6 +8,8 @@ from maple_star.debug_logging import (
     close_experience_debug_logging,
     configure_debug_logging,
     configure_experience_debug_logging,
+    DEBUG_LOG_MAX_BYTES,
+    EXPERIENCE_DEBUG_LOG_MAX_BYTES,
     log_exception,
     log_experience_debug,
     write_debug_text,
@@ -16,6 +18,10 @@ from maple_star.gui import GuiConsoleWriter
 
 
 class DebugLoggingTests(unittest.TestCase):
+    def test_experience_debug_log_uses_same_default_rotation_limit_as_debug_log(self):
+        self.assertEqual(EXPERIENCE_DEBUG_LOG_MAX_BYTES, DEBUG_LOG_MAX_BYTES)
+        self.assertEqual(EXPERIENCE_DEBUG_LOG_MAX_BYTES, 1 * 1024 * 1024)
+
     def test_log_exception_writes_traceback_to_debug_log(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             debug_log = Path(temp_dir) / "debug.log"

@@ -37,6 +37,7 @@ from maple_star.controllers.auto_potion_controller import (
     EXPERIENCE_10M_CHECKPOINT_OCR_MAX_ATTEMPTS,
     EXPERIENCE_10M_CHECKPOINT_OCR_RETRY_DELAY_SECONDS,
     EXPERIENCE_MOUSE_IDLE_DELAY_SECONDS,
+    EXPERIENCE_MOUSE_IDLE_STATUS_UPDATE_SECONDS,
     EXPERIENCE_TOOLTIP_OCR_FALLBACK_FAILURES,
     POTION_BLOCKED_SOUND_INTERVAL_SECONDS,
     RUNTIME_POTION_STATUS_TIMEOUT_SECONDS,
@@ -58,8 +59,10 @@ from maple_star.services.runtime_processes import (
     PotionControl,
     PotionStatus,
     WorkerCrashed,
+    _experience_status_signature,
     _is_target_hwnd_active,
     _potion_status,
+    _potion_status_signature,
 )
 from maple_star.settings import AutoPotionSettings
 
@@ -126,7 +129,10 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             mp_cooldown_seconds=0.0,
             character_stat_hotkey="V",
         )
-        controller.is_target_window_active = Mock(side_effect=active_sequence)
+        if active_sequence:
+            controller.is_target_window_active = Mock(side_effect=active_sequence)
+        else:
+            controller.is_target_window_active = Mock(return_value=True)
         controller.gui = Mock()
         controller.gui.is_detecting_key.return_value = False
         controller.gui.consume_key_detection_finished.return_value = False
@@ -187,6 +193,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.experience_reset_hotkey_was_down = False
         controller.pickup_toggle_hotkey_was_down = False
         controller.last_toggle_hotkey_at = -999.0
+        controller.last_experience_toggle_hotkey_at = -999.0
         controller.last_experience_reset_hotkey_at = -999.0
         controller.last_pickup_toggle_hotkey_at = -999.0
         controller.auto_drink_disable_hold_started_at = -999.0
@@ -226,6 +233,10 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.runtime_potion_crash_reported = False
         controller.runtime_experience_crash_reported = False
         controller.last_runtime_experience_alert_status = ""
+        controller.last_applied_potion_status_signature = None
+        controller.last_applied_experience_status_signature = None
+        controller.experience_only_runtime = False
+        controller.direct_bar_capture_context = Mock()
         controller.last_runtime_potion_status_at = -999.0
         controller._log_unstable_bar = Mock()
         controller._play_toggle_beep = Mock()
@@ -235,6 +246,8 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.experience_10m_checkpoint_tooltip_failed = False
         controller.mouse_activity_observer = SimpleNamespace(last_activity_at=-999.0)
         controller.last_experience_mouse_idle_delay_log_at = -999.0
+        controller.last_experience_mouse_idle_status_at = -999.0
+        controller.last_experience_mouse_idle_status_key = None
         return controller
 
     def seed_stable_potion_samples(self, controller, bar_type, now, percent):
@@ -408,6 +421,47 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             "自動定位",
             track_region=None,
         )
+
+    def test_combined_direct_bar_sampling_reads_hp_mp_from_one_capture(self):
+        controller = self.make_controller([])
+        controller.bottom_bar_regions = {
+            "hp": (110, 205, 100, 8),
+            "mp": (240, 205, 100, 8),
+        }
+        controller.bottom_bar_track_regions = dict(controller.bottom_bar_regions)
+        controller._cache_bottom_bar_client_regions((100, 200, 800, 600))
+        union_image = np.zeros((8, 230, 4), dtype=np.uint8)
+
+        with (
+            patch.object(controller, "_foreground_client_bounds", return_value=(100, 200, 800, 600)),
+            patch.object(controller, "_direct_bar_image_from_region", return_value=union_image) as capture,
+            patch.object(
+                controller,
+                "_sample_direct_bar_percent_from_image",
+                side_effect=[(55.0, "OK:Direct", None), (77.0, "OK:Direct", None)],
+            ) as sample,
+        ):
+            hp_percent, mp_percent = controller._capture_bar_percents()
+
+        self.assertEqual((hp_percent, mp_percent), (55.0, 77.0))
+        capture.assert_called_once_with((110, 205, 230, 8))
+        self.assertEqual(sample.call_count, 2)
+
+    def test_direct_bar_image_reuses_capture_context(self):
+        controller = self.make_controller([])
+        context = Mock()
+        context.capture.side_effect = [
+            np.zeros((8, 100, 4), dtype=np.uint8),
+            np.ones((8, 100, 4), dtype=np.uint8),
+        ]
+        controller.direct_bar_capture_context = context
+
+        first = controller._direct_bar_image_from_region((10, 20, 100, 8))
+        second = controller._direct_bar_image_from_region((30, 20, 100, 8))
+
+        self.assertEqual(first.shape, (8, 100, 4))
+        self.assertEqual(second.shape, (8, 100, 4))
+        self.assertEqual(context.capture.call_count, 2)
 
     def build_synthetic_bottom_hud(
         self,
@@ -705,6 +759,32 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(payload["event"], "experience_mouse_idle_delay")
         self.assertEqual(payload["phase"], "ocr_capture")
         self.assertEqual(payload["decision"], "deferred")
+
+    def test_mouse_activity_defer_status_is_throttled(self):
+        controller = self.make_controller([])
+        controller.next_experience_capture_at = 0.0
+        controller.gameplay_hud_active = True
+        controller.experience_tracker.add_reading(1.0, 1_000_000, 10.0, confidence=0.95)
+        controller.mouse_activity_observer = SimpleNamespace(last_activity_at=10.0)
+        controller._start_experience_tooltip_ocr_capture = Mock(return_value=True)
+        controller._start_bottom_experience_ocr_capture = Mock(return_value=True)
+
+        with patch("maple_star.controllers.auto_potion_controller.log_experience_debug"):
+            controller._update_experience_efficiency(10.0)
+            controller.mouse_activity_observer.last_activity_at = 10.2
+            controller._update_experience_efficiency(10.2)
+            controller.mouse_activity_observer.last_activity_at = 11.0
+            controller._update_experience_efficiency(11.0)
+            controller.mouse_activity_observer.last_activity_at = 10.0 + EXPERIENCE_MOUSE_IDLE_STATUS_UPDATE_SECONDS
+            controller._update_experience_efficiency(10.0 + EXPERIENCE_MOUSE_IDLE_STATUS_UPDATE_SECONDS)
+
+        self.assertEqual(controller.gui.set_experience_snapshot.call_count, 2)
+        controller._start_experience_tooltip_ocr_capture.assert_not_called()
+        controller._start_bottom_experience_ocr_capture.assert_not_called()
+        self.assertAlmostEqual(
+            controller.next_experience_capture_at,
+            10.0 + EXPERIENCE_MOUSE_IDLE_STATUS_UPDATE_SECONDS + EXPERIENCE_MOUSE_IDLE_DELAY_SECONDS,
+        )
 
     def test_tooltip_mouse_drift_skip_does_not_fall_back_to_bottom_capture(self):
         controller = self.make_controller([])
@@ -1522,6 +1602,29 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(runtime.settings_sent, [controller.settings.snapshot()])
         self.assertEqual(runtime.potion_controls[-1], PotionControl(enabled=True, scripts_enabled=True, generation=1))
 
+    def test_experience_only_runtime_skips_potion_capture_until_exp_work_needs_hud(self):
+        controller = self.make_controller([True])
+        controller.experience_only_runtime = True
+        controller.settings.exp_efficiency_enabled = True
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller.gui.sync_after_event_processing.return_value = True
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._save_settings_when_idle = Mock()
+        controller._transition_pause_reason = Mock(return_value=None)
+        controller._experience_runtime_needs_hud_refresh = Mock(return_value=False)
+        controller._experience_runtime_has_cached_hud = Mock(return_value=True)
+        controller._update_experience_efficiency = Mock()
+        controller._sync_pickup_key_state = Mock()
+        controller._process_due_potion_sends = Mock()
+
+        controller.update(100.0)
+
+        controller._capture_bar_percent.assert_not_called()
+        controller._sync_pickup_key_state.assert_not_called()
+        controller._process_due_potion_sends.assert_not_called()
+        controller._update_experience_efficiency.assert_called_once_with(100.0)
+
     def test_runtime_target_active_accepts_foreground_msw_window_with_different_hwnd(self):
         with (
             patch("maple_star.services.runtime_processes.foreground_window_handle", return_value=2222),
@@ -1579,6 +1682,44 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(controller.last_bar_debug["mp"].region, (40, 50, 30, 12))
         controller.gui.refresh_bar_preview_once.assert_called_once()
         print_mock.assert_not_called()
+
+    def test_runtime_potion_status_signature_ignores_transient_notice_and_console(self):
+        base = PotionStatus(
+            hp_percent=25.0,
+            mp_percent=80.0,
+            hp_debug="hp ok",
+            mp_debug="mp ok",
+            status="自動喝水監控中",
+            action="",
+            notice="HP 疑似無藥水",
+            trigger_interval_ms=None,
+            console_lines=("line",),
+            gameplay_hud_active=True,
+            scripts_enabled=True,
+            auto_drink_enabled=True,
+        )
+        same_core = PotionStatus(
+            hp_percent=25.0,
+            mp_percent=80.0,
+            hp_debug="hp ok",
+            mp_debug="mp ok",
+            status="自動喝水監控中",
+            action="",
+            notice="",
+            trigger_interval_ms=None,
+            console_lines=(),
+            gameplay_hud_active=True,
+            scripts_enabled=True,
+            auto_drink_enabled=True,
+        )
+
+        self.assertEqual(_potion_status_signature(base), _potion_status_signature(same_core))
+
+    def test_runtime_experience_status_signature_tracks_snapshot_changes(self):
+        first = ExperienceStatus(snapshot=ExperienceSnapshot(status="統計中", current_exp=100), status="統計中")
+        second = ExperienceStatus(snapshot=ExperienceSnapshot(status="統計中", current_exp=200), status="統計中")
+
+        self.assertNotEqual(_experience_status_signature(first), _experience_status_signature(second))
 
     def test_runtime_exp_10m_ocr_failure_status_plays_alert_once(self):
         controller = self.make_controller([True])
@@ -3363,6 +3504,50 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertTrue(controller.auto_drink_enabled)
         play_media.assert_called_once_with(AUTO_DRINK_START_SOUND_PATH, "auto_drink_start")
 
+    def test_enable_disable_hotkeys_are_ignored_outside_game_foreground(self):
+        controller = self.make_controller([False, False, False, False])
+        controller.auto_drink_enabled = False
+        controller.settings.exp_efficiency_enabled = False
+        controller.pickup_enabled = False
+        controller.scripts_enabled = True
+
+        with (
+            patch.object(controller, "_play_media_file") as play_media,
+            patch("builtins.print"),
+        ):
+            controller._try_toggle_scripts_enabled(100.0)
+            controller._try_toggle_experience_efficiency(101.0)
+            controller._try_toggle_pickup(102.0)
+            controller._try_emergency_stop(103.0)
+
+        self.assertFalse(controller.auto_drink_enabled)
+        self.assertFalse(controller.settings.exp_efficiency_enabled)
+        self.assertFalse(controller.pickup_enabled)
+        self.assertTrue(controller.scripts_enabled)
+        play_media.assert_not_called()
+        controller.gui.show_toggle_notice.assert_any_call("請先切回楓星遊戲再切換自動喝水")
+        controller.gui.show_toggle_notice.assert_any_call("請先切回楓星遊戲再切換經驗統計")
+        controller.gui.show_toggle_notice.assert_any_call("請先切回楓星遊戲再切換拾取")
+        controller.gui.show_toggle_notice.assert_any_call("請先切回楓星遊戲再切換總開關")
+
+    def test_hold_disable_is_cancelled_if_game_loses_foreground_before_completion(self):
+        controller = self.make_controller([True, False])
+        controller.settings.toggle_hotkey = "F11"
+        controller.auto_drink_enabled = True
+        controller.toggle_hotkey_was_down = True
+
+        with (
+            patch.object(controller, "_play_media_file") as play_media,
+            patch("builtins.print"),
+        ):
+            controller._try_toggle_scripts_enabled(100.0)
+            controller._process_pending_auto_drink_disable(100.0 + AUTO_DRINK_DISABLE_HOLD_SECONDS)
+
+        self.assertTrue(controller.auto_drink_enabled)
+        self.assertEqual(controller.auto_drink_disable_hold_started_at, -999.0)
+        play_media.assert_not_called()
+        controller.gui.show_toggle_notice.assert_called_with("請先切回楓星遊戲再停用自動喝水")
+
     def test_play_media_file_reuses_open_alias_and_starts_immediately(self):
         controller = AutoPotionController.__new__(AutoPotionController)
         controller._play_toggle_beep = Mock()
@@ -4189,6 +4374,36 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(payload["current_exp"], 132553)
         self.assertEqual(payload["percent"], 18.36)
         self.assertEqual(payload["xp_per_10m"], 2000.0)
+
+    def test_accepted_experience_ocr_seeds_exp_10m_checkpoint_when_missing(self):
+        class DoneFuture:
+            def done(self):
+                return True
+
+            def result(self):
+                return ExperienceTextReading(
+                    current_exp=132553,
+                    percent=18.36,
+                    text="132553[18.36%]",
+                    confidence=0.98,
+                    success=True,
+                )
+
+        controller = self.make_controller([])
+        controller.experience_tracker.add_reading(0.0, 100000, 10.0, confidence=0.98)
+        controller.experience_tracker.exp_10m_checkpoint_exp = None
+        controller.experience_tracker.exp_10m_gain = None
+        controller.experience_ocr_job = ExperienceOcrJob(submitted_at=8.0, future=DoneFuture())
+
+        with patch("maple_star.controllers.auto_potion_controller.log_experience_debug"):
+            self.assertTrue(controller._process_experience_ocr_job(8.0, effective_now=8.0))
+
+        self.assertEqual(controller.experience_tracker.exp_10m_checkpoint_exp, 132553)
+        self.assertIsNone(controller.experience_tracker.exp_10m_gain)
+        self.assertAlmostEqual(
+            controller.next_experience_10m_checkpoint_at,
+            8.0 + EXPERIENCE_10M_CHECKPOINT_INTERVAL_SECONDS,
+        )
 
     def test_level_up_recovery_does_not_skip_repeated_failed_experience_roi(self):
         class ImmediateExecutor:

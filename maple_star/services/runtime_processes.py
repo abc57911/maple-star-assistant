@@ -14,6 +14,8 @@ from ..constants import DEFAULT_CAPTURE_INTERVAL_SECONDS
 from ..models.experience import ExperienceSnapshot
 from ..models.settings import AutoPotionSettings
 
+STATUS_HEARTBEAT_SECONDS = 1.0
+
 
 @dataclass(frozen=True)
 class SettingsUpdated:
@@ -315,6 +317,8 @@ def _run_potion_runtime_process(command_queue, status_queue, settings_payload: d
         controller._play_toggle_beep = lambda *_args, **_kwargs: None
         _install_potion_console_recorder(controller, gui)
         next_status_at = 0.0
+        next_heartbeat_at = 0.0
+        last_status_signature: tuple[object, ...] | None = None
         generation = 0
         shutdown = False
         while not shutdown:
@@ -329,7 +333,13 @@ def _run_potion_runtime_process(command_queue, status_queue, settings_payload: d
             if not shutdown:
                 controller.update(now, pump_gui=False)
                 if now >= next_status_at or gui.console_lines:
-                    status_queue.put(_potion_status(controller, gui, generation))
+                    status = _potion_status(controller, gui, generation)
+                    signature = _potion_status_signature(status)
+                    urgent = bool(status.notice or status.console_lines)
+                    if urgent or signature != last_status_signature or now >= next_heartbeat_at:
+                        status_queue.put(status)
+                        last_status_signature = signature
+                        next_heartbeat_at = now + STATUS_HEARTBEAT_SECONDS
                     next_status_at = now + 0.10
             time.sleep(0.01)
         controller._release_all_potion_keys()
@@ -356,12 +366,15 @@ def _run_experience_stats_process(command_queue, status_queue, settings_payload:
             experience_executor=InlineExecutor(),
             runtime_processes_enabled=False,
             save_settings_on_cleanup=False,
+            experience_only_runtime=True,
         )
         controller.auto_drink_enabled = False
         controller._save_settings_when_idle = lambda _now: None
         controller._play_media_file = lambda *_args, **_kwargs: None
         controller._play_toggle_beep = lambda *_args, **_kwargs: None
         next_status_at = 0.0
+        next_heartbeat_at = 0.0
+        last_status_signature: tuple[object, ...] | None = None
         generation = 0
         shutdown = False
         while not shutdown:
@@ -376,7 +389,12 @@ def _run_experience_stats_process(command_queue, status_queue, settings_payload:
             if not shutdown:
                 controller.update(now, pump_gui=False)
                 if now >= next_status_at:
-                    status_queue.put(ExperienceStatus(gui.experience_snapshot, gui.status, generation=generation))
+                    status = _experience_status(gui, generation)
+                    signature = _experience_status_signature(status)
+                    if signature != last_status_signature or now >= next_heartbeat_at:
+                        status_queue.put(status)
+                        last_status_signature = signature
+                        next_heartbeat_at = now + STATUS_HEARTBEAT_SECONDS
                     next_status_at = now + 0.20
             time.sleep(0.01)
         controller._cancel_experience_baseline_calibration(close_ui=True)
@@ -476,3 +494,57 @@ def _potion_status(controller: Any, gui: HeadlessRuntimeGui, generation: int = 0
         mp_region=_bar_debug_region(controller, "mp"),
         generation=int(generation or 0),
     )
+
+
+def _experience_status(gui: HeadlessRuntimeGui, generation: int = 0) -> ExperienceStatus:
+    return ExperienceStatus(gui.experience_snapshot, gui.status, generation=int(generation or 0))
+
+
+def _potion_status_signature(status: PotionStatus) -> tuple[object, ...]:
+    return (
+        _rounded_percent(status.hp_percent),
+        _rounded_percent(status.mp_percent),
+        status.hp_debug,
+        status.mp_debug,
+        status.status,
+        status.action,
+        status.gameplay_hud_active,
+        status.scripts_enabled,
+        status.auto_drink_enabled,
+        status.hp_region,
+        status.mp_region,
+        int(status.generation or 0),
+    )
+
+
+def _experience_status_signature(status: ExperienceStatus) -> tuple[object, ...]:
+    snapshot = status.snapshot
+    return (
+        snapshot.current_exp,
+        _rounded_percent(snapshot.current_percent),
+        snapshot.exp_10m_gain,
+        _rounded_float(snapshot.xp_per_5m),
+        _rounded_float(snapshot.xp_per_10m),
+        _rounded_float(snapshot.xp_per_hour),
+        _rounded_float(snapshot.eta_seconds),
+        _rounded_float(snapshot.elapsed_seconds),
+        snapshot.sample_count,
+        snapshot.sample_attempt_count,
+        snapshot.sample_accept_count,
+        _rounded_float(snapshot.sample_accept_rate),
+        _rounded_float(snapshot.rate_confidence),
+        snapshot.ocr_attempt_count,
+        snapshot.ocr_success_count,
+        _rounded_float(snapshot.ocr_success_rate),
+        snapshot.status,
+        status.status,
+        int(status.generation or 0),
+    )
+
+
+def _rounded_percent(value: float | None) -> float | None:
+    return None if value is None else round(float(value), 2)
+
+
+def _rounded_float(value: float | None) -> float | None:
+    return None if value is None else round(float(value), 3)
