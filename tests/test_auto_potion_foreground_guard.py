@@ -1744,6 +1744,8 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
                 auto_drink_enabled=True,
                 hp_region=(10, 20, 30, 12),
                 mp_region=(40, 50, 30, 12),
+                hp_track_region=(11, 21, 28, 10),
+                mp_track_region=(41, 51, 28, 10),
             )
         )
         runtime.experience_statuses.append(ExperienceStatus(snapshot=snapshot, status="統計中"))
@@ -1760,6 +1762,8 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(controller.last_action, "HP 喝水：Delete")
         self.assertEqual(controller.last_bar_debug["hp"].region, (10, 20, 30, 12))
         self.assertEqual(controller.last_bar_debug["mp"].region, (40, 50, 30, 12))
+        self.assertEqual(controller.last_bar_debug["hp"].track_region, (11, 21, 28, 10))
+        self.assertEqual(controller.last_bar_debug["mp"].track_region, (41, 51, 28, 10))
         controller.gui.refresh_bar_preview_once.assert_called_once()
         print_mock.assert_not_called()
 
@@ -1991,6 +1995,26 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         self.assertEqual(first_status.notice, "HP 檢查藥水")
         self.assertEqual(second_status.notice, "")
+
+    def test_headless_runtime_potion_status_includes_bar_track_regions(self):
+        gui = HeadlessRuntimeGui(AutoPotionSettings())
+        controller = SimpleNamespace(
+            last_action="",
+            last_bar_debug={
+                "hp": BarDetectionDebug("hp", region=(10, 20, 30, 12), track_region=(11, 21, 28, 10)),
+                "mp": BarDetectionDebug("mp", region=(40, 50, 30, 12), track_region=(41, 51, 28, 10)),
+            },
+            gameplay_hud_active=True,
+            scripts_enabled=True,
+            auto_drink_enabled=True,
+        )
+
+        status = _potion_status(controller, gui)
+
+        self.assertEqual(status.hp_region, (10, 20, 30, 12))
+        self.assertEqual(status.mp_region, (40, 50, 30, 12))
+        self.assertEqual(status.hp_track_region, (11, 21, 28, 10))
+        self.assertEqual(status.mp_track_region, (41, 51, 28, 10))
 
     def test_headless_runtime_media_sounds_are_consumed_once(self):
         gui = HeadlessRuntimeGui(AutoPotionSettings())

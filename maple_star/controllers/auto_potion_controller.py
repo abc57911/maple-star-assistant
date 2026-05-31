@@ -726,8 +726,18 @@ class AutoPotionController:
         self.gameplay_hud_active = status.gameplay_hud_active
         self.gui.set_current_percentages(status.hp_percent, status.mp_percent)
         self.gui.set_bar_detection_debug(status.hp_debug, status.mp_debug)
-        self._apply_runtime_bar_detection_region("hp", status.hp_region, status.hp_percent)
-        self._apply_runtime_bar_detection_region("mp", status.mp_region, status.mp_percent)
+        self._apply_runtime_bar_detection_region(
+            "hp",
+            status.hp_region,
+            status.hp_percent,
+            status.hp_track_region,
+        )
+        self._apply_runtime_bar_detection_region(
+            "mp",
+            status.mp_region,
+            status.mp_percent,
+            status.mp_track_region,
+        )
         if status.gameplay_hud_active and status.hp_region is not None and status.mp_region is not None:
             self.gui.refresh_bar_preview_once()
         if status.status:
@@ -752,6 +762,7 @@ class AutoPotionController:
         bar_type: str,
         region: tuple[int, int, int, int] | None,
         percent: float | None,
+        track_region: tuple[int, int, int, int] | None = None,
     ) -> None:
         if region is None:
             return
@@ -761,6 +772,7 @@ class AutoPotionController:
             self.last_bar_debug[bar_type] = debug
         debug.source = "runtime"
         debug.region = region
+        debug.track_region = track_region
         debug.percent = percent
         debug.success = percent is not None
         debug.reason = "OK" if percent is not None else debug.reason
@@ -2019,6 +2031,7 @@ class AutoPotionController:
                 bar_type,
                 source="HUD gate",
                 region=None,
+                track_region=None,
                 percent=None,
                 success=False,
                 reason="找不到包含 HP/MP 條的遊戲 HUD",
@@ -4929,6 +4942,7 @@ class AutoPotionController:
                 bar_type,
                 source="自動定位",
                 region=None,
+                track_region=None,
                 percent=None,
                 success=False,
                 reason="找不到 HP/MP 成對 HUD 條",
@@ -4989,6 +5003,7 @@ class AutoPotionController:
                 bar_type,
                 source="直接取色",
                 region=region,
+                track_region=region,
                 percent=percent,
                 success=True,
                 reason=reason,
@@ -5064,6 +5079,7 @@ class AutoPotionController:
             bar_type,
             source="直接取色",
             region=region,
+            track_region=region,
             percent=percent,
             success=True,
             reason=reason,
@@ -6084,6 +6100,7 @@ class AutoPotionController:
             bar_type,
             source=source,
             region=region,
+            track_region=track_region,
             percent=percent,
             success=percent is not None,
             reason=reason,
@@ -6312,6 +6329,7 @@ class AutoPotionController:
         *,
         source: str,
         region: tuple[int, int, int, int] | None,
+        track_region: tuple[int, int, int, int] | None = None,
         percent: float | None,
         success: bool,
         reason: str,
@@ -6322,6 +6340,7 @@ class AutoPotionController:
             bar_type=bar_type,
             source=source,
             region=region,
+            track_region=track_region,
             percent=percent,
             success=success,
             reason=reason,
@@ -6333,11 +6352,17 @@ class AutoPotionController:
         debug = self.last_bar_debug.get(bar_type, BarDetectionDebug(bar_type))
         label = "HP" if bar_type == "hp" else "MP"
         percent = "--" if debug.percent is None else f"{debug.percent:.0f}%"
-        region = "--" if debug.region is None else ",".join(str(value) for value in debug.region)
+        full_region = self._format_bar_debug_region(debug.region)
+        track_region = self._format_bar_debug_region(debug.track_region)
         tail = ""
         if debug.require_clear_tail:
             tail = " | tail=OK" if debug.tail_clear else " | tail=FAIL"
-        return f"{label}: {debug.source} | {percent} | {region} | {debug.reason}{tail}"
+        return f"{label}: {debug.source} | {percent} | full={full_region} | track={track_region} | {debug.reason}{tail}"
+
+    def _format_bar_debug_region(self, region: tuple[int, int, int, int] | None) -> str:
+        if region is None:
+            return "--"
+        return ",".join(str(value) for value in region)
 
     def current_bar_detection_regions(self) -> dict[str, tuple[int, int, int, int] | None]:
         return {
@@ -6388,7 +6413,8 @@ class AutoPotionController:
             for bar_type in ("hp", "mp"):
                 debug = self.last_bar_debug.get(bar_type, BarDetectionDebug(bar_type))
                 label = "HP" if bar_type == "hp" else "MP"
-                left, top, width, height = debug.region or (0, 0, 0, 0)
+                preview_region = debug.track_region or debug.region
+                left, top, width, height = preview_region or (0, 0, 0, 0)
                 try:
                     image = np.asarray(
                         self.sct.grab(
@@ -6403,10 +6429,10 @@ class AutoPotionController:
                     mask = self._bar_color_mask(image, bar_type)
                     track_region = getattr(self, "bottom_bar_track_regions", {}).get(bar_type)
                     percent_mask, percent_image = self._bar_percent_inputs(
-                        debug.region or (left, top, width, height),
+                        preview_region or (left, top, width, height),
                         mask,
                         image,
-                        track_region,
+                        None if debug.track_region is not None else track_region,
                     )
                     percent = self._percent_from_bar_mask(percent_mask, percent_image)
                     if percent is None:

@@ -22,6 +22,16 @@ class BarDetectionDebugTests(unittest.TestCase):
         controller.bar_override_warnings = {"hp": "", "mp": ""}
         return controller
 
+    def solid_bar_image(self, width: int, height: int, bar_type: str) -> np.ndarray:
+        image = np.zeros((height, width, 4), dtype=np.uint8)
+        image[:, :, 3] = 255
+        if bar_type == "hp":
+            image[:, :, 2] = 220
+        else:
+            image[:, :, 0] = 220
+            image[:, :, 1] = 120
+        return image
+
     def test_percent_result_reports_missing_color_columns(self):
         controller = self.make_controller()
         mask = np.zeros((4, 10), dtype=bool)
@@ -77,6 +87,7 @@ class BarDetectionDebugTests(unittest.TestCase):
             "hp",
             source="自動定位",
             region=(1, 2, 3, 4),
+            track_region=(5, 6, 7, 8),
             percent=55.5,
             success=True,
             reason="OK",
@@ -88,7 +99,8 @@ class BarDetectionDebugTests(unittest.TestCase):
 
         self.assertIn("HP: 自動定位", text)
         self.assertIn("56%", text)
-        self.assertIn("1,2,3,4", text)
+        self.assertIn("full=1,2,3,4", text)
+        self.assertIn("track=5,6,7,8", text)
         self.assertIn("OK", text)
 
     def test_bottom_bar_pair_regions_are_derived_from_candidate_pair(self):
@@ -241,6 +253,31 @@ class BarDetectionDebugTests(unittest.TestCase):
 
         self.assertIsNotNone(track)
         self.assertLessEqual(track[0] + track[2], 300)
+
+    def test_hp_track_right_of_label_stays_inside_track_before_adjacent_mp_label(self):
+        controller = self.make_controller()
+        image = np.zeros((80, 380, 4), dtype=np.uint8)
+        image[:, :, 3] = 255
+        image[28:48, 12:46, :3] = (235, 235, 235)
+        image[34:46, 56:160, :3] = (35, 35, 220)
+        image[34:46, 160:210, :3] = (75, 75, 75)
+        image[28:48, 215:248, :3] = (235, 235, 235)
+        image[34:46, 252:330, :3] = (220, 120, 20)
+        hp_mask = np.zeros((80, 380), dtype=bool)
+        hp_mask[34:46, 56:160] = True
+
+        track = controller._bar_track_right_of_label(
+            image,
+            hp_mask,
+            label_rect=(12, 28, 34, 20),
+            client_width=1000,
+            client_height=800,
+            bar_type="hp",
+        )
+
+        self.assertIsNotNone(track)
+        self.assertGreaterEqual(track[0], 54)
+        self.assertLessEqual(track[0] + track[2], 212)
 
     def test_transition_fade_guard_samples_centered_gameplay_content(self):
         controller = self.make_controller()
@@ -445,6 +482,54 @@ class BarDetectionDebugTests(unittest.TestCase):
         self.assertIsNone(previews["hp"]["image"])
         self.assertIsNone(previews["mp"]["image"])
         self.assertEqual(previews["hp"]["error"], "預覽截圖未通過 HP/MP 色條驗證")
+
+    def test_capture_bar_preview_uses_track_region_when_available(self):
+        controller = self.make_controller()
+        controller.last_bar_debug["hp"] = BarDetectionDebug(
+            "hp",
+            region=(1, 2, 20, 8),
+            track_region=(4, 3, 10, 4),
+            percent=100.0,
+        )
+        controller.last_bar_debug["mp"] = BarDetectionDebug(
+            "mp",
+            region=(30, 2, 20, 8),
+            track_region=(34, 3, 10, 4),
+            percent=100.0,
+        )
+        controller.sct = Mock()
+        controller.sct.grab.side_effect = [
+            self.solid_bar_image(10, 4, "hp"),
+            self.solid_bar_image(10, 4, "mp"),
+        ]
+
+        previews = controller.capture_bar_preview_images(make_target_topmost=False)
+
+        self.assertIsInstance(previews["hp"]["image"], bytes)
+        self.assertIsInstance(previews["mp"]["image"], bytes)
+        self.assertEqual(controller.sct.grab.call_args_list[0].args[0]["left"], 4)
+        self.assertEqual(controller.sct.grab.call_args_list[0].args[0]["width"], 10)
+        self.assertEqual(controller.sct.grab.call_args_list[1].args[0]["left"], 34)
+        self.assertEqual(controller.sct.grab.call_args_list[1].args[0]["width"], 10)
+
+    def test_capture_bar_preview_falls_back_to_full_region_without_track_region(self):
+        controller = self.make_controller()
+        controller.last_bar_debug["hp"] = BarDetectionDebug("hp", region=(1, 2, 20, 8), percent=100.0)
+        controller.last_bar_debug["mp"] = BarDetectionDebug("mp", region=(30, 2, 20, 8), percent=100.0)
+        controller.sct = Mock()
+        controller.sct.grab.side_effect = [
+            self.solid_bar_image(20, 8, "hp"),
+            self.solid_bar_image(20, 8, "mp"),
+        ]
+
+        previews = controller.capture_bar_preview_images(make_target_topmost=False)
+
+        self.assertIsInstance(previews["hp"]["image"], bytes)
+        self.assertIsInstance(previews["mp"]["image"], bytes)
+        self.assertEqual(controller.sct.grab.call_args_list[0].args[0]["left"], 1)
+        self.assertEqual(controller.sct.grab.call_args_list[0].args[0]["width"], 20)
+        self.assertEqual(controller.sct.grab.call_args_list[1].args[0]["left"], 30)
+        self.assertEqual(controller.sct.grab.call_args_list[1].args[0]["width"], 20)
 
     def test_capture_bar_preview_fails_when_target_window_cannot_be_displayed(self):
         controller = self.make_controller()

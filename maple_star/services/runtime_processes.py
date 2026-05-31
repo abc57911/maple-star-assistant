@@ -66,6 +66,8 @@ class PotionStatus:
     auto_drink_enabled: bool
     hp_region: tuple[int, int, int, int] | None = None
     mp_region: tuple[int, int, int, int] | None = None
+    hp_track_region: tuple[int, int, int, int] | None = None
+    mp_track_region: tuple[int, int, int, int] | None = None
     media_sound_aliases: tuple[str, ...] = ()
     generation: int = 0
 
@@ -437,6 +439,17 @@ def _bar_debug_region(controller: Any, bar_type: str) -> tuple[int, int, int, in
         return None
 
 
+def _bar_debug_track_region(controller: Any, bar_type: str) -> tuple[int, int, int, int] | None:
+    debug = getattr(controller, "last_bar_debug", {}).get(bar_type)
+    region = getattr(debug, "track_region", None)
+    if region is None or len(region) != 4:
+        return None
+    try:
+        return tuple(int(value) for value in region)
+    except (TypeError, ValueError):
+        return None
+
+
 def _handle_potion_command(
     controller: Any,
     gui: HeadlessRuntimeGui,
@@ -506,6 +519,8 @@ def _potion_status(controller: Any, gui: HeadlessRuntimeGui, generation: int = 0
         auto_drink_enabled=bool(getattr(controller, "auto_drink_enabled", False)),
         hp_region=_bar_debug_region(controller, "hp"),
         mp_region=_bar_debug_region(controller, "mp"),
+        hp_track_region=_bar_debug_track_region(controller, "hp"),
+        mp_track_region=_bar_debug_track_region(controller, "mp"),
         generation=int(generation or 0),
     )
 
@@ -527,6 +542,8 @@ def _potion_status_signature(status: PotionStatus) -> tuple[object, ...]:
         status.auto_drink_enabled,
         status.hp_region,
         status.mp_region,
+        status.hp_track_region,
+        status.mp_track_region,
         int(status.generation or 0),
     )
 

@@ -13,6 +13,7 @@ class BarDetectionDebug:
     bar_type: str
     source: str = "--"
     region: tuple[int, int, int, int] | None = None
+    track_region: tuple[int, int, int, int] | None = None
     percent: float | None = None
     success: bool = False
     reason: str = "尚未偵測"
