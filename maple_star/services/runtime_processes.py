@@ -8,7 +8,7 @@ from dataclasses import dataclass, fields
 from typing import Any
 
 from ..adapters.debug_logging import log_exception
-from ..adapters.win_input import foreground_window_handle, is_valid_window, is_window_minimized
+from ..adapters.win_input import foreground_window_handle, is_valid_window, is_window_minimized, window_ancestor_handles
 from ..adapters.window_target import is_target_window
 from ..constants import DEFAULT_CAPTURE_INTERVAL_SECONDS
 from ..models.experience import ExperienceSnapshot
@@ -66,6 +66,7 @@ class PotionStatus:
     auto_drink_enabled: bool
     hp_region: tuple[int, int, int, int] | None = None
     mp_region: tuple[int, int, int, int] | None = None
+    media_sound_aliases: tuple[str, ...] = ()
     generation: int = 0
 
 
@@ -107,6 +108,7 @@ class HeadlessRuntimeGui:
         self.mp_debug = "--"
         self.status = ""
         self.notice = ""
+        self.media_sound_aliases: list[str] = []
         self.experience_snapshot = ExperienceSnapshot(status="已停用")
         self.console_lines: list[str] = []
 
@@ -146,6 +148,14 @@ class HeadlessRuntimeGui:
         notice = self.notice
         self.notice = ""
         return notice
+
+    def queue_media_sound(self, alias: str) -> None:
+        self.media_sound_aliases.append(alias)
+
+    def consume_media_sound_aliases(self) -> tuple[str, ...]:
+        aliases = tuple(self.media_sound_aliases)
+        self.media_sound_aliases.clear()
+        return aliases
 
     def refresh_bar_preview_once(self) -> None:
         return
@@ -281,6 +291,7 @@ def _settings_from_payload(payload: dict[str, object]) -> AutoPotionSettings:
     for key, value in payload.items():
         if key in known_fields:
             setattr(settings, key, value)
+    settings.normalize_combo_slots()
     return settings
 
 
@@ -288,8 +299,10 @@ def _is_target_hwnd_active(hwnd: int) -> bool:
     foreground_hwnd = foreground_window_handle()
     if not foreground_hwnd:
         return False
-    if hwnd and is_valid_window(hwnd) and not is_window_minimized(hwnd) and foreground_hwnd == hwnd:
-        return True
+    foreground_handles = window_ancestor_handles(foreground_hwnd)
+    if hwnd and is_valid_window(hwnd) and not is_window_minimized(hwnd):
+        if any(candidate == hwnd for candidate in foreground_handles):
+            return True
     return is_target_window(foreground_hwnd)
 
 
@@ -313,7 +326,7 @@ def _run_potion_runtime_process(command_queue, status_queue, settings_payload: d
             save_settings_on_cleanup=False,
         )
         controller._save_settings_when_idle = lambda _now: None
-        controller._play_media_file = lambda *_args, **_kwargs: None
+        controller._play_media_file = lambda _path, alias: gui.queue_media_sound(str(alias))
         controller._play_toggle_beep = lambda *_args, **_kwargs: None
         _install_potion_console_recorder(controller, gui)
         next_status_at = 0.0
@@ -335,7 +348,7 @@ def _run_potion_runtime_process(command_queue, status_queue, settings_payload: d
                 if now >= next_status_at or gui.console_lines:
                     status = _potion_status(controller, gui, generation)
                     signature = _potion_status_signature(status)
-                    urgent = bool(status.notice or status.console_lines)
+                    urgent = bool(status.notice or status.console_lines or status.media_sound_aliases)
                     if urgent or signature != last_status_signature or now >= next_heartbeat_at:
                         status_queue.put(status)
                         last_status_signature = signature
@@ -485,6 +498,7 @@ def _potion_status(controller: Any, gui: HeadlessRuntimeGui, generation: int = 0
         status=gui.status,
         action=str(getattr(controller, "last_action", "")),
         notice=gui.consume_notice(),
+        media_sound_aliases=gui.consume_media_sound_aliases(),
         trigger_interval_ms=None,
         console_lines=lines,
         gameplay_hud_active=bool(getattr(controller, "gameplay_hud_active", False)),

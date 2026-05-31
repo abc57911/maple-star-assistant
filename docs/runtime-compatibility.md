@@ -18,8 +18,8 @@
 - 需考慮非 16:9 遊戲視窗。
 - 需考慮地圖切換漸暗 / 漸亮過場。
 - 需考慮切換頻道 loading 畫面。
-- 遊戲未在前景時，不得啟停自動喝水、拾取、經驗統計或總開關；只顯示「請先切回楓星遊戲...」類提示。
-- 啟停熱鍵的長按確認若中途失去前景，要取消 pending disable，避免使用者切窗時誤停功能。
+- 控制熱鍵只允許在楓星遊戲或 maple-star app 自身為前景時啟停自動喝水、拾取、經驗統計、重置 EXP 或切換總開關；其他前景視窗必須靜默忽略，不得攔截按鍵、顯示提示或改變 enabled state。
+- 啟停熱鍵的長按確認若中途離開楓星遊戲與 app 前景，要取消 pending disable，避免使用者切窗時誤停功能。
 
 ## HP/MP/EXP ROI
 - HP/MP 條與 EXP OCR 範圍需能隨遊戲視窗縮放或重開自動重新定位。
@@ -28,6 +28,7 @@
 - 沿用 cached/stale HP/MP ROI 前，需確認 HP/MP 成對幾何合理且兩條都能通過取色驗證；不可只因其中一條成功就沿用整組舊座標。
 - HP/MP 自動喝水前需允許短暫偵測失敗重試。
 - 實際送鍵前需做 confirm capture，確認失敗時可用相近的 unchecked fallback，但差異過大時必須放棄送鍵。
+- 道具 tooltip 或其他浮動 UI 遮住 HP/MP ROI 時，讀值應視為不確定並略過自動喝水；不可把深色 tooltip 面板誤當成 0% 空條。
 - HP/MP 條不穩定 log 需節流，避免偵測抖動時洗掉 GUI Console 內真正重要的 OCR 與異常樣本資訊。
 - HP/MP 已有 cached HUD geometry 時，優先用 direct GDI capture 對 HP/MP track 做同一張 union capture，再裁成各 bar，減少兩次 screenshot 壓力。
 - direct bar capture 失敗或 geometry 不可信時，必須 fallback 到既有 `_capture_bar_percent("hp"/"mp")` 路徑。

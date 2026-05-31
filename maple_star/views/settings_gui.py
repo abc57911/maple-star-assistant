@@ -31,8 +31,14 @@ from ..models.settings import (
     SETTINGS_PATH,
     AutoPotionSettings,
     CONTROLLER_BUTTON_CHOICES,
+    COMBO_JUMP_INTERVAL_MAX_SECONDS,
+    COMBO_JUMP_INTERVAL_MIN_SECONDS,
+    COMBO_SCRIPT_LABELS,
+    COMBO_SCRIPT_REPEATING_JUMP_SKILL,
+    COMBO_SCRIPT_SINGLE_JUMP_SKILL,
     copy_setting_values,
     normalize_controller_button_name,
+    normalize_combo_script_id,
     normalize_profile_name,
 )
 from ..services.settings_store import load_settings, save_settings
@@ -80,6 +86,12 @@ POTION_KEY_ENTRY_WIDTH = 76
 COMBO_KEY_ENTRY_WIDTH = 58
 SECONDS_ENTRY_WIDTH = 46
 CONTROLLER_COMBO_WIDTH = 100
+COMBO_COMPACT_KEY_ENTRY_WIDTH = 50
+COMBO_COMPACT_SECONDS_ENTRY_WIDTH = 42
+COMBO_COMPACT_CONTROLLER_WIDTH = 88
+COMBO_SCRIPT_COMBO_WIDTH = 118
+COMBO_SCRIPT_LABEL_TO_ID = {label: script_id for script_id, label in COMBO_SCRIPT_LABELS.items()}
+COMBO_SCRIPT_LABEL_VALUES = tuple(COMBO_SCRIPT_LABELS[script_id] for script_id in COMBO_SCRIPT_LABELS)
 LEFT_PANEL_MAX_WIDTH = 720
 COMPACT_PANEL_WIDTH = 520
 CONSOLE_MIN_WIDTH = 416
@@ -236,6 +248,10 @@ class AutoPotionSettingsGui:
         self.lb_skill_key = tk.StringVar(value=settings.lb_skill_key)
         self.lb_controller_button = tk.StringVar(value=settings.lb_controller_button)
         self.lb_skill_delay = tk.StringVar(value=f"{settings.lb_skill_delay_seconds:g}")
+        self.lb_jump_interval = tk.StringVar(value=f"{float(settings.combo_slot('B')['jump_interval_seconds']):g}")
+        self.combo_a_script = tk.StringVar(value=self._combo_script_label(str(settings.combo_slot("A")["script_id"])))
+        self.combo_b_script = tk.StringVar(value=self._combo_script_label(str(settings.combo_slot("B")["script_id"])))
+        self.combo_jump_interval_fields: dict[str, tuple[ctk.CTkLabel, ctk.CTkFrame]] = {}
         self.exp_efficiency_enabled = tk.BooleanVar(value=settings.exp_efficiency_enabled)
         self.toggle_hotkey = tk.StringVar(value=settings.toggle_hotkey)
         self.emergency_stop_hotkey = tk.StringVar(value=settings.emergency_stop_hotkey)
@@ -246,7 +262,7 @@ class AutoPotionSettingsGui:
         self.pickup_key = tk.StringVar(value=settings.pickup_key or "")
         self.hp_current = tk.StringVar(value="HP: --%")
         self.mp_current = tk.StringVar(value="MP: --%")
-        self.status = tk.StringVar(value="只在楓星為前景視窗時生效")
+        self.status = tk.StringVar(value="控制熱鍵可在楓星或本程式前景觸發")
         self.runtime_script_status = tk.StringVar(value="自動喝水：啟用")
         self.runtime_foreground_status = tk.StringVar(value="前景：--")
         self.runtime_status_message = tk.StringVar(value=f"狀態：{self.status.get()}")
@@ -457,54 +473,33 @@ class AutoPotionSettingsGui:
         combos_frame = ctk.CTkFrame(combo_group_body, fg_color="transparent")
         combos_frame.grid(row=0, column=0, sticky="ew")
         combos_frame.columnconfigure(0, weight=1)
-        combos_frame.columnconfigure(1, weight=1)
-
-        _section, combo_a_title, combo_a_frame = self._build_section(
+        self._build_combo_slot_row(
             combos_frame,
-            "",
-            row=0,
-            column=0,
-            sticky="nsew",
-            padx=(0, 8),
-            pady=0,
+            0,
+            "A",
+            self.rb_enabled,
+            self.rb_controller_button,
+            self.combo_a_script,
+            self.rb_jump_key,
+            self.rb_skill_key,
+            self.rb_skill_delay,
+            self.rb_jump_interval,
+            self._combo_a_description,
         )
-        _section, combo_b_title, combo_b_frame = self._build_section(
+        self._build_combo_slot_row(
             combos_frame,
-            "",
-            row=0,
-            column=1,
-            sticky="nsew",
-            padx=(8, 0),
-            pady=0,
+            1,
+            "B",
+            self.lb_enabled,
+            self.lb_controller_button,
+            self.combo_b_script,
+            self.lb_jump_key,
+            self.lb_skill_key,
+            self.lb_skill_delay,
+            self.lb_jump_interval,
+            self._combo_b_description,
         )
-        for combo_frame in (combo_a_frame, combo_b_frame):
-            for column in range(9):
-                combo_frame.columnconfigure(column, weight=0)
-            combo_frame.columnconfigure(8, weight=1)
-
-        self._checkbox(combo_a_title, "", self.rb_enabled, width=20).grid(row=0, column=0, sticky="w", padx=(8, 0), pady=4)
-        combo_a_label = self._title_label(combo_a_title, "組合A")
-        combo_a_label.grid(row=0, column=1, sticky="w", padx=(2, 10), pady=4)
-        self._bind_checkbox_label(combo_a_label, self.rb_enabled)
-        self._build_controller_button_select(combo_a_title, 0, 2, "觸發", self.rb_controller_button, pady=4)
-        self._info_icon(combo_a_title, self._combo_a_description).grid(row=0, column=99, sticky="e", padx=(8, 8), pady=4)
-        self._build_key_entry(combo_a_frame, 0, 0, "跳躍鍵", self.rb_jump_key, pady=(0, 6))
-        self._build_key_entry(combo_a_frame, 0, 2, "技能鍵", self.rb_skill_key, pady=(0, 6))
-        self._label(combo_a_frame, "技能延遲").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
-        self._build_seconds_stepper(combo_a_frame, 1, 1, self.rb_skill_delay, 0.0, 10.0, pady=(0, 4))
-        self._label(combo_a_frame, "跳躍間隔").grid(row=2, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
-        self._build_seconds_stepper(combo_a_frame, 2, 1, self.rb_jump_interval, 0.05, 10.0, pady=(0, 4))
-
-        self._checkbox(combo_b_title, "", self.lb_enabled, width=20).grid(row=0, column=0, sticky="w", padx=(8, 0), pady=4)
-        combo_b_label = self._title_label(combo_b_title, "組合B")
-        combo_b_label.grid(row=0, column=1, sticky="w", padx=(2, 10), pady=4)
-        self._bind_checkbox_label(combo_b_label, self.lb_enabled)
-        self._build_controller_button_select(combo_b_title, 0, 2, "觸發", self.lb_controller_button, pady=4)
-        self._info_icon(combo_b_title, self._combo_b_description).grid(row=0, column=99, sticky="e", padx=(8, 8), pady=4)
-        self._build_key_entry(combo_b_frame, 0, 0, "跳躍鍵", self.lb_jump_key, pady=(0, 6))
-        self._build_key_entry(combo_b_frame, 0, 2, "技能鍵", self.lb_skill_key, pady=(0, 6))
-        self._label(combo_b_frame, "技能延遲").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
-        self._build_seconds_stepper(combo_b_frame, 1, 1, self.lb_skill_delay, 0.0, 10.0, pady=(0, 4))
+        self._refresh_combo_script_visibility()
 
         runtime_frame = ctk.CTkFrame(controls_frame, fg_color=PANEL_BG_ALT, corner_radius=SECTION_RADIUS, border_width=1, border_color=PANEL_BORDER)
         runtime_frame.grid(row=5, column=0, sticky="ew", pady=(8, 6))
@@ -595,6 +590,9 @@ class AutoPotionSettingsGui:
     def _on_root_configure(self, event: tk.Event) -> None:
         if event.widget is not self.root:
             return
+        if self._root_is_minimized():
+            self.window_interaction_pause_until = 0.0
+            return
         current_size = (int(event.width), int(event.height))
         size_changed = self.last_root_size is not None and current_size != self.last_root_size
         self.last_root_size = current_size
@@ -604,7 +602,15 @@ class AutoPotionSettingsGui:
         self._schedule_window_interaction_finish()
 
     def is_window_interaction_active(self) -> bool:
+        if self._root_is_minimized():
+            return False
         return time.monotonic() < self.window_interaction_pause_until
+
+    def _root_is_minimized(self) -> bool:
+        try:
+            return self.root.state() == "iconic"
+        except tk.TclError:
+            return False
 
     def toggle_console_collapsed(self) -> None:
         self.set_console_collapsed(not self.console_collapsed)
@@ -1428,17 +1434,54 @@ class AutoPotionSettingsGui:
             return False
         return left <= x <= right and top <= y <= bottom
 
+    def _combo_script_label(self, script_id: str) -> str:
+        return COMBO_SCRIPT_LABELS.get(script_id, COMBO_SCRIPT_LABELS[COMBO_SCRIPT_SINGLE_JUMP_SKILL])
+
+    def _combo_script_id(self, script_label: str, fallback: str) -> str:
+        return normalize_combo_script_id(COMBO_SCRIPT_LABEL_TO_ID.get(script_label), fallback)
+
     def _combo_a_description(self) -> str:
-        return (
-            f"按下 {self.rb_controller_button.get()} 時，每 {self.rb_jump_interval.get()} 秒短按 "
-            f"{self.rb_jump_key.get()} 跳躍，並在每次跳躍 {self.rb_skill_delay.get()} 秒後按 "
-            f"{self.rb_skill_key.get()}。"
+        return self._combo_slot_description(
+            "A",
+            self.rb_controller_button,
+            self.combo_a_script,
+            self.rb_jump_key,
+            self.rb_skill_key,
+            self.rb_skill_delay,
+            self.rb_jump_interval,
         )
 
     def _combo_b_description(self) -> str:
+        return self._combo_slot_description(
+            "B",
+            self.lb_controller_button,
+            self.combo_b_script,
+            self.lb_jump_key,
+            self.lb_skill_key,
+            self.lb_skill_delay,
+            self.lb_jump_interval,
+        )
+
+    def _combo_slot_description(
+        self,
+        slot_id: str,
+        trigger_var: tk.StringVar,
+        script_var: tk.StringVar,
+        jump_key_var: tk.StringVar,
+        skill_key_var: tk.StringVar,
+        skill_delay_var: tk.StringVar,
+        jump_interval_var: tk.StringVar,
+    ) -> str:
+        script_id = self._combo_script_id(script_var.get(), COMBO_SCRIPT_SINGLE_JUMP_SKILL)
+        if script_id == COMBO_SCRIPT_REPEATING_JUMP_SKILL:
+            return (
+                f"組合{slot_id} 按下 {trigger_var.get()} 時，每 {jump_interval_var.get()} 秒短按 "
+                f"{jump_key_var.get()} 跳躍，並在每次跳躍 {skill_delay_var.get()} 秒後按 "
+                f"{skill_key_var.get()}。"
+            )
         return (
-            f"按下 {self.lb_controller_button.get()} 時短按 {self.lb_jump_key.get()} 跳躍一次，"
-            f"並在 {self.lb_skill_delay.get()} 秒後按 {self.lb_skill_key.get()}。"
+            f"組合{slot_id} 按下 {trigger_var.get()} 時短按 {jump_key_var.get()} 跳躍一次，"
+            f"並在 {skill_delay_var.get()} 秒後按 {skill_key_var.get()}。"
         )
 
     def _build_row(
@@ -1491,11 +1534,103 @@ class AutoPotionSettingsGui:
         label: str,
         key_var: tk.StringVar,
         pady: int | tuple[int, int] = 6,
+        compact: bool = False,
     ) -> None:
-        self._label(parent, label).grid(row=row, column=column, sticky="w", padx=(0, 4), pady=pady)
-        key_entry = self._entry(parent, key_var, width=COMBO_KEY_ENTRY_WIDTH, justify="center")
-        key_entry.grid(row=row, column=column + 1, sticky="w", padx=(0, 8), pady=pady)
+        self._label(parent, label).grid(row=row, column=column, sticky="w", padx=(0, 2 if compact else 4), pady=pady)
+        key_entry = self._entry(
+            parent,
+            key_var,
+            width=COMBO_COMPACT_KEY_ENTRY_WIDTH if compact else COMBO_KEY_ENTRY_WIDTH,
+            justify="center",
+        )
+        key_entry.grid(row=row, column=column + 1, sticky="w", padx=(0, 4 if compact else 8), pady=pady)
         key_entry.bind("<Button-1>", lambda event, var=key_var, name=label: self._start_key_detection_from_entry(event, var, name))
+
+    def _build_combo_slot_row(
+        self,
+        parent: ctk.CTkFrame,
+        row: int,
+        slot_id: str,
+        enabled_var: tk.BooleanVar,
+        trigger_var: tk.StringVar,
+        script_var: tk.StringVar,
+        jump_key_var: tk.StringVar,
+        skill_key_var: tk.StringVar,
+        skill_delay_var: tk.StringVar,
+        jump_interval_var: tk.StringVar,
+        description_factory: Callable[[], str],
+    ) -> None:
+        row_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        row_frame.grid(row=row, column=0, sticky="ew", pady=(0, 6))
+        for column in range(12):
+            row_frame.columnconfigure(column, weight=0)
+        row_frame.columnconfigure(11, weight=1)
+
+        self._checkbox(row_frame, "", enabled_var, width=20).grid(row=0, column=0, sticky="w", padx=(0, 0), pady=2)
+        combo_label = self._title_label(row_frame, f"組合{slot_id}")
+        combo_label.grid(row=0, column=1, sticky="w", padx=(2, 8), pady=2)
+        self._bind_checkbox_label(combo_label, enabled_var)
+        self._build_controller_button_select(row_frame, 0, 2, "觸發", trigger_var, pady=2, compact=True)
+        self._build_combo_script_select(row_frame, 0, 4, "腳本", script_var, pady=2)
+        self._info_icon(row_frame, description_factory).grid(row=0, column=11, sticky="e", padx=(8, 0), pady=2)
+
+        self._build_key_entry(row_frame, 1, 1, "跳躍鍵", jump_key_var, pady=(2, 0), compact=True)
+        self._build_key_entry(row_frame, 1, 3, "技能鍵", skill_key_var, pady=(2, 0), compact=True)
+        self._label(row_frame, "技能延遲").grid(row=1, column=5, sticky="w", padx=(0, 2), pady=(2, 0))
+        self._build_seconds_stepper(row_frame, 1, 6, skill_delay_var, 0.0, 10.0, pady=(2, 0), columnspan=2, compact=True)
+        interval_label = self._label(row_frame, "跳躍間隔")
+        interval_label.grid(row=1, column=8, sticky="w", padx=(4, 2), pady=(2, 0))
+        interval_field = self._build_seconds_stepper(
+            row_frame,
+            1,
+            9,
+            jump_interval_var,
+            COMBO_JUMP_INTERVAL_MIN_SECONDS,
+            COMBO_JUMP_INTERVAL_MAX_SECONDS,
+            pady=(2, 0),
+            columnspan=2,
+            compact=True,
+        )
+        self.combo_jump_interval_fields[slot_id] = (interval_label, interval_field)
+
+    def _build_combo_script_select(
+        self,
+        parent: ctk.CTkFrame,
+        row: int,
+        column: int,
+        label: str,
+        script_var: tk.StringVar,
+        pady: int | tuple[int, int] = 6,
+    ) -> None:
+        self._label(parent, label).grid(row=row, column=column, sticky="w", padx=(0, 2), pady=pady)
+        script_select = self._combo(
+            parent,
+            textvariable=script_var,
+            values=COMBO_SCRIPT_LABEL_VALUES,
+            width=COMBO_SCRIPT_COMBO_WIDTH,
+            command=lambda _value: self._on_combo_script_changed(),
+        )
+        script_select.grid(row=row, column=column + 1, sticky="w", padx=(0, 4), pady=pady)
+
+    def _on_combo_script_changed(self) -> None:
+        self._refresh_combo_script_visibility()
+        self.apply_to_settings()
+
+    def _refresh_combo_script_visibility(self) -> None:
+        script_vars = {
+            "A": self.combo_a_script,
+            "B": self.combo_b_script,
+        }
+        for slot_id, widgets in self.combo_jump_interval_fields.items():
+            script_var = script_vars.get(slot_id)
+            if script_var is None:
+                continue
+            visible = self._combo_script_id(script_var.get(), COMBO_SCRIPT_SINGLE_JUMP_SKILL) == COMBO_SCRIPT_REPEATING_JUMP_SKILL
+            for widget in widgets:
+                if visible:
+                    widget.grid()
+                else:
+                    widget.grid_remove()
 
     def _build_controller_button_select(
         self,
@@ -1505,15 +1640,16 @@ class AutoPotionSettingsGui:
         label: str,
         button_var: tk.StringVar,
         pady: int | tuple[int, int] = 6,
+        compact: bool = False,
     ) -> None:
-        self._label(parent, label).grid(row=row, column=column, sticky="w", padx=(0, 4), pady=pady)
+        self._label(parent, label).grid(row=row, column=column, sticky="w", padx=(0, 2 if compact else 4), pady=pady)
         button_select = self._combo(
             parent,
             textvariable=button_var,
             values=CONTROLLER_BUTTON_CHOICES,
-            width=CONTROLLER_COMBO_WIDTH,
+            width=COMBO_COMPACT_CONTROLLER_WIDTH if compact else CONTROLLER_COMBO_WIDTH,
         )
-        button_select.grid(row=row, column=column + 1, sticky="w", padx=(0, 8), pady=pady)
+        button_select.grid(row=row, column=column + 1, sticky="w", padx=(0, 4 if compact else 8), pady=pady)
 
     def _build_seconds_stepper(
         self,
@@ -1524,25 +1660,32 @@ class AutoPotionSettingsGui:
         minimum: float,
         maximum: float,
         pady: int | tuple[int, int] = 6,
-    ) -> None:
+        columnspan: int = 6,
+        compact: bool = False,
+    ) -> ctk.CTkFrame:
         field_group = ctk.CTkFrame(parent, fg_color="transparent")
-        field_group.grid(row=row, column=column, columnspan=6, sticky="w", padx=0, pady=pady)
-        self._entry(field_group, value_var, width=SECONDS_ENTRY_WIDTH).grid(row=0, column=0, sticky="w", padx=(0, 2), pady=0)
-        self._label(field_group, "秒").grid(row=0, column=1, sticky="w", padx=(0, 8), pady=0)
+        field_group.grid(row=row, column=column, columnspan=columnspan, sticky="w", padx=0, pady=pady)
+        self._entry(
+            field_group,
+            value_var,
+            width=COMBO_COMPACT_SECONDS_ENTRY_WIDTH if compact else SECONDS_ENTRY_WIDTH,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 2), pady=0)
+        self._label(field_group, "秒").grid(row=0, column=1, sticky="w", padx=(0, 3 if compact else 8), pady=0)
         button_group = ctk.CTkFrame(field_group, fg_color="transparent")
-        button_group.grid(row=0, column=2, sticky="w", padx=(0, 4), pady=0)
+        button_group.grid(row=0, column=2, sticky="w", padx=(0, 2 if compact else 4), pady=0)
         self._button(
             button_group,
             "-",
             lambda: self._step_seconds(value_var, -0.01, minimum, maximum),
-            width=28,
-        ).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=0)
+            width=24 if compact else 28,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 4 if compact else 8), pady=0)
         self._button(
             button_group,
             "+",
             lambda: self._step_seconds(value_var, 0.01, minimum, maximum),
-            width=28,
+            width=24 if compact else 28,
         ).grid(row=0, column=1, sticky="w", padx=0, pady=0)
+        return field_group
 
     def _step_seconds(self, value_var: tk.StringVar, delta: float, minimum: float, maximum: float) -> None:
         try:
@@ -1611,6 +1754,34 @@ class AutoPotionSettingsGui:
             return True
         self.key_detection_release_vks = set()
         return False
+
+    def is_app_window_foreground(self) -> bool:
+        if self.closed:
+            return False
+        foreground_hwnd = int(user32.GetForegroundWindow() or 0)
+        if not foreground_hwnd:
+            return False
+        for window in self._app_top_level_windows():
+            try:
+                if bool(window.winfo_exists()) and int(window.winfo_id()) == foreground_hwnd:
+                    return True
+            except tk.TclError:
+                continue
+        return False
+
+    def _app_top_level_windows(self) -> tuple[tk.Misc, ...]:
+        windows: list[tk.Misc] = [self.root]
+        for candidate in (
+            self.key_detection_window,
+            self.toggle_notice_window,
+            self.tooltip_window,
+        ):
+            if candidate is not None and not any(candidate is existing for existing in windows):
+                windows.append(candidate)
+        for candidate in self.tooltip_windows:
+            if not any(candidate is existing for existing in windows):
+                windows.append(candidate)
+        return tuple(windows)
 
     def refresh_bar_preview_once(self) -> None:
         if self.bar_preview_has_snapshot:
@@ -1702,6 +1873,10 @@ class AutoPotionSettingsGui:
         self.lb_skill_key.set(self.settings.lb_skill_key)
         self.lb_controller_button.set(self.settings.lb_controller_button)
         self.lb_skill_delay.set(f"{self.settings.lb_skill_delay_seconds:g}")
+        self.lb_jump_interval.set(f"{float(self.settings.combo_slot('B')['jump_interval_seconds']):g}")
+        self.combo_a_script.set(self._combo_script_label(str(self.settings.combo_slot("A")["script_id"])))
+        self.combo_b_script.set(self._combo_script_label(str(self.settings.combo_slot("B")["script_id"])))
+        self._refresh_combo_script_visibility()
         self.exp_efficiency_enabled.set(self.settings.exp_efficiency_enabled)
         self.toggle_hotkey.set(self.settings.toggle_hotkey)
         self.emergency_stop_hotkey.set(self.settings.emergency_stop_hotkey)
@@ -1929,7 +2104,7 @@ class AutoPotionSettingsGui:
                 pass
             self.key_detection_window = None
         if not keep_status and not self.closed:
-            self.set_status("只在楓星為前景視窗時生效")
+            self.set_status("控制熱鍵可在楓星或本程式前景觸發")
 
     def pump(self) -> bool:
         if self.closed:
@@ -1969,10 +2144,52 @@ class AutoPotionSettingsGui:
     def apply_to_settings(self) -> None:
         self._read_percent(self.hp_threshold, self.hp_threshold_text)
         self._read_percent(self.mp_threshold, self.mp_threshold_text)
+        self.settings.normalize_combo_slots()
+        lb_jump_interval_fallback = float(self.settings.combo_slots["B"]["jump_interval_seconds"])
+
+        rb_enabled = self.rb_enabled.get()
+        lb_enabled = self.lb_enabled.get()
+        rb_jump_key = self.rb_jump_key.get().strip()
+        rb_skill_key = self.rb_skill_key.get().strip()
+        rb_controller_button = normalize_controller_button_name(
+            self.rb_controller_button.get(),
+            self.settings.rb_controller_button,
+        )
+        rb_skill_delay_seconds = self._read_seconds(
+            self.rb_skill_delay,
+            self.settings.rb_skill_delay_seconds,
+            0.0,
+            10.0,
+        )
+        rb_jump_interval_seconds = self._read_seconds(
+            self.rb_jump_interval,
+            self.settings.rb_jump_interval_seconds,
+            COMBO_JUMP_INTERVAL_MIN_SECONDS,
+            COMBO_JUMP_INTERVAL_MAX_SECONDS,
+        )
+        lb_jump_key = self.lb_jump_key.get().strip()
+        lb_skill_key = self.lb_skill_key.get().strip()
+        lb_controller_button = normalize_controller_button_name(
+            self.lb_controller_button.get(),
+            self.settings.lb_controller_button,
+        )
+        lb_skill_delay_seconds = self._read_seconds(
+            self.lb_skill_delay,
+            self.settings.lb_skill_delay_seconds,
+            0.0,
+            10.0,
+        )
+        lb_jump_interval_seconds = self._read_seconds(
+            self.lb_jump_interval,
+            lb_jump_interval_fallback,
+            COMBO_JUMP_INTERVAL_MIN_SECONDS,
+            COMBO_JUMP_INTERVAL_MAX_SECONDS,
+        )
+
         self.settings.hp_enabled = self.hp_enabled.get()
         self.settings.mp_enabled = self.mp_enabled.get()
-        self.settings.rb_enabled = self.rb_enabled.get()
-        self.settings.lb_enabled = self.lb_enabled.get()
+        self.settings.rb_enabled = rb_enabled
+        self.settings.lb_enabled = lb_enabled
         self.settings.hp_threshold_percent = self.hp_threshold.get()
         self.settings.mp_threshold_percent = self.mp_threshold.get()
         self.settings.hp_key = self.hp_key.get().strip()
@@ -1981,38 +2198,45 @@ class AutoPotionSettingsGui:
         self.settings.mp_cooldown_seconds = self._read_cooldown(self.mp_cooldown, self.settings.mp_cooldown_seconds)
         self.settings.hp_continuous_enabled = self.hp_continuous_enabled.get()
         self.settings.mp_continuous_enabled = self.mp_continuous_enabled.get()
-        self.settings.rb_jump_key = self.rb_jump_key.get().strip()
-        self.settings.rb_skill_key = self.rb_skill_key.get().strip()
-        self.settings.rb_controller_button = normalize_controller_button_name(
-            self.rb_controller_button.get(),
-            self.settings.rb_controller_button,
-        )
+        self.settings.rb_jump_key = rb_jump_key
+        self.settings.rb_skill_key = rb_skill_key
+        self.settings.rb_controller_button = rb_controller_button
         self.rb_controller_button.set(self.settings.rb_controller_button)
-        self.settings.rb_skill_delay_seconds = self._read_seconds(
-            self.rb_skill_delay,
-            self.settings.rb_skill_delay_seconds,
-            0.0,
-            10.0,
-        )
-        self.settings.rb_jump_interval_seconds = self._read_seconds(
-            self.rb_jump_interval,
-            self.settings.rb_jump_interval_seconds,
-            0.05,
-            10.0,
-        )
-        self.settings.lb_jump_key = self.lb_jump_key.get().strip()
-        self.settings.lb_skill_key = self.lb_skill_key.get().strip()
-        self.settings.lb_controller_button = normalize_controller_button_name(
-            self.lb_controller_button.get(),
-            self.settings.lb_controller_button,
-        )
+        self.settings.rb_skill_delay_seconds = rb_skill_delay_seconds
+        self.settings.rb_jump_interval_seconds = rb_jump_interval_seconds
+        self.settings.lb_jump_key = lb_jump_key
+        self.settings.lb_skill_key = lb_skill_key
+        self.settings.lb_controller_button = lb_controller_button
         self.lb_controller_button.set(self.settings.lb_controller_button)
-        self.settings.lb_skill_delay_seconds = self._read_seconds(
-            self.lb_skill_delay,
-            self.settings.lb_skill_delay_seconds,
-            0.0,
-            10.0,
+        self.settings.lb_skill_delay_seconds = lb_skill_delay_seconds
+        self.settings.set_combo_slots(
+            {
+                "A": {
+                    "enabled": rb_enabled,
+                    "script_id": self._combo_script_id(self.combo_a_script.get(), COMBO_SCRIPT_REPEATING_JUMP_SKILL),
+                    "trigger_button": rb_controller_button,
+                    "jump_key": rb_jump_key,
+                    "skill_key": rb_skill_key,
+                    "skill_delay_seconds": rb_skill_delay_seconds,
+                    "jump_interval_seconds": rb_jump_interval_seconds,
+                },
+                "B": {
+                    "enabled": lb_enabled,
+                    "script_id": self._combo_script_id(self.combo_b_script.get(), COMBO_SCRIPT_SINGLE_JUMP_SKILL),
+                    "trigger_button": lb_controller_button,
+                    "jump_key": lb_jump_key,
+                    "skill_key": lb_skill_key,
+                    "skill_delay_seconds": lb_skill_delay_seconds,
+                    "jump_interval_seconds": lb_jump_interval_seconds,
+                },
+            }
         )
+        self.rb_enabled.set(self.settings.rb_enabled)
+        self.lb_enabled.set(self.settings.lb_enabled)
+        self.rb_controller_button.set(self.settings.rb_controller_button)
+        self.lb_controller_button.set(self.settings.lb_controller_button)
+        self.rb_jump_interval.set(f"{self.settings.rb_jump_interval_seconds:g}")
+        self.lb_jump_interval.set(f"{float(self.settings.combo_slot('B')['jump_interval_seconds']):g}")
         self.settings.exp_efficiency_enabled = self.exp_efficiency_enabled.get()
         self.settings.toggle_hotkey = self.toggle_hotkey.get().strip() or self.settings.toggle_hotkey
         self.settings.emergency_stop_hotkey = (

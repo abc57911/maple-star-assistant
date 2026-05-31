@@ -7,6 +7,7 @@ from .win_input import (
     foreground_window_handle,
     is_valid_window,
     process_executable_name,
+    window_ancestor_handles,
     window_client_size,
     window_process_id,
     window_title,
@@ -28,9 +29,12 @@ def is_target_process_name(process_name: str) -> bool:
 
 
 def is_target_window(hwnd: int) -> bool:
-    if not is_valid_window(hwnd):
-        return False
-    return is_target_process_name(process_executable_name(window_process_id(hwnd)))
+    for candidate in window_ancestor_handles(hwnd):
+        if not is_valid_window(candidate):
+            continue
+        if is_target_process_name(process_executable_name(window_process_id(candidate))):
+            return True
+    return False
 
 
 def is_target_window_active() -> bool:

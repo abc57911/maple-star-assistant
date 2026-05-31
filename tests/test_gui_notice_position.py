@@ -3,6 +3,7 @@ from unittest.mock import Mock, patch
 
 from maple_star.constants import MAX_CONSOLE_LINES
 from maple_star.gui import AutoPotionSettingsGui
+from maple_star.settings import AutoPotionSettings
 
 
 class ToggleNoticePositionTests(unittest.TestCase):
@@ -36,6 +37,64 @@ class ToggleNoticePositionTests(unittest.TestCase):
         self.assertTrue(variable.get())
         gui.apply_to_settings.assert_called_once()
 
+    def test_apply_to_settings_preserves_updated_combo_jump_intervals(self):
+        class FakeVar:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        gui = self.make_gui()
+        gui.settings = AutoPotionSettings()
+        gui.hp_threshold = FakeVar(50)
+        gui.mp_threshold = FakeVar(30)
+        gui.hp_threshold_text = FakeVar("50")
+        gui.mp_threshold_text = FakeVar("30")
+        gui.hp_enabled = FakeVar(False)
+        gui.mp_enabled = FakeVar(False)
+        gui.rb_enabled = FakeVar(True)
+        gui.lb_enabled = FakeVar(True)
+        gui.hp_key = FakeVar("A")
+        gui.mp_key = FakeVar("B")
+        gui.hp_cooldown = FakeVar("0.5")
+        gui.mp_cooldown = FakeVar("0.5")
+        gui.hp_continuous_enabled = FakeVar(False)
+        gui.mp_continuous_enabled = FakeVar(False)
+        gui.rb_jump_key = FakeVar("X")
+        gui.rb_skill_key = FakeVar("C")
+        gui.rb_controller_button = FakeVar("RB")
+        gui.rb_skill_delay = FakeVar("0.05")
+        gui.rb_jump_interval = FakeVar("0.01")
+        gui.lb_jump_key = FakeVar("X")
+        gui.lb_skill_key = FakeVar("C")
+        gui.lb_controller_button = FakeVar("LB")
+        gui.lb_skill_delay = FakeVar("0.2")
+        gui.lb_jump_interval = FakeVar("0.88")
+        gui.combo_a_script = FakeVar("循環跳躍技能")
+        gui.combo_b_script = FakeVar("單次跳躍技能")
+        gui.exp_efficiency_enabled = FakeVar(False)
+        gui.toggle_hotkey = FakeVar(gui.settings.toggle_hotkey)
+        gui.emergency_stop_hotkey = FakeVar(gui.settings.emergency_stop_hotkey)
+        gui.experience_toggle_hotkey = FakeVar(gui.settings.experience_toggle_hotkey)
+        gui.experience_reset_hotkey = FakeVar(gui.settings.experience_reset_hotkey)
+        gui.character_stat_hotkey = FakeVar(gui.settings.character_stat_hotkey)
+        gui.pickup_toggle_hotkey = FakeVar(gui.settings.pickup_toggle_hotkey or "")
+        gui.pickup_key = FakeVar(gui.settings.pickup_key or "")
+        gui.console_collapsed = False
+        gui.combo_group_collapsed = False
+        gui.compact_experience_mode = False
+        gui.window_topmost = False
+
+        gui.apply_to_settings()
+
+        self.assertEqual(gui.settings.rb_jump_interval_seconds, 0.01)
+        self.assertEqual(gui.settings.combo_slots["A"]["jump_interval_seconds"], 0.01)
+        self.assertEqual(gui.settings.combo_slots["B"]["jump_interval_seconds"], 0.88)
+
     def test_bind_checkbox_label_registers_click_handler(self):
         gui = self.make_gui()
         label = Mock()
@@ -59,6 +118,30 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui._virtual_screen_bounds = Mock(return_value=(0, 0, 1920, 1080))
 
         self.assertEqual(gui._saved_position(120, 80), (120, 80))
+
+    def test_minimized_root_does_not_start_window_interaction_pause(self):
+        gui = self.make_gui()
+        gui.root.state.return_value = "iconic"
+        gui.window_interaction_pause_until = 99.0
+        gui.last_root_size = (1240, 760)
+        gui.suppress_resize_suspend_until = 0.0
+        gui._suspend_layout_for_resize = Mock()
+        gui._schedule_window_interaction_finish = Mock()
+        event = Mock(widget=gui.root, width=1, height=1)
+
+        gui._on_root_configure(event)
+
+        self.assertEqual(gui.window_interaction_pause_until, 0.0)
+        self.assertEqual(gui.last_root_size, (1240, 760))
+        gui._suspend_layout_for_resize.assert_not_called()
+        gui._schedule_window_interaction_finish.assert_not_called()
+
+    def test_window_interaction_inactive_while_root_is_minimized(self):
+        gui = self.make_gui()
+        gui.root.state.return_value = "iconic"
+        gui.window_interaction_pause_until = 999999.0
+
+        self.assertFalse(gui.is_window_interaction_active())
 
     def test_store_window_position_clears_invisible_position(self):
         gui = self.make_gui()
@@ -144,10 +227,10 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.closed = False
         gui.toggle_notice_window = Mock()
         gui.toggle_notice_after_id = "after-1"
-        gui.toggle_notice_message = "HP 疑似無藥水"
+        gui.toggle_notice_message = "HP 檢查藥水"
         gui._destroy_toggle_notice = Mock()
 
-        gui.show_toggle_notice("HP 疑似無藥水")
+        gui.show_toggle_notice("HP 檢查藥水")
 
         gui.root.after_cancel.assert_called_once_with("after-1")
         gui.root.after.assert_called_once_with(1300, gui._destroy_toggle_notice)

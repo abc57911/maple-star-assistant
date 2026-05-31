@@ -43,6 +43,19 @@ CONTROLLER_BUTTON_ALIASES = {
     "GUIDE": "HOME",
     "SELECT": "BACK",
 }
+COMBO_SLOT_IDS = ("A", "B")
+COMBO_SCRIPT_REPEATING_JUMP_SKILL = "repeating_jump_skill"
+COMBO_SCRIPT_SINGLE_JUMP_SKILL = "single_jump_skill"
+COMBO_SCRIPT_IDS = (
+    COMBO_SCRIPT_REPEATING_JUMP_SKILL,
+    COMBO_SCRIPT_SINGLE_JUMP_SKILL,
+)
+COMBO_SCRIPT_LABELS = {
+    COMBO_SCRIPT_REPEATING_JUMP_SKILL: "循環跳躍技能",
+    COMBO_SCRIPT_SINGLE_JUMP_SKILL: "單次跳躍技能",
+}
+COMBO_JUMP_INTERVAL_MIN_SECONDS = 0.01
+COMBO_JUMP_INTERVAL_MAX_SECONDS = 10.0
 
 
 def normalize_controller_button_name(value: object, fallback: str) -> str:
@@ -53,6 +66,114 @@ def normalize_controller_button_name(value: object, fallback: str) -> str:
     if normalized in CONTROLLER_BUTTON_CHOICES:
         return normalized
     return fallback
+
+
+def normalize_combo_script_id(value: object, fallback: str) -> str:
+    if not isinstance(value, str):
+        return fallback
+    normalized = value.strip()
+    if normalized in COMBO_SCRIPT_IDS:
+        return normalized
+    return fallback
+
+
+def _coerce_float_value(value: object, fallback: float, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool):
+        return fallback
+    try:
+        return max(minimum, min(maximum, float(value)))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _normalize_non_empty_string(value: object, fallback: str) -> str:
+    if not isinstance(value, str):
+        return fallback
+    normalized = value.strip()
+    return normalized or fallback
+
+
+def _combo_slots_from_legacy_values(values: dict[str, object]) -> dict[str, dict[str, object]]:
+    return {
+        "A": {
+            "enabled": bool(values.get("rb_enabled", False)),
+            "script_id": COMBO_SCRIPT_REPEATING_JUMP_SKILL,
+            "trigger_button": normalize_controller_button_name(values.get("rb_controller_button"), "RB"),
+            "jump_key": str(values.get("rb_jump_key") or "X"),
+            "skill_key": str(values.get("rb_skill_key") or "C"),
+            "skill_delay_seconds": _coerce_float_value(values.get("rb_skill_delay_seconds"), 0.2, 0.0, 10.0),
+            "jump_interval_seconds": _coerce_float_value(
+                values.get("rb_jump_interval_seconds"),
+                0.66,
+                COMBO_JUMP_INTERVAL_MIN_SECONDS,
+                COMBO_JUMP_INTERVAL_MAX_SECONDS,
+            ),
+        },
+        "B": {
+            "enabled": bool(values.get("lb_enabled", False)),
+            "script_id": COMBO_SCRIPT_SINGLE_JUMP_SKILL,
+            "trigger_button": normalize_controller_button_name(values.get("lb_controller_button"), "LB"),
+            "jump_key": str(values.get("lb_jump_key") or "X"),
+            "skill_key": str(values.get("lb_skill_key") or "C"),
+            "skill_delay_seconds": _coerce_float_value(values.get("lb_skill_delay_seconds"), 0.2, 0.0, 10.0),
+            "jump_interval_seconds": 0.66,
+        },
+    }
+
+
+def default_combo_slots() -> dict[str, dict[str, object]]:
+    return _combo_slots_from_legacy_values({})
+
+
+def normalize_combo_slots(
+    value: object,
+    fallback_values: dict[str, object] | None = None,
+) -> dict[str, dict[str, object]]:
+    fallback_slots = _combo_slots_from_legacy_values(fallback_values or {})
+    raw_slots = value if isinstance(value, dict) else {}
+    slots: dict[str, dict[str, object]] = {}
+    for slot_id in COMBO_SLOT_IDS:
+        fallback = fallback_slots[slot_id]
+        raw = raw_slots.get(slot_id)
+        data = raw if isinstance(raw, dict) else {}
+        slots[slot_id] = {
+            "enabled": data.get("enabled") if isinstance(data.get("enabled"), bool) else fallback["enabled"],
+            "script_id": normalize_combo_script_id(data.get("script_id"), str(fallback["script_id"])),
+            "trigger_button": normalize_controller_button_name(data.get("trigger_button"), str(fallback["trigger_button"])),
+            "jump_key": _normalize_non_empty_string(data.get("jump_key"), str(fallback["jump_key"])),
+            "skill_key": _normalize_non_empty_string(data.get("skill_key"), str(fallback["skill_key"])),
+            "skill_delay_seconds": _coerce_float_value(
+                data.get("skill_delay_seconds"),
+                float(fallback["skill_delay_seconds"]),
+                0.0,
+                10.0,
+            ),
+            "jump_interval_seconds": _coerce_float_value(
+                data.get("jump_interval_seconds"),
+                float(fallback["jump_interval_seconds"]),
+                COMBO_JUMP_INTERVAL_MIN_SECONDS,
+                COMBO_JUMP_INTERVAL_MAX_SECONDS,
+            ),
+        }
+    return slots
+
+
+def legacy_combo_fields_from_slots(combo_slots: dict[str, dict[str, object]]) -> dict[str, object]:
+    slot_a = combo_slots["A"]
+    slot_b = combo_slots["B"]
+    return {
+        "rb_enabled": bool(slot_a["enabled"]),
+        "rb_jump_key": str(slot_a["jump_key"]),
+        "rb_skill_key": str(slot_a["skill_key"]),
+        "rb_controller_button": str(slot_a["trigger_button"]),
+        "rb_skill_delay_seconds": float(slot_a["skill_delay_seconds"]),
+        "rb_jump_interval_seconds": float(slot_a["jump_interval_seconds"]),
+        "lb_enabled": bool(slot_b["enabled"]),
+        "lb_jump_key": str(slot_b["jump_key"]),
+        "lb_skill_key": str(slot_b["skill_key"]),
+        "lb_controller_button": str(slot_b["trigger_button"]),
+        "lb_skill_delay_seconds": float(slot_b["skill_delay_seconds"]),
+    }
 
 
 def normalize_profile_name(value: object, fallback: str = DEFAULT_PROFILE_NAME) -> str:
@@ -84,6 +205,7 @@ class AutoPotionSettings:
     lb_skill_key: str = "C"
     lb_controller_button: str = "LB"
     lb_skill_delay_seconds: float = 0.2
+    combo_slots: dict[str, dict[str, object]] | None = None
     exp_efficiency_enabled: bool = False
     toggle_hotkey: str = DEFAULT_TOGGLE_HOTKEY
     emergency_stop_hotkey: str = DEFAULT_EMERGENCY_STOP_HOTKEY
@@ -103,7 +225,37 @@ class AutoPotionSettings:
     active_profile: str = DEFAULT_PROFILE_NAME
     profiles: dict[str, dict[str, object]] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        self.normalize_combo_slots()
+
+    def normalize_combo_slots(self) -> None:
+        fallback_values = {
+            "rb_enabled": self.rb_enabled,
+            "rb_jump_key": self.rb_jump_key,
+            "rb_skill_key": self.rb_skill_key,
+            "rb_controller_button": self.rb_controller_button,
+            "rb_skill_delay_seconds": self.rb_skill_delay_seconds,
+            "rb_jump_interval_seconds": self.rb_jump_interval_seconds,
+            "lb_enabled": self.lb_enabled,
+            "lb_jump_key": self.lb_jump_key,
+            "lb_skill_key": self.lb_skill_key,
+            "lb_controller_button": self.lb_controller_button,
+            "lb_skill_delay_seconds": self.lb_skill_delay_seconds,
+        }
+        self.combo_slots = normalize_combo_slots(self.combo_slots, fallback_values)
+        for key, value in legacy_combo_fields_from_slots(self.combo_slots).items():
+            setattr(self, key, value)
+
+    def combo_slot(self, slot_id: str) -> dict[str, object]:
+        self.normalize_combo_slots()
+        return self.combo_slots[slot_id]
+
+    def set_combo_slots(self, combo_slots: dict[str, dict[str, object]]) -> None:
+        self.combo_slots = combo_slots
+        self.normalize_combo_slots()
+
     def snapshot(self) -> tuple[object, ...]:
+        self.normalize_combo_slots()
         return (
             self.hp_enabled,
             self.mp_enabled,
@@ -126,6 +278,7 @@ class AutoPotionSettings:
             self.lb_skill_key,
             self.lb_controller_button,
             self.lb_skill_delay_seconds,
+            json.dumps(self.combo_slots, ensure_ascii=False, sort_keys=True),
             self.exp_efficiency_enabled,
             self.toggle_hotkey,
             self.emergency_stop_hotkey,
@@ -147,6 +300,7 @@ class AutoPotionSettings:
         )
 
     def to_json_dict(self) -> dict[str, object]:
+        self.normalize_combo_slots()
         current_values = profile_payload_from_settings(self)
         profiles = {
             name: dict(payload)
@@ -176,6 +330,7 @@ class AutoPotionSettings:
             "lb_skill_key": self.lb_skill_key,
             "lb_controller_button": self.lb_controller_button,
             "lb_skill_delay_seconds": self.lb_skill_delay_seconds,
+            "combo_slots": self.combo_slots,
             "exp_efficiency_enabled": self.exp_efficiency_enabled,
             "toggle_hotkey": self.toggle_hotkey,
             "emergency_stop_hotkey": self.emergency_stop_hotkey,
@@ -265,6 +420,7 @@ PROFILE_SETTING_KEYS = (
     "lb_skill_key",
     "lb_controller_button",
     "lb_skill_delay_seconds",
+    "combo_slots",
     "exp_efficiency_enabled",
 )
 GLOBAL_SETTING_KEYS = (
@@ -287,7 +443,10 @@ GLOBAL_SETTING_KEYS = (
 
 
 def profile_payload_from_settings(settings: AutoPotionSettings) -> dict[str, object]:
-    return {key: getattr(settings, key) for key in PROFILE_SETTING_KEYS}
+    settings.normalize_combo_slots()
+    payload = {key: getattr(settings, key) for key in PROFILE_SETTING_KEYS}
+    payload["combo_slots"] = json.loads(json.dumps(settings.combo_slots))
+    return payload
 
 
 def copy_setting_values(source: AutoPotionSettings, target: AutoPotionSettings) -> None:
@@ -340,7 +499,7 @@ def _read_optional_int(data: dict[str, object], key: str, fallback: int | None) 
 
 def _read_profile_payload(raw: object, fallback: AutoPotionSettings) -> dict[str, object]:
     data = raw if isinstance(raw, dict) else {}
-    return {
+    values: dict[str, object] = {
         "hp_enabled": _read_bool(data, "hp_enabled", fallback.hp_enabled),
         "mp_enabled": _read_bool(data, "mp_enabled", fallback.mp_enabled),
         "rb_enabled": _read_bool(data, "rb_enabled", fallback.rb_enabled),
@@ -376,7 +535,13 @@ def _read_profile_payload(raw: object, fallback: AutoPotionSettings) -> dict[str
         "rb_skill_key": _read_string(data, "rb_skill_key", fallback.rb_skill_key),
         "rb_controller_button": normalize_controller_button_name(data.get("rb_controller_button"), fallback.rb_controller_button),
         "rb_skill_delay_seconds": _read_float(data, "rb_skill_delay_seconds", fallback.rb_skill_delay_seconds, 0.0, 10.0),
-        "rb_jump_interval_seconds": _read_float(data, "rb_jump_interval_seconds", fallback.rb_jump_interval_seconds, 0.05, 10.0),
+        "rb_jump_interval_seconds": _read_float(
+            data,
+            "rb_jump_interval_seconds",
+            fallback.rb_jump_interval_seconds,
+            COMBO_JUMP_INTERVAL_MIN_SECONDS,
+            COMBO_JUMP_INTERVAL_MAX_SECONDS,
+        ),
         "lb_enabled": _read_bool(data, "lb_enabled", fallback.lb_enabled),
         "lb_jump_key": _read_string(data, "lb_jump_key", fallback.lb_jump_key),
         "lb_skill_key": _read_string(data, "lb_skill_key", fallback.lb_skill_key),
@@ -384,6 +549,10 @@ def _read_profile_payload(raw: object, fallback: AutoPotionSettings) -> dict[str
         "lb_skill_delay_seconds": _read_float(data, "lb_skill_delay_seconds", fallback.lb_skill_delay_seconds, 0.0, 10.0),
         "exp_efficiency_enabled": _read_bool(data, "exp_efficiency_enabled", fallback.exp_efficiency_enabled),
     }
+    combo_slots = normalize_combo_slots(data.get("combo_slots"), values)
+    values.update(legacy_combo_fields_from_slots(combo_slots))
+    values["combo_slots"] = combo_slots
+    return values
 
 
 def _read_profiles(raw: object, fallback: AutoPotionSettings) -> dict[str, dict[str, object]]:
@@ -477,12 +646,19 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
         rb_skill_key=_read_string(raw, "rb_skill_key", settings.rb_skill_key),
         rb_controller_button=normalize_controller_button_name(raw.get("rb_controller_button"), settings.rb_controller_button),
         rb_skill_delay_seconds=_read_float(raw, "rb_skill_delay_seconds", settings.rb_skill_delay_seconds, 0.0, 10.0),
-        rb_jump_interval_seconds=_read_float(raw, "rb_jump_interval_seconds", settings.rb_jump_interval_seconds, 0.05, 10.0),
+        rb_jump_interval_seconds=_read_float(
+            raw,
+            "rb_jump_interval_seconds",
+            settings.rb_jump_interval_seconds,
+            COMBO_JUMP_INTERVAL_MIN_SECONDS,
+            COMBO_JUMP_INTERVAL_MAX_SECONDS,
+        ),
         lb_enabled=_read_bool(raw, "lb_enabled", settings.lb_enabled),
         lb_jump_key=_read_string(raw, "lb_jump_key", settings.lb_jump_key),
         lb_skill_key=_read_string(raw, "lb_skill_key", settings.lb_skill_key),
         lb_controller_button=normalize_controller_button_name(raw.get("lb_controller_button"), settings.lb_controller_button),
         lb_skill_delay_seconds=_read_float(raw, "lb_skill_delay_seconds", settings.lb_skill_delay_seconds, 0.0, 10.0),
+        combo_slots=raw.get("combo_slots") if isinstance(raw.get("combo_slots"), dict) else None,
         exp_efficiency_enabled=_read_bool(raw, "exp_efficiency_enabled", settings.exp_efficiency_enabled),
         toggle_hotkey=_read_string(raw, "toggle_hotkey", settings.toggle_hotkey),
         emergency_stop_hotkey=_read_string(raw, "emergency_stop_hotkey", settings.emergency_stop_hotkey),

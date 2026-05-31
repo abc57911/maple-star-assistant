@@ -33,6 +33,8 @@ _PROGRAMMATIC_MOUSE_LOCK = threading.Lock()
 
 GWL_EXSTYLE = -20
 WS_EX_TOPMOST = 0x00000008
+GA_ROOT = 2
+GA_ROOTOWNER = 3
 HWND_TOPMOST = wintypes.HWND(-1)
 HWND_NOTOPMOST = wintypes.HWND(-2)
 SWP_NOSIZE = 0x0001
@@ -224,6 +226,8 @@ kernel32.Process32NextW.restype = wintypes.BOOL
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 user32.GetForegroundWindow.restype = wintypes.HWND
+user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+user32.GetAncestor.restype = wintypes.HWND
 user32.IsWindow.argtypes = [wintypes.HWND]
 user32.IsWindow.restype = wintypes.BOOL
 user32.IsWindowVisible.argtypes = [wintypes.HWND]
@@ -647,6 +651,18 @@ def is_valid_window(hwnd: int) -> bool:
 
 def foreground_window_handle() -> int:
     return int(user32.GetForegroundWindow() or 0)
+
+
+def window_ancestor_handles(hwnd: int) -> tuple[int, ...]:
+    handles: list[int] = []
+    for candidate in (
+        int(hwnd or 0),
+        int(user32.GetAncestor(hwnd, GA_ROOT) or 0) if hwnd else 0,
+        int(user32.GetAncestor(hwnd, GA_ROOTOWNER) or 0) if hwnd else 0,
+    ):
+        if candidate and candidate not in handles:
+            handles.append(candidate)
+    return tuple(handles)
 
 
 def window_title(hwnd: int) -> str:

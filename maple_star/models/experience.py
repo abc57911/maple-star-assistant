@@ -1195,7 +1195,12 @@ class ExperienceEfficiencyTracker:
             and self.estimated_level_total_exp is not None
         ):
             expected_delta = self.estimated_level_total_exp * ((percent - latest.percent) / 100.0)
-            return max(float(EXP_GAIN_MIN_ABSOLUTE_TOLERANCE), expected_delta * EXP_GAIN_EXPECTED_TOLERANCE_RATIO)
+            rounding_tolerance = self.estimated_level_total_exp * EXP_PERCENT_ROUNDING_TOLERANCE_RATIO
+            return max(
+                float(EXP_GAIN_MIN_ABSOLUTE_TOLERANCE),
+                rounding_tolerance,
+                expected_delta * EXP_GAIN_EXPECTED_TOLERANCE_RATIO,
+            )
 
         tolerance = float(EXP_GAIN_MIN_ABSOLUTE_TOLERANCE)
         if self.estimated_level_total_exp is not None:
@@ -2109,7 +2114,7 @@ def prepare_experience_tooltip_ocr_images(image: np.ndarray, *, include_retry: b
         interpolation=cv2.INTER_CUBIC,
     )
     binary = _binarize_experience_tooltip_text_image(scaled)
-    variants = [bgr, cropped, scaled]
+    variants = [cropped, scaled, bgr]
     if binary is not None:
         variants.append(binary)
     if include_retry:
@@ -2137,6 +2142,19 @@ def _crop_experience_tooltip_text_image(image: np.ndarray) -> np.ndarray:
     luminance = red * 0.299 + green * 0.587 + blue * 0.114
     chroma = np.maximum.reduce([red, green, blue]) - np.minimum.reduce([red, green, blue])
     mask = (luminance >= 135.0) & (chroma <= 95.0)
+    line_band = _experience_tooltip_exp_line_band(mask)
+    if line_band is not None:
+        row_top, row_bottom = line_band
+        line_mask = mask[row_top:row_bottom]
+        line_ys, line_xs = np.nonzero(line_mask)
+        if line_xs.size and line_ys.size:
+            top = max(0, row_top + int(line_ys.min()) - 4)
+            bottom = min(bgr.shape[0], row_top + int(line_ys.max()) + 5)
+            left = max(0, int(line_xs.min()) - 6)
+            right = min(bgr.shape[1], int(line_xs.max()) + 7)
+            if right - left >= 20 and bottom - top >= 8:
+                return bgr[top:bottom, left:right].copy()
+
     ys, xs = np.nonzero(mask)
     if not xs.size or not ys.size:
         return bgr
@@ -2147,6 +2165,35 @@ def _crop_experience_tooltip_text_image(image: np.ndarray) -> np.ndarray:
     if right - left < 20 or bottom - top < 8:
         return bgr
     return bgr[top:bottom, left:right].copy()
+
+
+def _experience_tooltip_exp_line_band(mask: np.ndarray) -> tuple[int, int] | None:
+    if mask.size == 0 or mask.ndim != 2:
+        return None
+    row_counts = np.count_nonzero(mask, axis=1)
+    min_row_pixels = max(4, round(mask.shape[1] * 0.015))
+    active_rows = row_counts >= min_row_pixels
+    bands: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, is_active in enumerate(active_rows):
+        if is_active and start is None:
+            start = index
+        elif not is_active and start is not None:
+            bands.append((start, index))
+            start = None
+    if start is not None:
+        bands.append((start, len(active_rows)))
+
+    min_line_width = max(60, round(mask.shape[1] * 0.18))
+    for top, bottom in bands:
+        if bottom - top < 5:
+            continue
+        _ys, xs = np.nonzero(mask[top:bottom])
+        if not xs.size:
+            continue
+        if int(xs.max()) - int(xs.min()) + 1 >= min_line_width:
+            return top, bottom
+    return None
 
 
 def _binarize_experience_tooltip_text_image(image: np.ndarray) -> np.ndarray | None:
@@ -3981,7 +4028,16 @@ def reading_from_tooltip_paddle_result(result: object) -> ExperienceTextReading:
     text = " ".join(item_text for item_text, _score in text_items).strip()
     confidence_values = [score for _item_text, score in text_items if score is not None]
     confidence = float(np.mean(confidence_values)) if confidence_values else 0.0
-    return reading_from_tooltip_text(text, confidence)
+    candidates = [reading_from_tooltip_text(text, confidence)]
+    non_empty_items = [(item_text.strip(), item_score) for item_text, item_score in text_items if item_text.strip()]
+    for start_index in range(len(non_empty_items)):
+        for end_index in range(start_index + 1, len(non_empty_items) + 1):
+            item_slice = non_empty_items[start_index:end_index]
+            item_text = " ".join(item_text for item_text, _item_score in item_slice)
+            item_scores = [item_score for _item_text, item_score in item_slice if item_score is not None]
+            item_confidence = float(np.mean(item_scores)) if item_scores else 0.0
+            candidates.append(reading_from_tooltip_text(item_text, item_confidence))
+    return max(candidates, key=lambda reading: (reading.success, reading.confidence))
 
 
 def reading_from_stat_window_text(text: str, confidence: float = 1.0) -> ExperienceTextReading:
@@ -4104,25 +4160,34 @@ def parse_experience_tooltip_text(text: str) -> tuple[int, int, float] | None:
     if re.search(r"(?:^|[^A-Z])(?:HP|MP)[:：]?\d", upper):
         return None
 
-    if "EXP" in upper:
-        parse_source = upper[upper.rfind("EXP") + 3 :]
-    elif "XP" in upper:
-        if re.search(r"[A-Z]", re.sub(r"XP", "", upper)):
-            return None
-        parse_source = upper[upper.rfind("XP") + 2 :]
-    else:
-        if re.search(r"[A-Z]", upper):
-            return None
-        parse_source = upper
-
     preserved_upper = preserved.upper()
-    if "EXP" in preserved_upper:
-        preserved_source = preserved_upper[preserved_upper.rfind("EXP") + 3 :]
-    elif "XP" in preserved_upper:
-        preserved_source = preserved_upper[preserved_upper.rfind("XP") + 2 :]
-    else:
-        preserved_source = preserved_upper
 
+    source_pairs = _experience_tooltip_parse_sources(upper, preserved_upper)
+    if not source_pairs:
+        return None
+    for parse_source, preserved_source in source_pairs:
+        parsed = _parse_experience_tooltip_source(parse_source, preserved_source)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _experience_tooltip_parse_sources(upper: str, preserved_upper: str) -> list[tuple[str, str]]:
+    marker_ends = [match.end() for match in re.finditer(r"EXP|XP", upper)]
+    if marker_ends:
+        preserved_marker_ends = [match.end() for match in re.finditer(r"EXP|XP", preserved_upper)]
+        pairs = [
+            (upper[end:], preserved_upper[preserved_marker_ends[index] :])
+            for index, end in enumerate(marker_ends)
+            if index < len(preserved_marker_ends)
+        ]
+        return [(upper, preserved_upper), *pairs]
+    if re.search(r"[A-Z]", upper):
+        return []
+    return [(upper, preserved_upper)]
+
+
+def _parse_experience_tooltip_source(parse_source: str, preserved_source: str) -> tuple[int, int, float] | None:
     matches = list(re.finditer(r"([0-9][0-9,.]*)/([0-9][0-9,.]*)", parse_source))
     matches.extend(re.finditer(r"([0-9][0-9,.]*)\s+7\s+([0-9][0-9,.]*)", preserved_source))
     for match in reversed(matches):

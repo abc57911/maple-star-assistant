@@ -30,8 +30,8 @@
 - 快捷鍵設定目前設計為單鍵。
 - 設定快捷鍵時必須暫時攔截腳本功能，避免按鍵設定動作同時觸發暫停、停止或經驗統計切換。
 - 控制熱鍵事件應先通過 debounce 與 key-capture guard。
-- 自動喝水、經驗統計、拾取與總開關的啟停控制必須要求楓星目標視窗在前景；若不在前景，只顯示提示並不得送鍵、播放切換音效或改變 enabled state。
-- 長按停用自動喝水或拾取時，若按住期間遊戲失去前景，應取消該次停用動作並清除 pending hold。
+- 自動喝水、經驗統計、拾取、經驗統計重置與總開關的控制熱鍵必須要求楓星目標視窗或 maple-star app 自身在前景；若兩者都不在前景，必須靜默忽略，不得攔截按鍵、顯示提示、送鍵、播放切換音效或改變 enabled state。
+- 長按停用自動喝水或拾取時，若按住期間楓星與 app 都失去前景，應取消該次停用動作並清除 pending hold。
 
 ## 設定與 profile
 - `AutoPotionSettings` 的 `profiles` 只保存 potion/macro/EXP 功能設定。
@@ -41,7 +41,7 @@
 - Controller button 名稱需經 `normalize_controller_button_name()`，接受 `right shoulder`、`dpad-left` 等 alias，未知值回 fallback。
 
 ## 記錄與診斷
-- `debug.log` 與 `experience_debug.log` 使用 rotating log；目前兩者單檔上限皆為 1MB。
+- `debug.log` 與 `experience_debug.log` 使用 rotating log；目前 `debug.log` 單檔上限為 1MB，`experience_debug.log` 單檔上限為 5MB。
 - App 啟動時 `main.py` / `main.pyw` 都應 reset `debug.log*` 與 `experience_debug.log*`，避免上一輪診斷污染。
 - Experience debug 使用 JSONL event；新增 OCR / tracker / runtime 診斷時優先寫入 structured payload。
 - GUI console 只保留有限行數與字元數；高頻或可重複訊息需節流，不應洗掉真正重要的 OCR / runtime 異常。

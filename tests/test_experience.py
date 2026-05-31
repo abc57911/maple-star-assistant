@@ -61,6 +61,7 @@ from maple_star.experience import (
     prepare_experience_ocr_images,
     reading_from_paddle_result,
     reading_from_stat_window_text,
+    reading_from_tooltip_paddle_result,
     reading_from_tooltip_text,
     save_experience_ocr_learning_case,
     suppress_subprocess_windows,
@@ -102,6 +103,14 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(parse_experience_tooltip_text("XP:32522194 /85538273"), (32522194, 85538273, 38.02))
         self.assertEqual(parse_experience_tooltip_text("EXP:20470996 7 85538273"), (20470996, 85538273, 23.93))
         self.assertEqual(parse_experience_tooltip_text("EXP:20960579785538273"), (20960579, 85538273, 24.5))
+        self.assertEqual(
+            parse_experience_tooltip_text("EXP : 62993072 / 181844837 休息加成經驗值 : 717234"),
+            (62993072, 181844837, 34.64),
+        )
+        self.assertEqual(
+            parse_experience_tooltip_text("EXP : 62993072 / 181844837 休息加成EXP值 : 717234"),
+            (62993072, 181844837, 34.64),
+        )
 
         reading = reading_from_tooltip_text("EXP: 15261854 / 85538273", 0.93)
 
@@ -117,6 +126,41 @@ class ExperienceTests(unittest.TestCase):
         self.assertIsNone(parse_experience_tooltip_text("EXP: 200 / 100"))
         self.assertIsNone(parse_experience_tooltip_text("EXP: 15261854"))
         self.assertFalse(reading_from_tooltip_text("MP: 2188 / 2937", 0.99).success)
+
+    def test_tooltip_paddle_reader_ignores_low_confidence_bonus_exp_line(self):
+        result = [
+            {
+                "res": {
+                    "rec_texts": ["EXP : 62993072 / 181844837", "休息加成經驗值 : 717234"],
+                    "rec_scores": [0.91, 0.55],
+                }
+            }
+        ]
+
+        reading = reading_from_tooltip_paddle_result(result)
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 62993072)
+        self.assertEqual(reading.percent, 34.64)
+        self.assertEqual(reading.confidence, 0.91)
+        self.assertEqual(reading.reason, "OK:Tooltip")
+
+    def test_tooltip_paddle_reader_accepts_split_exp_line_before_bonus_line(self):
+        result = [
+            {
+                "res": {
+                    "rec_texts": ["EXP : 62993072 /", "181844837", "休息加成經驗值 : 717234"],
+                    "rec_scores": [0.91, 0.9, 0.55],
+                }
+            }
+        ]
+
+        reading = reading_from_tooltip_paddle_result(result)
+
+        self.assertTrue(reading.success)
+        self.assertEqual(reading.current_exp, 62993072)
+        self.assertEqual(reading.percent, 34.64)
+        self.assertAlmostEqual(reading.confidence, 0.905)
 
     def test_paddle_reader_burst_uses_consensus_result(self):
         reader = PaddleExperienceTextReader()
@@ -452,9 +496,32 @@ class ExperienceTests(unittest.TestCase):
         retry_variants = prepare_experience_tooltip_ocr_images(image, include_retry=True)
 
         self.assertGreaterEqual(len(variants), 4)
-        self.assertLessEqual(variants[1].shape[0], image.shape[0])
-        self.assertGreater(variants[2].shape[0], variants[1].shape[0])
+        self.assertLessEqual(variants[0].shape[0], image.shape[0])
+        self.assertGreater(variants[1].shape[0], variants[0].shape[0])
         self.assertGreater(len(retry_variants), len(variants))
+
+    def test_prepare_experience_tooltip_ocr_images_prefers_exp_line_when_bonus_line_exists(self):
+        image = np.zeros((90, 370, 4), dtype=np.uint8)
+        image[:, :, :3] = (80, 70, 55)
+        image[:, :, 3] = 255
+        image[26:38, 28:300, :3] = 240
+        image[58:70, 28:255, :3] = 240
+
+        variants = prepare_experience_tooltip_ocr_images(image)
+
+        self.assertLessEqual(variants[0].shape[0], 22)
+        self.assertGreaterEqual(variants[0].shape[1], 260)
+
+    def test_prepare_experience_tooltip_ocr_images_accepts_single_line_lower_tooltip(self):
+        image = np.zeros((90, 370, 4), dtype=np.uint8)
+        image[:, :, :3] = (80, 70, 55)
+        image[:, :, 3] = 255
+        image[46:60, 28:300, :3] = 240
+
+        variants = prepare_experience_tooltip_ocr_images(image)
+
+        self.assertLessEqual(variants[0].shape[0], 24)
+        self.assertGreaterEqual(variants[0].shape[1], 260)
 
     def test_binary_fallback_removes_dense_horizontal_borders(self):
         image = np.zeros((30, 180, 4), dtype=np.uint8)
@@ -3495,6 +3562,18 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(snapshot.current_exp, 283900)
         self.assertEqual(snapshot.current_percent, 27.08)
         self.assertTrue(snapshot.status.startswith("樣本拒絕：EXP 跳動與百分比不一致"))
+
+    def test_tracker_accepts_same_percent_gain_within_rounding_tolerance(self):
+        tracker = ExperienceEfficiencyTracker()
+        self.assertTrue(tracker.add_reading(0.0, 137034123, 88.44, confidence=0.97))
+
+        self.assertTrue(tracker.add_reading(5.0, 137040908, 88.44, confidence=0.98))
+        snapshot = tracker.snapshot(5.0)
+
+        self.assertEqual(snapshot.current_exp, 137040908)
+        self.assertEqual(snapshot.current_percent, 88.44)
+        self.assertEqual(snapshot.sample_count, 2)
+        self.assertEqual(snapshot.status, "統計中")
 
     def test_tracker_repairs_recent_accepted_outliers_after_confirmation(self):
         tracker = ExperienceEfficiencyTracker()

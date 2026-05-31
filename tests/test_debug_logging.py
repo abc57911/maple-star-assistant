@@ -18,9 +18,9 @@ from maple_star.gui import GuiConsoleWriter
 
 
 class DebugLoggingTests(unittest.TestCase):
-    def test_experience_debug_log_uses_same_default_rotation_limit_as_debug_log(self):
-        self.assertEqual(EXPERIENCE_DEBUG_LOG_MAX_BYTES, DEBUG_LOG_MAX_BYTES)
-        self.assertEqual(EXPERIENCE_DEBUG_LOG_MAX_BYTES, 1 * 1024 * 1024)
+    def test_experience_debug_log_keeps_larger_default_rotation_window_than_debug_log(self):
+        self.assertGreater(EXPERIENCE_DEBUG_LOG_MAX_BYTES, DEBUG_LOG_MAX_BYTES)
+        self.assertEqual(EXPERIENCE_DEBUG_LOG_MAX_BYTES, 5 * 1024 * 1024)
 
     def test_log_exception_writes_traceback_to_debug_log(self):
         with tempfile.TemporaryDirectory() as temp_dir:

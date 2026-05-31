@@ -188,9 +188,9 @@ EXPERIENCE_MOUSE_IDLE_DELAY_SECONDS = 5.0
 EXPERIENCE_MOUSE_IDLE_STATUS_UPDATE_SECONDS = EXPERIENCE_CAPTURE_INTERVAL_SECONDS
 EXPERIENCE_TOOLTIP_CURSOR_RIGHT_PADDING_RATIO = 0.08
 EXPERIENCE_TOOLTIP_ROI_OFFSET_X = 8
-EXPERIENCE_TOOLTIP_ROI_OFFSET_Y = -28
-EXPERIENCE_TOOLTIP_ROI_WIDTH = 340
-EXPERIENCE_TOOLTIP_ROI_HEIGHT = 46
+EXPERIENCE_TOOLTIP_ROI_OFFSET_Y = -78
+EXPERIENCE_TOOLTIP_ROI_WIDTH = 370
+EXPERIENCE_TOOLTIP_ROI_HEIGHT = 90
 EXPERIENCE_OCR_SIGNATURE_THUMB_WIDTH = 96
 EXPERIENCE_OCR_SIGNATURE_THUMB_HEIGHT = 18
 EXPERIENCE_OCR_SIGNATURE_CHANGED_PIXEL_DELTA = 4
@@ -221,6 +221,8 @@ BAR_PAIR_REUSE_MAX_CENTER_Y_DELTA_RATIO = 1.10
 BAR_PAIR_REUSE_WIDTH_RATIO_MIN = 0.55
 BAR_PAIR_REUSE_WIDTH_RATIO_MAX = 1.80
 BAR_PAIR_REUSE_HEIGHT_RATIO_MAX = 2.40
+BAR_EMPTY_TRACK_MIN_NEUTRAL_RATIO = 0.65
+BAR_EMPTY_TRACK_MAX_FOREGROUND_RATIO = 0.035
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MEDIA_VOLUME_PERCENT = 20
 MCI_MAX_VOLUME = 1000
@@ -228,18 +230,22 @@ MCI_MEDIA_VOLUME = round(MCI_MAX_VOLUME * MEDIA_VOLUME_PERCENT / 100)
 MCI_MEDIA_START_MS = 0
 AUTO_DRINK_START_SOUND_PATH = PROJECT_ROOT / "media" / "auto-drink-start.mp3"
 AUTO_DRINK_STOP_SOUND_PATH = PROJECT_ROOT / "media" / "auto-drink-stop.mp3"
+AUTO_DRINK_POTION_CHECK_SOUND_PATH = PROJECT_ROOT / "media" / "auto-drink-postion-check.mp3"
 AUTO_PICKUP_START_SOUND_PATH = PROJECT_ROOT / "media" / "auto-pickup-start.mp3"
 AUTO_PICKUP_STOP_SOUND_PATH = PROJECT_ROOT / "media" / "auto-pickup-stop.mp3"
 MEDIA_SOUND_ALIASES = (
     (AUTO_DRINK_START_SOUND_PATH, "auto_drink_start"),
     (AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop"),
+    (AUTO_DRINK_POTION_CHECK_SOUND_PATH, "auto_drink_potion_check"),
     (AUTO_PICKUP_START_SOUND_PATH, "pickup_start"),
     (AUTO_PICKUP_STOP_SOUND_PATH, "pickup_stop"),
 )
+MEDIA_SOUND_PATH_BY_ALIAS = {alias: path for path, alias in MEDIA_SOUND_ALIASES}
 POTION_TIME_EPSILON_SECONDS = 1e-9
 POTION_PENDING_SEND_CAPTURE_GUARD_SECONDS = 0.20
 POTION_EXPERIENCE_DEFER_SECONDS = 1.0
 POTION_BLOCKED_SOUND_INTERVAL_SECONDS = 3.0
+POTION_CHECK_SOUND_INTERVAL_SECONDS = 10.0
 RUNTIME_POTION_STATUS_TIMEOUT_SECONDS = 2.0
 DIRECT_BAR_BIT_COUNT = 32
 DIRECT_BAR_BYTES_PER_PIXEL = 4
@@ -400,6 +406,7 @@ class AutoPotionController:
         self.hp_out_of_potion_hold: OutOfPotionHold | None = None
         self.mp_out_of_potion_hold: OutOfPotionHold | None = None
         self.last_potion_blocked_sound_at = -999.0
+        self.last_potion_check_sound_at = -999.0
         self.last_error_at = -999.0
         self.last_unstable_bar_at = -999.0
         self.auto_drink_enabled = True
@@ -727,10 +734,18 @@ class AutoPotionController:
             self.gui.set_status(status.status)
         if status.notice:
             self.gui.show_toggle_notice(status.notice)
+        for alias in status.media_sound_aliases:
+            self._play_runtime_media_sound(alias)
         if status.action:
             self.last_action = status.action
         for line in status.console_lines:
             print(line)
+
+    def _play_runtime_media_sound(self, alias: str) -> None:
+        path = MEDIA_SOUND_PATH_BY_ALIAS.get(alias)
+        if path is None:
+            return
+        self._play_media_file(path, alias)
 
     def _apply_runtime_bar_detection_region(
         self,
@@ -930,6 +945,13 @@ class AutoPotionController:
             if cached_down is not None:
                 self._apply_control_hotkey_down_states(cached_down)
                 now = time.monotonic()
+                if not self._has_control_hotkey_activity(worker_events):
+                    self._maybe_reenable_control_hotkey_worker_events()
+                    return
+                if not self._control_hotkey_has_allowed_foreground():
+                    self._suspend_control_hotkey_events_outside_foreground()
+                    return
+                self._set_control_hotkey_worker_events_enabled(True)
                 self._process_pending_auto_drink_disable(now)
                 self._process_pending_pickup_disable(now)
                 if worker_events:
@@ -938,6 +960,10 @@ class AutoPotionController:
                 return
             if worker_events:
                 now = time.monotonic()
+                if not self._control_hotkey_has_allowed_foreground():
+                    self._suspend_control_hotkey_events_outside_foreground()
+                    return
+                self._set_control_hotkey_worker_events_enabled(True)
                 self._process_pending_auto_drink_disable(now)
                 self._process_pending_pickup_disable(now)
                 for event in worker_events:
@@ -1005,6 +1031,19 @@ class AutoPotionController:
         self.pickup_toggle_hotkey_was_down = pickup_toggle_is_down
 
         now = time.monotonic()
+        if not (
+            toggle_triggered
+            or emergency_stop_triggered
+            or experience_toggle_triggered
+            or experience_reset_triggered
+            or pickup_toggle_triggered
+            or self._has_pending_control_hotkey_hold()
+        ):
+            return
+        if not self._control_hotkey_has_allowed_foreground():
+            self._suspend_control_hotkey_events_outside_foreground()
+            return
+        self._set_control_hotkey_worker_events_enabled(True)
         self._process_pending_auto_drink_disable(now)
         self._process_pending_pickup_disable(now)
         if emergency_stop_triggered:
@@ -1091,6 +1130,15 @@ class AutoPotionController:
             or self.pickup_toggle_hotkey_was_down
         )
 
+    def _has_pending_control_hotkey_hold(self) -> bool:
+        return (
+            getattr(self, "auto_drink_disable_hold_started_at", -999.0) >= 0
+            or getattr(self, "pickup_disable_hold_started_at", -999.0) >= 0
+        )
+
+    def _has_control_hotkey_activity(self, worker_events: list[str]) -> bool:
+        return bool(worker_events) or self._any_control_hotkey_is_down() or self._has_pending_control_hotkey_hold()
+
     def _discard_control_hotkey_messages(self) -> None:
         worker = getattr(self, "control_hotkey_worker", None)
         if worker is not None:
@@ -1105,24 +1153,52 @@ class AutoPotionController:
         ):
             pass
 
+    def _set_control_hotkey_worker_events_enabled(self, enabled: bool) -> None:
+        self.control_hotkey_worker_events_enabled = enabled
+        worker = getattr(self, "control_hotkey_worker", None)
+        if worker is None:
+            return
+        set_events_enabled = getattr(worker, "set_events_enabled", None)
+        if callable(set_events_enabled):
+            set_events_enabled(enabled)
+
+    def _maybe_reenable_control_hotkey_worker_events(self) -> None:
+        if getattr(self, "control_hotkey_worker_events_enabled", True):
+            return
+        if self._control_hotkey_has_allowed_foreground():
+            self._set_control_hotkey_worker_events_enabled(True)
+
+    def _suspend_control_hotkey_events_outside_foreground(self) -> None:
+        self._set_control_hotkey_worker_events_enabled(False)
+        self._discard_control_hotkey_messages()
+        self._sync_control_hotkey_down_states()
+        self.auto_drink_disable_hold_started_at = -999.0
+        self.pickup_disable_hold_started_at = -999.0
+
     def consume_emergency_stop_requested(self) -> bool:
         if not self.emergency_stop_requested:
             return False
         self.emergency_stop_requested = False
         return True
 
-    def _control_hotkey_requires_game_foreground(self, action: str) -> bool:
+    def _control_hotkey_has_allowed_foreground(self) -> bool:
         if self.is_target_window_active():
             return True
-        message = f"請先切回楓星遊戲再{action}"
-        self.gui.set_status(message)
-        self.gui.show_toggle_notice(message)
-        self.last_action = message
-        print(message)
+        app_foreground = getattr(self.gui, "is_app_window_foreground", None)
+        if callable(app_foreground):
+            try:
+                return bool(app_foreground())
+            except Exception:
+                return False
+        return False
+
+    def _control_hotkey_requires_allowed_foreground(self, action: str) -> bool:
+        if self._control_hotkey_has_allowed_foreground():
+            return True
         return False
 
     def _try_emergency_stop(self, now: float) -> None:
-        if not self._control_hotkey_requires_game_foreground("切換總開關"):
+        if not self._control_hotkey_requires_allowed_foreground("切換總開關"):
             return
         self.emergency_stop()
 
@@ -1130,7 +1206,7 @@ class AutoPotionController:
         if now - self.last_toggle_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
             return
         self.last_toggle_hotkey_at = now
-        if not self._control_hotkey_requires_game_foreground("切換自動喝水"):
+        if not self._control_hotkey_requires_allowed_foreground("切換自動喝水"):
             return
         if self.auto_drink_enabled and not self._has_out_of_potion_hold():
             self.auto_drink_disable_hold_started_at = now
@@ -1142,7 +1218,7 @@ class AutoPotionController:
         if now - self.last_experience_toggle_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
             return
         self.last_experience_toggle_hotkey_at = now
-        if not self._control_hotkey_requires_game_foreground("切換經驗統計"):
+        if not self._control_hotkey_requires_allowed_foreground("切換經驗統計"):
             return
         self.toggle_experience_efficiency()
 
@@ -1150,6 +1226,8 @@ class AutoPotionController:
         if now - self.last_experience_reset_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
             return
         self.last_experience_reset_hotkey_at = now
+        if not self._control_hotkey_requires_allowed_foreground("重置經驗統計"):
+            return
         if not self.reset_experience_statistics():
             return
         self.gui.set_experience_snapshot(ExperienceSnapshot(status="已重置"))
@@ -1162,7 +1240,7 @@ class AutoPotionController:
         if now - self.last_pickup_toggle_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
             return
         self.last_pickup_toggle_hotkey_at = now
-        if not self._control_hotkey_requires_game_foreground("切換拾取"):
+        if not self._control_hotkey_requires_allowed_foreground("切換拾取"):
             return
         print(
             "拾取切換熱鍵："
@@ -1190,7 +1268,7 @@ class AutoPotionController:
         if now - started_at + POTION_TIME_EPSILON_SECONDS < AUTO_DRINK_DISABLE_HOLD_SECONDS:
             return
         self.auto_drink_disable_hold_started_at = -999.0
-        if not self._control_hotkey_requires_game_foreground("停用自動喝水"):
+        if not self._control_hotkey_requires_allowed_foreground("停用自動喝水"):
             return
         self.toggle_auto_drink_enabled()
 
@@ -1208,7 +1286,7 @@ class AutoPotionController:
         if now - started_at + POTION_TIME_EPSILON_SECONDS < PICKUP_DISABLE_HOLD_SECONDS:
             return
         self.pickup_disable_hold_started_at = -999.0
-        if not self._control_hotkey_requires_game_foreground("停用拾取"):
+        if not self._control_hotkey_requires_allowed_foreground("停用拾取"):
             return
         self.toggle_pickup_enabled()
 
@@ -1583,6 +1661,12 @@ class AutoPotionController:
             return
         self.last_potion_blocked_sound_at = now
         self._play_media_file(AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop")
+
+    def _play_potion_check_sound(self, now: float) -> None:
+        if now - self.last_potion_check_sound_at < POTION_CHECK_SOUND_INTERVAL_SECONDS:
+            return
+        self.last_potion_check_sound_at = now
+        self._play_media_file(AUTO_DRINK_POTION_CHECK_SOUND_PATH, "auto_drink_potion_check")
 
     def _preload_media_files(self) -> None:
         try:
@@ -4479,7 +4563,7 @@ class AutoPotionController:
         self._set_potion_no_effect_count(bar_type, no_effect_count)
         self._set_potion_last_no_effect_counted_at(bar_type, now)
         if no_effect_count >= POTION_EFFECT_NO_EFFECT_LIMIT:
-            self._enter_out_of_potion_hold(bar_type, label, percent, now)
+            self._alert_suspected_no_potion(bar_type, label, percent, now)
         return True
 
     def _record_potion_effect_attempt(self, bar_type: str, now: float, before_percent: float) -> None:
@@ -4765,19 +4849,17 @@ class AutoPotionController:
         if self.mp_out_of_potion_hold is not None:
             held_labels.append("MP")
         label = "/".join(held_labels) if held_labels else "HP/MP"
-        return f"{label} 疑似無藥水，已停止 {label} 喝水；按 {self.settings.toggle_hotkey} 恢復"
+        return f"{label} 檢查藥水"
 
-    def _enter_out_of_potion_hold(self, bar_type: str, label: str, current_percent: float, now: float) -> None:
-        self._release_potion_key(bar_type)
+    def _alert_suspected_no_potion(self, bar_type: str, label: str, current_percent: float, now: float) -> None:
         self._set_potion_effect_attempts(bar_type, [])
         self._set_potion_no_effect_count(bar_type, POTION_EFFECT_NO_EFFECT_LIMIT)
-        self._set_out_of_potion_hold(bar_type, OutOfPotionHold(now, current_percent))
-        message = self._out_of_potion_hold_status_message()
+        message = f"{label} 檢查藥水"
         self.gui.set_status(message)
-        self.gui.show_toggle_notice(f"{label} 疑似無藥水")
-        self._play_media_file(AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop")
-        self.last_action = f"{label} 疑似無藥水"
-        print(f"{label} 連續 {POTION_EFFECT_NO_EFFECT_LIMIT} 次喝水未見回升，已停止 {label} 喝水：{current_percent:.0f}%")
+        self.gui.show_toggle_notice(message)
+        self._play_potion_check_sound(now)
+        self.last_action = message
+        print(f"{label} 連續 {POTION_EFFECT_NO_EFFECT_LIMIT} 次喝水未見回升，提示檢查藥水：{current_percent:.0f}%")
 
     def _is_target_window_active_before_send(self, label: str, now: float | None = None) -> bool:
         check_at = time.monotonic() if now is None else now
@@ -6215,8 +6297,14 @@ class AutoPotionController:
         bgr = image[:, :, :3].astype(np.float32)
         luminance = bgr[:, :, 2] * 0.299 + bgr[:, :, 1] * 0.587 + bgr[:, :, 0] * 0.114
         chroma = np.max(bgr, axis=2) - np.min(bgr, axis=2)
-        dark_or_gray_ratio = float(((luminance < 150.0) & (chroma < 90.0)).mean())
-        return dark_or_gray_ratio >= 0.45
+        neutral_track = (luminance < 150.0) & (chroma < 90.0)
+        foreground_detail = (luminance >= 170.0) | (chroma >= 95.0)
+        neutral_ratio = float(neutral_track.mean())
+        foreground_ratio = float(foreground_detail.mean())
+        return (
+            neutral_ratio >= BAR_EMPTY_TRACK_MIN_NEUTRAL_RATIO
+            and foreground_ratio <= BAR_EMPTY_TRACK_MAX_FOREGROUND_RATIO
+        )
 
     def _set_bar_detection_debug(
         self,

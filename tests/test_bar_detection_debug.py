@@ -1,6 +1,6 @@
 import unittest
 from contextlib import contextmanager
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import tkinter as tk
@@ -8,7 +8,7 @@ import tkinter as tk
 from maple_star.controller import AutoPotionController, BarDetectionDebug, bgra_image_to_ppm_data
 from maple_star.gui import AutoPotionSettingsGui
 from maple_star.key_capture import DETECTABLE_KEY_VKS, vk_to_key_name
-from maple_star.window_target import is_target_process_name, normalize_process_name
+from maple_star.window_target import is_target_process_name, is_target_window, normalize_process_name
 
 
 class BarDetectionDebugTests(unittest.TestCase):
@@ -400,6 +400,18 @@ class BarDetectionDebugTests(unittest.TestCase):
         self.assertTrue(is_target_process_name("msw.exe"))
         self.assertFalse(is_target_process_name("chrome.exe"))
         self.assertFalse(is_target_process_name("Discord.exe"))
+
+    def test_target_window_accepts_foreground_child_when_root_is_msw_process(self):
+        def process_name(process_id):
+            return "msw.exe" if process_id == 200 else "dwm.exe"
+
+        with (
+            patch("maple_star.adapters.window_target.window_ancestor_handles", return_value=(111, 222)),
+            patch("maple_star.adapters.window_target.is_valid_window", return_value=True),
+            patch("maple_star.adapters.window_target.window_process_id", side_effect=[100, 200]),
+            patch("maple_star.adapters.window_target.process_executable_name", side_effect=process_name),
+        ):
+            self.assertTrue(is_target_window(111))
 
     def test_pause_and_function_keys_are_detectable_for_control_hotkeys(self):
         self.assertEqual(vk_to_key_name(0x13), "Pause")

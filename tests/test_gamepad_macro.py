@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from maple_gamepad_macro import (
     build_controller_button_bindings,
+    effective_repeating_jump_interval_seconds,
     first_enabled_controller_binding,
     sync_runtime_settings_before_controller_events,
 )
@@ -13,27 +14,25 @@ from maple_star.settings import AutoPotionSettings
 class GamepadMacroTests(unittest.TestCase):
     def test_controller_button_bindings_include_only_enabled_functions(self):
         settings = AutoPotionSettings(
-            rb_enabled=False,
-            lb_enabled=False,
-            rb_controller_button="RB",
-            lb_controller_button="LB",
+            combo_slots={
+                "A": {"enabled": False, "trigger_button": "RB"},
+                "B": {"enabled": False, "trigger_button": "LB"},
+            },
         )
-        rb_macro = SimpleNamespace(name="RB")
-        lb_macro = SimpleNamespace(name="LB")
+        rb_macro = SimpleNamespace(name="A", slot_id="A")
+        lb_macro = SimpleNamespace(name="B", slot_id="B")
 
         bindings = build_controller_button_bindings(
             settings,
-            rb_macro,  # type: ignore[arg-type]
-            lb_macro,  # type: ignore[arg-type]
+            (rb_macro, lb_macro),  # type: ignore[arg-type]
         )
 
         self.assertEqual(bindings, {})
 
-        settings.rb_enabled = True
+        settings.combo_slots["A"]["enabled"] = True
         bindings = build_controller_button_bindings(
             settings,
-            rb_macro,  # type: ignore[arg-type]
-            lb_macro,  # type: ignore[arg-type]
+            (rb_macro, lb_macro),  # type: ignore[arg-type]
         )
 
         self.assertEqual(bindings[CONTROLLER_BUTTONS_BY_NAME["RB"]], (rb_macro,))
@@ -41,41 +40,37 @@ class GamepadMacroTests(unittest.TestCase):
 
     def test_disabled_bound_button_selects_no_binding(self):
         settings = AutoPotionSettings(
-            rb_enabled=False,
-            lb_enabled=False,
-            rb_controller_button="RB",
-            lb_controller_button="LB",
+            combo_slots={
+                "A": {"enabled": False, "trigger_button": "RB"},
+                "B": {"enabled": False, "trigger_button": "LB"},
+            },
         )
-        rb_macro = SimpleNamespace(name="RB")
-        lb_macro = SimpleNamespace(name="LB")
+        rb_macro = SimpleNamespace(name="A", slot_id="A")
+        lb_macro = SimpleNamespace(name="B", slot_id="B")
         bindings = build_controller_button_bindings(
             settings,
-            rb_macro,  # type: ignore[arg-type]
-            lb_macro,  # type: ignore[arg-type]
+            (rb_macro, lb_macro),  # type: ignore[arg-type]
         )
 
         self.assertIsNone(
             first_enabled_controller_binding(
                 bindings.get(CONTROLLER_BUTTONS_BY_NAME["RB"], ()),
                 settings,
-                rb_macro,  # type: ignore[arg-type]
-                lb_macro,  # type: ignore[arg-type]
             )
         )
 
     def test_same_trigger_can_switch_enabled_function_without_rebinding(self):
         settings = AutoPotionSettings(
-            rb_enabled=False,
-            lb_enabled=True,
-            rb_controller_button="RB",
-            lb_controller_button="RB",
+            combo_slots={
+                "A": {"enabled": False, "trigger_button": "RB"},
+                "B": {"enabled": True, "trigger_button": "RB"},
+            },
         )
-        rb_macro = SimpleNamespace(name="RB")
-        lb_macro = SimpleNamespace(name="LB")
+        rb_macro = SimpleNamespace(name="A", slot_id="A")
+        lb_macro = SimpleNamespace(name="B", slot_id="B")
         bindings = build_controller_button_bindings(
             settings,
-            rb_macro,  # type: ignore[arg-type]
-            lb_macro,  # type: ignore[arg-type]
+            (rb_macro, lb_macro),  # type: ignore[arg-type]
         )
         trigger_bindings = bindings[CONTROLLER_BUTTONS_BY_NAME["RB"]]
 
@@ -83,24 +78,19 @@ class GamepadMacroTests(unittest.TestCase):
             first_enabled_controller_binding(
                 trigger_bindings,
                 settings,
-                rb_macro,  # type: ignore[arg-type]
-                lb_macro,  # type: ignore[arg-type]
             ),
             lb_macro,
         )
 
-        settings.rb_enabled = True
+        settings.combo_slots["A"]["enabled"] = True
         trigger_bindings = build_controller_button_bindings(
             settings,
-            rb_macro,  # type: ignore[arg-type]
-            lb_macro,  # type: ignore[arg-type]
+            (rb_macro, lb_macro),  # type: ignore[arg-type]
         )[CONTROLLER_BUTTONS_BY_NAME["RB"]]
         self.assertIs(
             first_enabled_controller_binding(
                 trigger_bindings,
                 settings,
-                rb_macro,  # type: ignore[arg-type]
-                lb_macro,  # type: ignore[arg-type]
             ),
             rb_macro,
         )
@@ -148,6 +138,14 @@ class GamepadMacroTests(unittest.TestCase):
             )
         )
         self.assertEqual(events, ["gui"])
+
+    def test_repeating_jump_interval_reports_runtime_effective_floor(self):
+        slot = {
+            "skill_delay_seconds": 0.05,
+            "jump_interval_seconds": 0.01,
+        }
+
+        self.assertAlmostEqual(effective_repeating_jump_interval_seconds(slot), 0.06)
 
 
 if __name__ == "__main__":

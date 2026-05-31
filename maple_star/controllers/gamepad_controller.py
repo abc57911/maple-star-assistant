@@ -13,7 +13,12 @@ from ..adapters.win_input import (
     parse_vk_key,
     tap_key,
 )
-from ..models.settings import AutoPotionSettings
+from ..models.settings import (
+    AutoPotionSettings,
+    COMBO_SCRIPT_REPEATING_JUMP_SKILL,
+    COMBO_SCRIPT_SINGLE_JUMP_SKILL,
+    COMBO_SLOT_IDS,
+)
 from ..services.gamepad_bindings import (
     ControllerButtonBinding,
     build_controller_button_bindings,
@@ -48,6 +53,12 @@ CONTROL_HOTKEY_PUMP_DELAY_MS = 10
 RUNTIME_INFO_REFRESH_INTERVAL_SECONDS = 0.25
 
 TRACKED_HELD_KEYS: set[int] = set()
+
+
+def effective_repeating_jump_interval_seconds(slot: dict[str, object]) -> float:
+    skill_delay = max(0.0, float(slot["skill_delay_seconds"]))
+    configured_interval = max(0.0, float(slot["jump_interval_seconds"]))
+    return max(JUMP_KEY_HOLD_SECONDS, configured_interval, skill_delay + 0.01)
 
 
 def key_down(vk_code: int) -> None:
@@ -86,10 +97,12 @@ def sync_runtime_settings_before_controller_events(
 
 
 class RBJumpSlashMacro:
-    name = "RB"
+    script_id = COMBO_SCRIPT_REPEATING_JUMP_SKILL
 
-    def __init__(self, settings: AutoPotionSettings) -> None:
+    def __init__(self, settings: AutoPotionSettings, slot_id: str = "A", name: str | None = None) -> None:
         self.settings = settings
+        self.slot_id = slot_id
+        self.name = name or f"組合{slot_id}"
         self.rb_is_down = False
         self.active = False
         self.x_is_down = False
@@ -109,10 +122,16 @@ class RBJumpSlashMacro:
             print(f"忽略 {self.name}：上一個 {self.name} function 尚未完成")
             return
 
+        slot = self._slot()
+        configured_interval = float(slot["jump_interval_seconds"])
+        effective_interval = effective_repeating_jump_interval_seconds(slot)
+        interval_text = f"跳躍間隔={configured_interval:g} 秒"
+        if abs(effective_interval - configured_interval) >= 0.001:
+            interval_text += f"（實際 {effective_interval:g} 秒）"
         print(
-            f"{self.name} function 開始：跳躍={self.settings.rb_jump_key}，"
-            f"技能={self.settings.rb_skill_key}，技能延遲={self.settings.rb_skill_delay_seconds:g} 秒，"
-            f"跳躍間隔={self.settings.rb_jump_interval_seconds:g} 秒"
+            f"{self.name} function 開始：跳躍={slot['jump_key']}，"
+            f"技能={slot['skill_key']}，技能延遲={float(slot['skill_delay_seconds']):g} 秒，"
+            f"{interval_text}"
         )
         cycle = self.start_jump_cycle()
         if cycle is None:
@@ -144,7 +163,8 @@ class RBJumpSlashMacro:
 
         if self.active and self.next_c_at is not None and now >= self.next_c_at:
             if is_target_window_active():
-                skill_vk = self._parse_configured_key(self.settings.rb_skill_key, "技能鍵")
+                slot = self._slot()
+                skill_vk = self._parse_configured_key(str(slot["skill_key"]), "技能鍵")
                 if skill_vk is None:
                     self.stop()
                     return
@@ -207,15 +227,16 @@ class RBJumpSlashMacro:
             print(f"忽略 {self.name}：目前前景視窗不是 {TARGET_DISPLAY_NAME}")
             return None
 
-        jump_vk = self._parse_configured_key(self.settings.rb_jump_key, "跳躍鍵")
+        slot = self._slot()
+        jump_vk = self._parse_configured_key(str(slot["jump_key"]), "跳躍鍵")
         if jump_vk is None:
             return None
 
         now = time.monotonic()
         key_down(jump_vk)
         self.held_jump_vk = jump_vk
-        skill_delay = max(0.0, self.settings.rb_skill_delay_seconds)
-        jump_interval = max(JUMP_KEY_HOLD_SECONDS, self.settings.rb_jump_interval_seconds, skill_delay + 0.01)
+        skill_delay = max(0.0, float(slot["skill_delay_seconds"]))
+        jump_interval = effective_repeating_jump_interval_seconds(slot)
         return (
             now + JUMP_KEY_HOLD_SECONDS,
             now + skill_delay,
@@ -226,8 +247,11 @@ class RBJumpSlashMacro:
         try:
             return parse_vk_key(key)
         except ValueError as exc:
-            print(f"RB function {label} 設定錯誤：{exc}")
+            print(f"{self.name} function {label} 設定錯誤：{exc}")
             return None
+
+    def _slot(self) -> dict[str, object]:
+        return self.settings.combo_slot(self.slot_id)
 
     def stop(self) -> None:
         was_active = self.active or self.x_is_down
@@ -257,10 +281,12 @@ class RBJumpSlashMacro:
 
 
 class LBJumpSkillMacro:
-    name = "LB"
+    script_id = COMBO_SCRIPT_SINGLE_JUMP_SKILL
 
-    def __init__(self, settings: AutoPotionSettings) -> None:
+    def __init__(self, settings: AutoPotionSettings, slot_id: str = "B", name: str | None = None) -> None:
         self.settings = settings
+        self.slot_id = slot_id
+        self.name = name or f"組合{slot_id}"
         self.active = False
         self.jump_is_down = False
         self.held_jump_vk: int | None = None
@@ -280,7 +306,8 @@ class LBJumpSkillMacro:
             print(f"忽略 {self.name}：目前前景視窗不是 {TARGET_DISPLAY_NAME}")
             return
 
-        jump_vk = self._parse_configured_key(self.settings.lb_jump_key, "跳躍鍵")
+        slot = self._slot()
+        jump_vk = self._parse_configured_key(str(slot["jump_key"]), "跳躍鍵")
         if jump_vk is None:
             return
 
@@ -290,10 +317,10 @@ class LBJumpSkillMacro:
         self.jump_is_down = True
         self.held_jump_vk = jump_vk
         self.jump_up_at = now + JUMP_KEY_HOLD_SECONDS
-        self.skill_at = now + max(0.0, self.settings.lb_skill_delay_seconds)
+        self.skill_at = now + max(0.0, float(slot["skill_delay_seconds"]))
         print(
-            f"{self.name} function 開始：跳躍={self.settings.lb_jump_key}，"
-            f"技能={self.settings.lb_skill_key}，技能延遲={self.settings.lb_skill_delay_seconds:g} 秒"
+            f"{self.name} function 開始：跳躍={slot['jump_key']}，"
+            f"技能={slot['skill_key']}，技能延遲={float(slot['skill_delay_seconds']):g} 秒"
         )
 
     def on_button_up(self) -> None:
@@ -313,7 +340,8 @@ class LBJumpSkillMacro:
                 self.stop()
                 return
 
-            skill_vk = self._parse_configured_key(self.settings.lb_skill_key, "技能鍵")
+            slot = self._slot()
+            skill_vk = self._parse_configured_key(str(slot["skill_key"]), "技能鍵")
             if skill_vk is None:
                 self.stop()
                 return
@@ -362,19 +390,36 @@ class LBJumpSkillMacro:
         try:
             return parse_vk_key(key)
         except ValueError as exc:
-            print(f"LB function {label} 設定錯誤：{exc}")
+            print(f"{self.name} function {label} 設定錯誤：{exc}")
             return None
+
+    def _slot(self) -> dict[str, object]:
+        return self.settings.combo_slot(self.slot_id)
+
+
+COMBO_SCRIPT_BINDING_CLASSES = {
+    COMBO_SCRIPT_REPEATING_JUMP_SKILL: RBJumpSlashMacro,
+    COMBO_SCRIPT_SINGLE_JUMP_SKILL: LBJumpSkillMacro,
+}
+
+
+def build_combo_script_bindings(settings: AutoPotionSettings) -> tuple[ControllerButtonBinding, ...]:
+    settings.normalize_combo_slots()
+    bindings: list[ControllerButtonBinding] = []
+    for slot_id in COMBO_SLOT_IDS:
+        slot = settings.combo_slots[slot_id]
+        binding_class = COMBO_SCRIPT_BINDING_CLASSES.get(str(slot["script_id"]), LBJumpSkillMacro)
+        bindings.append(binding_class(settings, slot_id, f"組合{slot_id}"))
+    return tuple(bindings)
 
 
 def main() -> None:
     auto_potion = AutoPotionController(is_target_window_active, target_window_provider=find_target_window)
     auto_potion.install_console_redirect()
     controller_worker: ControllerEventWorker | None = None
-    rb_macro = RBJumpSlashMacro(auto_potion.settings)
-    lb_macro = LBJumpSkillMacro(auto_potion.settings)
-    all_button_bindings: tuple[ControllerButtonBinding, ...] = (rb_macro, lb_macro)
+    all_button_bindings: tuple[ControllerButtonBinding, ...] = build_combo_script_bindings(auto_potion.settings)
     controller_button_bindings: dict[int, tuple[ControllerButtonBinding, ...]] = {}
-    current_controller_button_settings: tuple[str, str, bool, bool] | None = None
+    current_controller_button_settings: tuple[tuple[str, object], ...] | None = None
     key_capture_actions_were_blocked = False
     controller_worker_dead_reported = False
 
@@ -385,23 +430,23 @@ def main() -> None:
     )
 
     def sync_controller_button_bindings() -> None:
-        nonlocal controller_button_bindings, current_controller_button_settings
-        new_settings = (
-            auto_potion.settings.rb_controller_button,
-            auto_potion.settings.lb_controller_button,
-            auto_potion.settings.rb_enabled,
-            auto_potion.settings.lb_enabled,
+        nonlocal all_button_bindings, controller_button_bindings, current_controller_button_settings
+        auto_potion.settings.normalize_combo_slots()
+        new_settings = tuple(
+            (f"{slot_id}:{key}", value)
+            for slot_id in COMBO_SLOT_IDS
+            for key, value in auto_potion.settings.combo_slots[slot_id].items()
         )
         if current_controller_button_settings == new_settings:
             return
 
-        if current_controller_button_settings is not None and current_controller_button_settings[:2] != new_settings[:2]:
-            stop_all_bindings("手把觸發鍵設定已變更，停止目前巨集並重建綁定")
+        if current_controller_button_settings is not None:
+            stop_all_bindings("組合設定已變更，停止目前巨集並重建綁定")
 
+        all_button_bindings = build_combo_script_bindings(auto_potion.settings)
         controller_button_bindings = build_controller_button_bindings(
             auto_potion.settings,
-            rb_macro,
-            lb_macro,
+            all_button_bindings,
         )
         current_controller_button_settings = new_settings
 
@@ -412,9 +457,7 @@ def main() -> None:
         for binding in all_button_bindings:
             if not auto_potion.can_run_actions():
                 continue
-            if binding is rb_macro and not auto_potion.settings.rb_enabled:
-                continue
-            if binding is lb_macro and not auto_potion.settings.lb_enabled:
+            if not is_controller_binding_enabled(auto_potion.settings, binding):
                 continue
             binding.update(now)
 
@@ -425,7 +468,8 @@ def main() -> None:
         release_tracked_keys()
 
     def any_combo_enabled() -> bool:
-        return auto_potion.settings.rb_enabled or auto_potion.settings.lb_enabled
+        auto_potion.settings.normalize_combo_slots()
+        return any(bool(auto_potion.settings.combo_slots[slot_id]["enabled"]) for slot_id in COMBO_SLOT_IDS)
 
     def ensure_controller_worker_state() -> None:
         nonlocal controller_worker, controller_worker_dead_reported
@@ -475,9 +519,7 @@ def main() -> None:
         for binding in all_button_bindings:
             if not auto_potion.can_run_actions():
                 continue
-            if binding is rb_macro and not auto_potion.settings.rb_enabled:
-                continue
-            if binding is lb_macro and not auto_potion.settings.lb_enabled:
+            if not is_controller_binding_enabled(auto_potion.settings, binding):
                 continue
             deadline = binding.next_deadline_at()
             if deadline is not None:
@@ -518,8 +560,6 @@ def main() -> None:
                 binding = first_enabled_controller_binding(
                     button_bindings,
                     auto_potion.settings,
-                    rb_macro,
-                    lb_macro,
                 )
                 if binding is None:
                     continue
@@ -543,7 +583,7 @@ def main() -> None:
                     if not auto_potion.can_run_actions():
                         binding.stop()
                         continue
-                    if not is_controller_binding_enabled(auto_potion.settings, binding, rb_macro, lb_macro):
+                    if not is_controller_binding_enabled(auto_potion.settings, binding):
                         continue
                     binding.on_button_up()
 
@@ -611,10 +651,9 @@ def main() -> None:
             if auto_potion.is_closed():
                 return
 
-            if not auto_potion.can_run_actions() or not auto_potion.settings.rb_enabled:
-                rb_macro.stop()
-            if not auto_potion.can_run_actions() or not auto_potion.settings.lb_enabled:
-                lb_macro.stop()
+            for binding in all_button_bindings:
+                if not auto_potion.can_run_actions() or not is_controller_binding_enabled(auto_potion.settings, binding):
+                    binding.stop()
 
             if not window_interaction_active:
                 update_active_bindings()
