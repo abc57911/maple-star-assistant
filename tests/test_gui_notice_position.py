@@ -14,6 +14,11 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.root.winfo_screenheight.return_value = 1080
         gui.root.winfo_width.return_value = 1240
         gui.root.winfo_height.return_value = 760
+        gui.console_flush_after_id = None
+        gui.console_pending_text = []
+        gui.root_was_minimized = False
+        gui.restore_repaint_until = 0.0
+        gui.restore_repaint_after_id = None
         return gui
 
     def test_checkbox_label_click_toggles_variable_and_applies_settings(self):
@@ -95,6 +100,29 @@ class ToggleNoticePositionTests(unittest.TestCase):
         self.assertEqual(gui.settings.combo_slots["A"]["jump_interval_seconds"], 0.01)
         self.assertEqual(gui.settings.combo_slots["B"]["jump_interval_seconds"], 0.88)
 
+    def test_set_potion_enabled_syncs_checkbox_vars_and_settings(self):
+        class FakeVar:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        gui = self.make_gui()
+        gui.settings = AutoPotionSettings(hp_enabled=True, mp_enabled=False)
+        gui.hp_enabled = FakeVar(True)
+        gui.mp_enabled = FakeVar(False)
+
+        gui.set_potion_enabled(False, True)
+
+        self.assertFalse(gui.hp_enabled.get())
+        self.assertTrue(gui.mp_enabled.get())
+        self.assertFalse(gui.settings.hp_enabled)
+        self.assertTrue(gui.settings.mp_enabled)
+
     def test_bind_checkbox_label_registers_click_handler(self):
         gui = self.make_gui()
         label = Mock()
@@ -133,8 +161,50 @@ class ToggleNoticePositionTests(unittest.TestCase):
 
         self.assertEqual(gui.window_interaction_pause_until, 0.0)
         self.assertEqual(gui.last_root_size, (1240, 760))
+        self.assertTrue(gui.root_was_minimized)
         gui._suspend_layout_for_resize.assert_not_called()
         gui._schedule_window_interaction_finish.assert_not_called()
+
+    def test_restore_from_minimized_does_not_suspend_layout_for_resize(self):
+        gui = self.make_gui()
+        gui.root.state.return_value = "normal"
+        gui.window_interaction_pause_until = 99.0
+        gui.last_root_size = (1240, 760)
+        gui.root_was_minimized = True
+        gui.resize_layout_suspended = False
+        gui.console_collapsed = False
+        gui.console_resize_frozen = False
+        gui.console_container = Mock()
+        gui.suppress_resize_suspend_until = 0.0
+        gui.root.after_idle.return_value = "restore-repaint"
+        gui._suspend_layout_for_resize = Mock()
+        gui._restore_layout_after_resize = Mock()
+        gui._unfreeze_console_resize = Mock()
+        gui._schedule_console_height_sync = Mock()
+        gui._schedule_window_interaction_finish = Mock()
+        event = Mock(widget=gui.root, width=1200, height=760)
+
+        with patch("maple_star.views.settings_gui.time.monotonic", return_value=100.0):
+            gui._on_root_configure(event)
+
+        self.assertEqual(gui.last_root_size, (1200, 760))
+        self.assertFalse(gui.root_was_minimized)
+        self.assertAlmostEqual(gui.window_interaction_pause_until, 100.22)
+        self.assertAlmostEqual(gui.restore_repaint_until, 100.22)
+        self.assertAlmostEqual(gui.suppress_resize_suspend_until, 100.22)
+        self.assertEqual(gui.restore_repaint_after_id, "restore-repaint")
+        gui._suspend_layout_for_resize.assert_not_called()
+        gui._schedule_window_interaction_finish.assert_not_called()
+        gui._restore_layout_after_resize.assert_called_once()
+        gui._unfreeze_console_resize.assert_not_called()
+        gui._schedule_console_height_sync.assert_not_called()
+        gui.root.after_idle.assert_called_once_with(gui._finish_restore_repaint)
+
+        gui._finish_restore_repaint()
+
+        gui.root.update_idletasks.assert_called()
+        gui._unfreeze_console_resize.assert_called_once()
+        gui._schedule_console_height_sync.assert_called_once()
 
     def test_window_interaction_inactive_while_root_is_minimized(self):
         gui = self.make_gui()
@@ -395,6 +465,7 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.console.index.side_effect = [f"{MAX_CONSOLE_LINES + 5}.0", "1.0"]
 
         gui.append_console("sample\n")
+        gui._flush_console_buffer()
 
         gui.console.insert.assert_called_once_with("end", "sample\n")
         gui.console.delete.assert_called_once_with("1.0", "6.0")
@@ -409,9 +480,29 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.console.index.side_effect = ["1.0", "1.25"]
 
         gui.append_console("sample")
+        gui._flush_console_buffer()
 
         gui.console.delete.assert_called_once_with("1.0", "1.25")
         self.assertEqual(gui.console.configure.call_args_list[-1].kwargs, {"state": "disabled"})
+
+    def test_append_console_batches_multiple_writes_before_flush(self):
+        gui = self.make_gui()
+        gui.closed = False
+        gui.last_gui_error_at = -999.0
+        gui.console = Mock()
+        gui.console.index.side_effect = ["1.0", "1.0"]
+        gui.root.after.return_value = "console-flush"
+
+        gui.append_console("sample")
+        gui.append_console("\n")
+
+        gui.root.after.assert_called_once_with(50, gui._flush_console_buffer)
+        gui.console.insert.assert_not_called()
+
+        gui._flush_console_buffer()
+
+        gui.console.insert.assert_called_once_with("end", "sample\n")
+        self.assertEqual(gui.console_pending_text, [])
 
     def test_clear_console_removes_text_and_disables_text(self):
         gui = self.make_gui()

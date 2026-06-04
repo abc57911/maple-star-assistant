@@ -533,8 +533,8 @@ def _potion_status_signature(status: PotionStatus) -> tuple[object, ...]:
     return (
         _rounded_percent(status.hp_percent),
         _rounded_percent(status.mp_percent),
-        status.hp_debug,
-        status.mp_debug,
+        _bar_debug_signature(status.hp_debug),
+        _bar_debug_signature(status.mp_debug),
         status.status,
         status.action,
         status.gameplay_hud_active,
@@ -546,6 +546,41 @@ def _potion_status_signature(status: PotionStatus) -> tuple[object, ...]:
         status.mp_track_region,
         int(status.generation or 0),
     )
+
+
+def _bar_debug_signature(debug: str) -> tuple[str, ...]:
+    parts = [part.strip() for part in str(debug or "").split("|")]
+    return tuple(
+        part
+        for part in parts
+        if part
+        and not _is_percent_fragment(part)
+        and not _is_region_fragment(part)
+        and not part.startswith(("full=", "track=", "f=", "t="))
+    )
+
+
+def _is_percent_fragment(value: str) -> bool:
+    value = value.strip()
+    if not value.endswith("%"):
+        return False
+    try:
+        float(value[:-1])
+    except ValueError:
+        return False
+    return True
+
+
+def _is_region_fragment(value: str) -> bool:
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) != 4:
+        return False
+    try:
+        for part in parts:
+            int(part)
+    except ValueError:
+        return False
+    return True
 
 
 def _experience_status_signature(status: ExperienceStatus) -> tuple[object, ...]:

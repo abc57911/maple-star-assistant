@@ -30,10 +30,12 @@
 - 實際送鍵前需做 confirm capture，確認失敗時可用相近的 unchecked fallback，但差異過大時必須放棄送鍵。
 - 道具 tooltip 或其他浮動 UI 遮住 HP/MP ROI 時，讀值應視為不確定並略過自動喝水；不可把深色 tooltip 面板誤當成 0% 空條。
 - HP/MP 條不穩定 log 需節流，避免偵測抖動時洗掉 GUI Console 內真正重要的 OCR 與異常樣本資訊。
-- HP/MP 已有 cached HUD geometry 時，優先用 direct GDI capture 對 HP/MP track 做同一張 union capture，再裁成各 bar，減少兩次 screenshot 壓力。
-- direct bar capture 失敗或 geometry 不可信時，必須 fallback 到既有 `_capture_bar_percent("hp"/"mp")` 路徑。
+- HP/MP 已有 cached HUD geometry 時，用 direct GDI capture 對 HP/MP track 做同一張 union capture，再裁成各 bar，減少 screenshot 壓力。
+- screenshot、label 與 template matching 只能用來定位 HP/MP 座標與 HUD 幾何；自動喝水的 HP/MP 百分比讀值必須 direct-only。
+- direct bar capture 失敗或 geometry 不可信時，可先用 screenshot 重新定位；定位後仍只能再走 direct 讀值，仍失敗就視為不確定、略過本輪喝水。
+- direct 連續失敗需節流警告 GUI status、toggle notice 與 console log，不得用 screenshot crop 百分比替代。
 - direct bar capture context 會重用 DC、bitmap 與 buffer；修改此路徑時必須確認 resize、failure 與 cleanup 都釋放 GDI resources。
-- `require_clear_tail=True` 的情境不可直接走 fast direct capture，仍需保留原有 clear-tail 驗證語義。
+- `require_clear_tail=True` 的送鍵前確認也維持 direct-only；direct 無法做 screenshot tail 驗證時，以 direct 百分比與 fallback delta 做保守確認。
 - Experience-only runtime 不應為了 EXP 統計每 tick 擷取 HP/MP；只有缺 HUD cache、下一次 EXP OCR/baseline/checkpoint 到期，或 HUD geometry 失效時才刷新 HUD。
 
 ## Runtime process

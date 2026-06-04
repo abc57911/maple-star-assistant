@@ -81,7 +81,7 @@ class BarDetectionDebugTests(unittest.TestCase):
         self.assertEqual(reason, "OK")
         self.assertIsNone(tail_clear)
 
-    def test_bar_detection_debug_text_includes_source_region_and_percent(self):
+    def test_bar_detection_debug_text_includes_source_percent_and_reason(self):
         controller = self.make_controller()
         controller._set_bar_detection_debug(
             "hp",
@@ -97,11 +97,36 @@ class BarDetectionDebugTests(unittest.TestCase):
 
         text = controller._bar_detection_debug_text("hp")
 
-        self.assertIn("HP: 自動定位", text)
+        self.assertIn("HP: 定位", text)
         self.assertIn("56%", text)
-        self.assertIn("full=1,2,3,4", text)
-        self.assertIn("track=5,6,7,8", text)
         self.assertIn("OK", text)
+        self.assertNotIn("f=", text)
+        self.assertNotIn("t=", text)
+        self.assertNotIn("full=", text)
+        self.assertNotIn("track=", text)
+
+    def test_bar_detection_debug_text_omits_coordinate_regions_for_direct_track(self):
+        controller = self.make_controller()
+        controller._set_bar_detection_debug(
+            "mp",
+            source="直接取色",
+            region=(488, 1019, 255, 28),
+            track_region=(488, 1019, 255, 28),
+            percent=91.0,
+            success=True,
+            reason="OK:Direct",
+            require_clear_tail=False,
+            tail_clear=None,
+        )
+
+        text = controller._bar_detection_debug_text("mp")
+
+        self.assertIn("MP: 直取", text)
+        self.assertIn("91%", text)
+        self.assertIn("OK:Direct", text)
+        self.assertNotIn("488,1019", text)
+        self.assertNotIn("t=", text)
+        self.assertNotIn("f=", text)
 
     def test_bottom_bar_pair_regions_are_derived_from_candidate_pair(self):
         controller = self.make_controller()
@@ -316,7 +341,7 @@ class BarDetectionDebugTests(unittest.TestCase):
         debug = controller.last_bar_debug["hp"]
         self.assertEqual(debug.source, "自動定位")
         self.assertIsNone(debug.region)
-        self.assertEqual(debug.reason, "找不到 HP/MP 成對 HUD 條")
+        self.assertEqual(debug.reason, "找不到 HP/MP 定位座標，無法直接取色")
 
     def test_capture_bar_percent_holds_recent_stable_sample_for_transient_failure(self):
         controller = self.make_controller()

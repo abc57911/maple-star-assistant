@@ -20,6 +20,7 @@ import numpy as np
 from ..constants import (
     ASYNC_KEY_DOWN_MASK,
     AUTO_DRINK_DISABLE_HOLD_SECONDS,
+    AUTO_DRINK_TOGGLE_DEBOUNCE_SECONDS,
     BAR_COLUMN_FILL_MIN_RATIO,
     BAR_CONFIRM_CAPTURE_ATTEMPTS,
     BAR_CONFIRM_FALLBACK_MAX_DELTA_PERCENT,
@@ -64,6 +65,7 @@ from ..constants import (
     LOADING_GUARD_LOW_SATURATION_RATIO,
     LOADING_GUARD_MEAN_LUMINANCE,
     PICKUP_DISABLE_HOLD_SECONDS,
+    PICKUP_TOGGLE_DEBOUNCE_SECONDS,
     PM_REMOVE,
     POTION_EFFECT_AUTO_HOLD_BAR_TYPES,
     POTION_EFFECT_DAMAGE_GRACE_SECONDS,
@@ -247,6 +249,8 @@ POTION_EXPERIENCE_DEFER_SECONDS = 1.0
 POTION_BLOCKED_SOUND_INTERVAL_SECONDS = 3.0
 POTION_CHECK_SOUND_INTERVAL_SECONDS = 10.0
 RUNTIME_POTION_STATUS_TIMEOUT_SECONDS = 2.0
+DIRECT_BAR_FAILURE_WARNING_ATTEMPTS = 3
+RECENT_HUD_GEOMETRY_GRACE_SECONDS = 2.0
 DIRECT_BAR_BIT_COUNT = 32
 DIRECT_BAR_BYTES_PER_PIXEL = 4
 DIB_RGB_COLORS = 0
@@ -409,8 +413,12 @@ class AutoPotionController:
         self.last_potion_check_sound_at = -999.0
         self.last_error_at = -999.0
         self.last_unstable_bar_at = -999.0
+        self.direct_bar_failure_count = 0
+        self.last_direct_bar_failure_warning_at = -999.0
+        self.last_direct_bar_failure_reason = ""
         self.auto_drink_enabled = True
         self.scripts_enabled = True
+        self.auto_drink_potion_option_snapshot: tuple[bool, bool] | None = None
         self.hotkey_registered = False
         self.emergency_hotkey_registered = False
         self.experience_toggle_hotkey_registered = False
@@ -766,6 +774,11 @@ class AutoPotionController:
     ) -> None:
         if region is None:
             return
+        if bar_type in ("hp", "mp"):
+            self.bottom_bar_regions[bar_type] = region
+            if track_region is not None:
+                self.bottom_bar_track_regions[bar_type] = track_region
+            self._sync_runtime_bar_region_cache_from_target()
         debug = self.last_bar_debug.get(bar_type)
         if debug is None:
             debug = BarDetectionDebug(bar_type)
@@ -776,6 +789,22 @@ class AutoPotionController:
         debug.percent = percent
         debug.success = percent is not None
         debug.reason = "OK" if percent is not None else debug.reason
+
+    def _sync_runtime_bar_region_cache_from_target(self) -> None:
+        if "hp" not in self.bottom_bar_regions or "mp" not in self.bottom_bar_regions:
+            return
+        client_bounds = self._target_client_bounds()
+        if client_bounds is None:
+            return
+        if not self._bar_region_pair_geometry_is_valid(
+            self.bottom_bar_regions,
+            self.bottom_bar_track_regions,
+            client_bounds,
+        ):
+            return
+        self.bottom_bar_client_bounds = client_bounds
+        self.bottom_bar_regions_at = time.monotonic()
+        self._cache_bottom_bar_client_regions(client_bounds)
 
     def _apply_worker_crash(self, crash: WorkerCrashed) -> None:
         if crash.worker == "potion":
@@ -1215,7 +1244,7 @@ class AutoPotionController:
         self.emergency_stop()
 
     def _try_toggle_scripts_enabled(self, now: float) -> None:
-        if now - self.last_toggle_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
+        if now - self.last_toggle_hotkey_at < AUTO_DRINK_TOGGLE_DEBOUNCE_SECONDS:
             return
         self.last_toggle_hotkey_at = now
         if not self._control_hotkey_requires_allowed_foreground("切換自動喝水"):
@@ -1249,7 +1278,7 @@ class AutoPotionController:
         print(f"{self.settings.experience_reset_hotkey}：經驗統計已重置")
 
     def _try_toggle_pickup(self, now: float) -> None:
-        if now - self.last_pickup_toggle_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
+        if now - self.last_pickup_toggle_hotkey_at < PICKUP_TOGGLE_DEBOUNCE_SECONDS:
             return
         self.last_pickup_toggle_hotkey_at = now
         if not self._control_hotkey_requires_allowed_foreground("切換拾取"):
@@ -1478,6 +1507,7 @@ class AutoPotionController:
                 action = f"{self.settings.toggle_hotkey} 自動喝水恢復"
             else:
                 self.auto_drink_enabled = not self.auto_drink_enabled
+                self._sync_gui_potion_options_after_auto_drink_toggle()
                 notice = "自動喝水已啟用" if self.auto_drink_enabled else "自動喝水已暫停"
                 action = f"{self.settings.toggle_hotkey} {'自動喝水啟用' if self.auto_drink_enabled else '自動喝水暫停'}"
             if self.auto_drink_enabled:
@@ -1505,6 +1535,7 @@ class AutoPotionController:
             return
 
         self.auto_drink_enabled = not self.auto_drink_enabled
+        self._sync_gui_potion_options_after_auto_drink_toggle()
         if self.auto_drink_enabled:
             self._clear_potion_effect_state()
             self._play_media_file(AUTO_DRINK_START_SOUND_PATH, "auto_drink_start")
@@ -1524,6 +1555,23 @@ class AutoPotionController:
         self.gui.set_current_percentages(None, None)
         self.last_action = f"{self.settings.toggle_hotkey} 自動喝水暫停"
         print(f"{self.settings.toggle_hotkey}：自動喝水已暫停")
+
+    def _sync_gui_potion_options_after_auto_drink_toggle(self) -> None:
+        if self.auto_drink_enabled:
+            restored = getattr(self, "auto_drink_potion_option_snapshot", None)
+            hp_enabled, mp_enabled = restored or (self.settings.hp_enabled, self.settings.mp_enabled)
+            self.auto_drink_potion_option_snapshot = None
+        else:
+            if getattr(self, "auto_drink_potion_option_snapshot", None) is None:
+                self.auto_drink_potion_option_snapshot = (self.settings.hp_enabled, self.settings.mp_enabled)
+            hp_enabled, mp_enabled = False, False
+
+        set_potion_enabled = getattr(self.gui, "set_potion_enabled", None)
+        if callable(set_potion_enabled):
+            set_potion_enabled(hp_enabled, mp_enabled)
+            return
+        self.settings.hp_enabled = hp_enabled
+        self.settings.mp_enabled = mp_enabled
 
     def toggle_scripts_enabled(self) -> None:
         self.toggle_auto_drink_enabled()
@@ -1790,6 +1838,17 @@ class AutoPotionController:
             self.gui.set_current_percentages(None, None)
             return
 
+        if not self.auto_drink_enabled:
+            self._update_without_potion_bar_monitoring(
+                now,
+                f"自動喝水已暫停，按 {self.settings.toggle_hotkey} 恢復",
+            )
+            return
+
+        if not self._has_enabled_potion_bar():
+            self._update_without_potion_bar_monitoring(now, "未勾選紅水或藍水，暫停 HP/MP 檢查")
+            return
+
         try:
             transition_pause_reason = self._transition_pause_reason(now)
             if transition_pause_reason:
@@ -1821,7 +1880,8 @@ class AutoPotionController:
             if hp_percent is None or mp_percent is None:
                 if self.auto_drink_enabled:
                     self._clear_uncertain_potion_observations(hp_percent, mp_percent)
-                self.gui.set_status("HP/MP 條偵測不穩定，略過錯誤取樣")
+                if not self._emit_direct_bar_failure_warning_if_needed(now):
+                    self.gui.set_status("HP/MP 條偵測不穩定，略過錯誤取樣")
             else:
                 if not self.auto_drink_enabled:
                     self._release_all_potion_keys()
@@ -1854,6 +1914,36 @@ class AutoPotionController:
         except Exception as exc:
             if now - self.last_error_at >= 2.0:
                 print(f"自動喝水錯誤：{exc}")
+                self.gui.set_status(f"錯誤：{exc}")
+                self.last_error_at = now
+
+    def _has_enabled_potion_bar(self) -> bool:
+        return bool(getattr(self.settings, "hp_enabled", False) or getattr(self.settings, "mp_enabled", False))
+
+    def _update_without_potion_bar_monitoring(self, now: float, status: str) -> None:
+        self._release_all_potion_keys()
+        self.gui.set_current_percentages(None, None)
+        self.gui.set_status(status)
+
+        try:
+            if self.settings.exp_efficiency_enabled:
+                if self._experience_runtime_has_cached_hud():
+                    self._set_gameplay_hud_active(True, now)
+                    self._update_experience_efficiency(now)
+                    return
+
+                self._set_gameplay_hud_active(False, now)
+                self._pause_experience_for_missing_hud(now)
+                return
+
+            self._stop_experience_ocr_job()
+            effective_now = self._pause_experience_clock(now)
+            snapshot = self.experience_tracker.snapshot(effective_now)
+            snapshot.status = "已停用，保留統計" if snapshot.sample_count else "已停用"
+            self.gui.set_experience_snapshot(snapshot)
+        except Exception as exc:
+            if now - self.last_error_at >= 2.0:
+                print(f"HP/MP 監控停用更新錯誤：{exc}")
                 self.gui.set_status(f"錯誤：{exc}")
                 self.last_error_at = now
 
@@ -1990,21 +2080,8 @@ class AutoPotionController:
         previous_regions = dict(getattr(self, "bottom_bar_regions", {}))
         previous_track_regions = dict(getattr(self, "bottom_bar_track_regions", {}))
         previous_client_bounds = getattr(self, "bottom_bar_client_bounds", None)
-        if self._reuse_cached_bottom_bar_regions_with_direct_sample(now):
-            self._set_gameplay_hud_active(True, now)
-            return True
-
-        if self._can_reuse_stale_bottom_bar_regions(
-            previous_regions,
-            previous_track_regions,
-            previous_client_bounds,
-        ):
-            self.bottom_bar_regions = previous_regions
-            self.bottom_bar_track_regions = previous_track_regions
-            self.bottom_bar_client_bounds = previous_client_bounds
-            self.bottom_bar_regions_at = time.monotonic()
-            self._set_gameplay_hud_active(True, now)
-            return True
+        previous_regions_at = getattr(self, "bottom_bar_regions_at", -999.0)
+        previous_layout = getattr(self, "bottom_hud_layout", None)
 
         regions = self._find_bottom_bar_pair_regions(
             use_cache=False,
@@ -2014,17 +2091,24 @@ class AutoPotionController:
         if active:
             self._set_gameplay_hud_active(True, now)
             return True
-        if self._can_reuse_stale_bottom_bar_regions(
+
+        if self._can_keep_recent_bottom_bar_geometry(
             previous_regions,
             previous_track_regions,
             previous_client_bounds,
+            previous_regions_at,
+            now,
         ):
-            self.bottom_bar_regions = previous_regions
-            self.bottom_bar_track_regions = previous_track_regions
-            self.bottom_bar_client_bounds = previous_client_bounds
-            self.bottom_bar_regions_at = time.monotonic()
-            self._set_gameplay_hud_active(True, now)
-            return True
+            self._restore_bottom_bar_geometry(
+                previous_regions,
+                previous_track_regions,
+                previous_client_bounds,
+                previous_regions_at,
+                previous_layout,
+            )
+        else:
+            self._clear_bottom_bar_geometry()
+
         self._set_gameplay_hud_active(False, now)
         for bar_type in ("hp", "mp"):
             self._set_bar_detection_debug(
@@ -2039,6 +2123,30 @@ class AutoPotionController:
                 tail_clear=None,
             )
         return False
+
+    def _restore_bottom_bar_geometry(
+        self,
+        regions: dict[str, tuple[int, int, int, int]],
+        track_regions: dict[str, tuple[int, int, int, int]],
+        client_bounds: tuple[int, int, int, int] | None,
+        regions_at: float,
+        layout: BottomHudLayout | None,
+    ) -> None:
+        self.bottom_bar_regions = regions
+        self.bottom_bar_track_regions = track_regions
+        self.bottom_bar_client_bounds = client_bounds
+        self.bottom_bar_regions_at = regions_at
+        self.bottom_hud_layout = layout
+        if client_bounds is not None:
+            self._cache_bottom_bar_client_regions(client_bounds)
+
+    def _clear_bottom_bar_geometry(self) -> None:
+        self.bottom_bar_regions = {}
+        self.bottom_bar_track_regions = {}
+        self.bottom_bar_regions_client = {}
+        self.bottom_bar_track_regions_client = {}
+        self.bottom_bar_client_size = None
+        self.bottom_hud_layout = None
 
     def _cache_bottom_bar_client_regions(self, client_bounds: tuple[int, int, int, int]) -> None:
         client_left, client_top, client_width, client_height = client_bounds
@@ -2077,9 +2185,13 @@ class AutoPotionController:
         dict[str, tuple[int, int, int, int]],
         tuple[int, int, int, int],
     ] | None:
-        try:
-            client_bounds = self._foreground_client_bounds()
-        except Exception:
+        client_bounds = self._target_client_bounds()
+        if client_bounds is None:
+            try:
+                client_bounds = self._foreground_client_bounds()
+            except Exception:
+                return None
+        if client_bounds is None:
             return None
         client_left, client_top, client_width, client_height = client_bounds
         if getattr(self, "bottom_bar_client_size", None) != (client_width, client_height):
@@ -2157,6 +2269,46 @@ class AutoPotionController:
             if reason != "OK:EmptyTrack":
                 saw_non_empty_sample = True
         return saw_non_empty_sample
+
+    def _can_keep_current_bottom_bar_geometry(
+        self,
+        regions: dict[str, tuple[int, int, int, int]],
+        track_regions: dict[str, tuple[int, int, int, int]],
+        client_bounds: tuple[int, int, int, int] | None,
+    ) -> bool:
+        if "hp" not in regions or "mp" not in regions:
+            return False
+        current_bounds = self._target_client_bounds()
+        if current_bounds is None:
+            try:
+                current_bounds = self._foreground_client_bounds()
+            except Exception:
+                return False
+        if client_bounds is None or client_bounds != current_bounds:
+            return False
+        return self._bar_region_pair_geometry_is_valid(regions, track_regions, client_bounds)
+
+    def _can_keep_recent_bottom_bar_geometry(
+        self,
+        regions: dict[str, tuple[int, int, int, int]],
+        track_regions: dict[str, tuple[int, int, int, int]],
+        client_bounds: tuple[int, int, int, int] | None,
+        regions_at: float,
+        now: float,
+    ) -> bool:
+        if now - regions_at > RECENT_HUD_GEOMETRY_GRACE_SECONDS:
+            return False
+        if "hp" not in regions or "mp" not in regions:
+            return False
+        current_bounds = self._target_client_bounds()
+        if current_bounds is None:
+            try:
+                current_bounds = self._foreground_client_bounds()
+            except Exception:
+                return False
+        if client_bounds is None or client_bounds != current_bounds:
+            return False
+        return self._bar_region_pair_geometry_is_valid(regions, track_regions, client_bounds)
 
     def _bar_region_pair_geometry_is_valid(
         self,
@@ -4263,6 +4415,7 @@ class AutoPotionController:
             percent = self._capture_transient_bar_percent(bar_type)
             if percent is None:
                 self._release_potion_key(bar_type)
+                self._emit_direct_bar_failure_warning_if_needed(now)
                 self._log_unstable_bar(now, label)
                 return
         if not should_drink_for_threshold(percent, threshold_percent):
@@ -4294,6 +4447,7 @@ class AutoPotionController:
         if percent is None:
             if continuous_enabled:
                 self._release_potion_key(bar_type)
+            self._emit_direct_bar_failure_warning_if_needed(now)
             self._log_unstable_bar(now, label)
             self._play_potion_blocked_sound(now)
             return
@@ -4899,6 +5053,58 @@ class AutoPotionController:
         self.last_unstable_bar_at = now
         print(f"{label} 條偵測不穩定，略過自動喝水")
 
+    def _record_direct_bar_success(self) -> None:
+        self.direct_bar_failure_count = 0
+        self.last_direct_bar_failure_reason = ""
+
+    def _record_direct_bar_failure(self, reason: str) -> None:
+        self.direct_bar_failure_count = getattr(self, "direct_bar_failure_count", 0) + 1
+        self.last_direct_bar_failure_reason = reason
+
+    def _note_direct_bar_failure_reason(self, reason: str) -> None:
+        self.last_direct_bar_failure_reason = reason
+
+    def _direct_bar_failure_reason(self, fallback: str) -> str:
+        reason = getattr(self, "last_direct_bar_failure_reason", "") or fallback
+        if "略過截圖讀值" not in reason:
+            reason = f"{reason}，略過截圖讀值"
+        return reason
+
+    def _emit_direct_bar_failure_warning_if_needed(self, now: float) -> bool:
+        if getattr(self, "direct_bar_failure_count", 0) < DIRECT_BAR_FAILURE_WARNING_ATTEMPTS:
+            return False
+
+        status = "HP/MP 直接取色連續失敗，已暫停自動喝水"
+        self.gui.set_status(status)
+        last_warning_at = getattr(self, "last_direct_bar_failure_warning_at", -999.0)
+        if now - last_warning_at >= BAR_UNSTABLE_LOG_INTERVAL_SECONDS:
+            self.last_direct_bar_failure_warning_at = now
+            reason = getattr(self, "last_direct_bar_failure_reason", "") or "原因不明"
+            self.gui.show_toggle_notice("HP/MP 直接取色失敗")
+            print(f"{status}：{reason}")
+        return True
+
+    def _set_direct_bar_failure_debug(
+        self,
+        bar_type: str,
+        reason: str,
+        *,
+        require_clear_tail: bool = False,
+    ) -> None:
+        region = getattr(self, "bottom_bar_regions", {}).get(bar_type)
+        track_region = getattr(self, "bottom_bar_track_regions", {}).get(bar_type)
+        self._set_bar_detection_debug(
+            bar_type,
+            source="直接取色",
+            region=region,
+            track_region=track_region,
+            percent=None,
+            success=False,
+            reason=reason,
+            require_clear_tail=require_clear_tail,
+            tail_clear=None,
+        )
+
     def _capture_transient_bar_percent(self, bar_type: str) -> float | None:
         attempts = max(1, BAR_TRANSIENT_CAPTURE_ATTEMPTS)
         for attempt in range(attempts):
@@ -4938,6 +5144,8 @@ class AutoPotionController:
 
         region = self._find_bottom_bar_pair_regions().get(bar_type)
         if region is None:
+            reason = "找不到 HP/MP 定位座標，無法直接取色"
+            self._record_direct_bar_failure(reason)
             self._set_bar_detection_debug(
                 bar_type,
                 source="自動定位",
@@ -4945,46 +5153,72 @@ class AutoPotionController:
                 track_region=None,
                 percent=None,
                 success=False,
-                reason="找不到 HP/MP 成對 HUD 條",
+                reason=reason,
                 require_clear_tail=require_clear_tail,
                 tail_clear=None,
             )
             return None
 
-        track_region = getattr(self, "bottom_bar_track_regions", {}).get(bar_type)
-        return self._capture_bar_percent_from_region(
-            region,
+        direct_percent = self._capture_bar_percent_direct(bar_type, require_clear_tail=require_clear_tail)
+        if direct_percent is not None:
+            return direct_percent
+
+        reason = self._direct_bar_failure_reason("直接取色失敗")
+        self._record_direct_bar_failure(reason)
+        self._set_direct_bar_failure_debug(
             bar_type,
-            require_clear_tail,
-            "自動定位",
-            track_region=track_region,
+            reason,
+            require_clear_tail=require_clear_tail,
         )
+        return None
 
     def _capture_bar_percents(self) -> tuple[float | None, float | None]:
         direct = self._capture_bar_percents_direct()
         if direct is not None:
             return direct
-        return self._capture_bar_percent("hp"), self._capture_bar_percent("mp")
+
+        regions = self._find_bottom_bar_pair_regions()
+        if "hp" not in regions or "mp" not in regions:
+            reason = "找不到 HP/MP 定位座標，無法直接取色"
+            self._record_direct_bar_failure(reason)
+            for bar_type in ("hp", "mp"):
+                self._set_direct_bar_failure_debug(bar_type, reason)
+            return None, None
+
+        direct = self._capture_bar_percents_direct()
+        if direct is not None:
+            return direct
+
+        reason = self._direct_bar_failure_reason("直接取色失敗")
+        self._record_direct_bar_failure(reason)
+        for bar_type in ("hp", "mp"):
+            self._set_direct_bar_failure_debug(bar_type, reason)
+        return None, None
 
     def _capture_bar_percents_direct(self) -> tuple[float | None, float | None] | None:
         cached = self._cached_bottom_bar_screen_regions_for_current_client()
         if cached is None:
+            self._note_direct_bar_failure_reason("沒有 cached HUD geometry")
             return None
         regions, track_regions, client_bounds = cached
         if not self._bar_region_pair_geometry_is_valid(regions, track_regions, client_bounds):
+            self._note_direct_bar_failure_reason("HUD geometry 不可信")
             return None
         sample_regions = {
             bar_type: track_regions.get(bar_type) or regions.get(bar_type)
             for bar_type in ("hp", "mp")
         }
         if sample_regions["hp"] is None or sample_regions["mp"] is None:
+            self._note_direct_bar_failure_reason("HP/MP direct 取色範圍缺失")
             return None
 
         union = self._union_direct_bar_regions(sample_regions["hp"], sample_regions["mp"])
         if union is None:
+            self._note_direct_bar_failure_reason("HP/MP direct union 範圍無效")
             return None
         image = self._direct_bar_image_from_region(union)
         if image is None:
+            self._note_direct_bar_failure_reason("direct GDI capture 失敗")
             return None
 
         results: dict[str, float] = {}
@@ -4993,9 +5227,22 @@ class AutoPotionController:
             assert region is not None
             crop = self._crop_direct_bar_image(image, union, region)
             if crop is None:
+                self._note_direct_bar_failure_reason(f"{bar_type.upper()} direct crop 範圍無效")
                 return None
             percent, reason, tail_clear = self._sample_direct_bar_percent_from_image(crop, bar_type)
             if percent is None:
+                self._note_direct_bar_failure_reason(f"{bar_type.upper()}: {reason}")
+                self._set_bar_detection_debug(
+                    bar_type,
+                    source="直接取色",
+                    region=region,
+                    track_region=region,
+                    percent=None,
+                    success=False,
+                    reason=reason,
+                    require_clear_tail=False,
+                    tail_clear=tail_clear,
+                )
                 return None
             results[bar_type] = percent
             self._remember_stable_bar_sample(bar_type, percent, region)
@@ -5015,6 +5262,7 @@ class AutoPotionController:
         self.bottom_bar_track_regions = track_regions
         self.bottom_bar_client_bounds = client_bounds
         self.bottom_bar_regions_at = time.monotonic()
+        self._record_direct_bar_success()
         return results.get("hp"), results.get("mp")
 
     def _union_direct_bar_regions(
@@ -5051,16 +5299,17 @@ class AutoPotionController:
         return image[y : y + target_height, x : x + target_width]
 
     def _capture_bar_percent_direct(self, bar_type: str, *, require_clear_tail: bool = False) -> float | None:
-        if require_clear_tail:
-            return None
         cached = self._cached_bottom_bar_screen_regions_for_current_client()
         if cached is None:
+            self._note_direct_bar_failure_reason("沒有 cached HUD geometry")
             return None
         regions, track_regions, client_bounds = cached
         if not self._bar_region_pair_geometry_is_valid(regions, track_regions, client_bounds):
+            self._note_direct_bar_failure_reason("HUD geometry 不可信")
             return None
         region = track_regions.get(bar_type) or regions.get(bar_type)
         if region is None:
+            self._note_direct_bar_failure_reason(f"{bar_type.upper()} direct 取色範圍缺失")
             return None
 
         percent, reason, tail_clear = self._sample_direct_bar_percent_from_region(
@@ -5069,6 +5318,18 @@ class AutoPotionController:
             require_clear_tail=require_clear_tail,
         )
         if percent is None:
+            self._note_direct_bar_failure_reason(f"{bar_type.upper()}: {reason}")
+            self._set_bar_detection_debug(
+                bar_type,
+                source="直接取色",
+                region=region,
+                track_region=region,
+                percent=None,
+                success=False,
+                reason=reason,
+                require_clear_tail=require_clear_tail,
+                tail_clear=tail_clear,
+            )
             return None
         self.bottom_bar_regions = regions
         self.bottom_bar_track_regions = track_regions
@@ -5086,6 +5347,7 @@ class AutoPotionController:
             require_clear_tail=require_clear_tail,
             tail_clear=tail_clear,
         )
+        self._record_direct_bar_success()
         return percent
 
     def _find_bottom_bar_pair_regions(
@@ -6142,9 +6404,6 @@ class AutoPotionController:
         *,
         require_clear_tail: bool = False,
     ) -> tuple[float | None, str, bool | None]:
-        if require_clear_tail:
-            return None, "直接取色不做尾段遮擋確認", None
-
         image = self._direct_bar_image_from_region(region)
         if image is None:
             return None, "直接取色讀取畫面失敗", None
@@ -6162,6 +6421,23 @@ class AutoPotionController:
             image,
             require_clear_tail=False,
         )
+        if percent is None:
+            clamped = self._direct_bar_track_like_crop(image, mask, bar_type)
+            if clamped is not None:
+                clamped_image, crop_reason = clamped
+                clamped_mask = self._bar_color_mask(clamped_image, bar_type)
+                percent, clamped_reason, tail_clear = self._percent_from_bar_mask_result(
+                    clamped_mask,
+                    clamped_image,
+                    require_clear_tail=False,
+                )
+                if percent is not None:
+                    if clamped_reason == "OK":
+                        return percent, f"OK:DirectClamp:{crop_reason}", tail_clear
+                    if clamped_reason == "OK:FullWidth":
+                        return percent, f"OK:DirectClampFullWidth:{crop_reason}", tail_clear
+                else:
+                    reason = f"{reason}；clamp={clamped_reason}"
         if (
             percent is None
             and reason == "找不到符合顏色的填滿欄位"
@@ -6175,6 +6451,72 @@ class AutoPotionController:
         elif reason == "OK:FullWidth":
             reason = "OK:DirectFullWidth"
         return percent, reason, tail_clear
+
+    def _direct_bar_track_like_crop(
+        self,
+        image: np.ndarray,
+        color_mask: np.ndarray,
+        bar_type: str,
+    ) -> tuple[np.ndarray, str] | None:
+        if image.size == 0 or color_mask.size == 0 or not bool(color_mask.any()):
+            return None
+
+        height, width = color_mask.shape
+        if height <= 2 or width <= 8:
+            return None
+
+        track_like = self._bar_track_like_mask(image, color_mask, bar_type)
+        if track_like.shape != color_mask.shape:
+            return None
+
+        row_like = track_like.mean(axis=1) >= 0.28
+        row_like = self._close_column_gaps(row_like, max(1, round(height * 0.12)))
+        row_edges = np.flatnonzero(np.diff(np.concatenate(([False], row_like, [False]))))
+        if row_edges.size < 2:
+            return None
+
+        min_rows = min(max(3, BAR_MIN_BODY_ROW_COUNT), height)
+        row_runs: list[tuple[int, int, float]] = []
+        for start, end in zip(row_edges[::2], row_edges[1::2]):
+            if end - start < min_rows:
+                continue
+            density = float(track_like[start:end, :].mean())
+            row_runs.append((int(start), int(end), density))
+        if not row_runs:
+            return None
+        row_start, row_end, _density = max(row_runs, key=lambda item: (item[1] - item[0], item[2]))
+
+        band_like = track_like[row_start:row_end, :]
+        band_color = color_mask[row_start:row_end, :]
+        column_like = band_like.mean(axis=0) >= 0.30
+        column_like = self._close_column_gaps(column_like, max(2, round(width * 0.015)))
+        column_edges = np.flatnonzero(np.diff(np.concatenate(([False], column_like, [False]))))
+        if column_edges.size < 2:
+            return None
+
+        min_width = min(width, max(24, round(width * 0.45)))
+        candidates: list[tuple[int, int, float]] = []
+        for start, end in zip(column_edges[::2], column_edges[1::2]):
+            run_width = int(end - start)
+            if run_width < min_width:
+                continue
+            color_coverage = float(band_color[:, start:end].mean())
+            if color_coverage <= 0.0:
+                continue
+            trim_score = (start / max(1, width)) + ((width - end) / max(1, width))
+            score = run_width + color_coverage * 100.0 + trim_score * 20.0
+            candidates.append((int(start), int(end), score))
+        if not candidates:
+            return None
+
+        col_start, col_end, _score = max(candidates, key=lambda item: item[2])
+        if col_start == 0 and col_end == width and row_start == 0 and row_end == height:
+            return None
+
+        cropped = image[row_start:row_end, col_start:col_end]
+        if cropped.size == 0:
+            return None
+        return cropped, f"x={col_start}-{col_end},y={row_start}-{row_end}"
 
     def _direct_bar_image_from_region(self, region: tuple[int, int, int, int]) -> np.ndarray | None:
         left, top, width, height = region
@@ -6352,17 +6694,17 @@ class AutoPotionController:
         debug = self.last_bar_debug.get(bar_type, BarDetectionDebug(bar_type))
         label = "HP" if bar_type == "hp" else "MP"
         percent = "--" if debug.percent is None else f"{debug.percent:.0f}%"
-        full_region = self._format_bar_debug_region(debug.region)
-        track_region = self._format_bar_debug_region(debug.track_region)
+        source = self._compact_bar_debug_source(debug.source)
         tail = ""
         if debug.require_clear_tail:
             tail = " | tail=OK" if debug.tail_clear else " | tail=FAIL"
-        return f"{label}: {debug.source} | {percent} | full={full_region} | track={track_region} | {debug.reason}{tail}"
+        return f"{label}: {source} | {percent} | {debug.reason}{tail}"
 
-    def _format_bar_debug_region(self, region: tuple[int, int, int, int] | None) -> str:
-        if region is None:
-            return "--"
-        return ",".join(str(value) for value in region)
+    def _compact_bar_debug_source(self, source: str) -> str:
+        return {
+            "直接取色": "直取",
+            "自動定位": "定位",
+        }.get(source, source)
 
     def current_bar_detection_regions(self) -> dict[str, tuple[int, int, int, int] | None]:
         return {
@@ -6471,15 +6813,16 @@ class AutoPotionController:
         return False
 
     def _target_window_handle(self) -> int:
-        if self.target_window_provider is not None:
+        target_window_provider = getattr(self, "target_window_provider", None)
+        if target_window_provider is not None:
             try:
-                hwnd = int(self.target_window_provider() or 0)
+                hwnd = int(target_window_provider() or 0)
                 if hwnd:
                     self.last_target_hwnd = hwnd
                     return hwnd
             except Exception:
                 pass
-        return self.last_target_hwnd
+        return getattr(self, "last_target_hwnd", 0)
 
     def _bar_run_has_horizontal_body(self, mask: np.ndarray, start: int, end: int) -> bool:
         if end < start:
@@ -6636,6 +6979,31 @@ class AutoPotionController:
         client_height = rect.bottom - rect.top
         if client_width <= 0 or client_height <= 0:
             raise RuntimeError("前景視窗 client area 尺寸無效")
+
+        origin = Point(0, 0)
+        if not user32.ClientToScreen(hwnd, ctypes.byref(origin)):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        return origin.x, origin.y, client_width, client_height
+
+    def _target_client_bounds(self) -> tuple[int, int, int, int] | None:
+        hwnd = self._target_window_handle()
+        if not hwnd or not is_valid_window(hwnd):
+            return None
+        try:
+            return self._client_bounds_for_window(hwnd)
+        except Exception:
+            return None
+
+    def _client_bounds_for_window(self, hwnd: int) -> tuple[int, int, int, int]:
+        rect = wintypes.RECT()
+        if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        client_width = rect.right - rect.left
+        client_height = rect.bottom - rect.top
+        if client_width <= 0 or client_height <= 0:
+            raise RuntimeError("視窗 client area 尺寸無效")
 
         origin = Point(0, 0)
         if not user32.ClientToScreen(hwnd, ctypes.byref(origin)):

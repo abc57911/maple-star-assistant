@@ -49,7 +49,6 @@ JUMP_KEY_HOLD_SECONDS = 0.05
 POLL_INTERVAL_SECONDS = 0.01
 MACRO_TIMING_GUARD_SECONDS = 0.12
 WINDOW_INTERACTION_LOOP_DELAY_MS = 120
-CONTROL_HOTKEY_PUMP_DELAY_MS = 10
 RUNTIME_INFO_REFRESH_INTERVAL_SECONDS = 0.25
 
 TRACKED_HELD_KEYS: set[int] = set()
@@ -599,19 +598,6 @@ def main() -> None:
         if auto_potion.consume_emergency_stop_requested():
             stop_all_bindings(f"{auto_potion.settings.emergency_stop_hotkey}：停止所有手把巨集並釋放按鍵")
 
-    def control_hotkey_pump() -> None:
-        try:
-            if auto_potion.is_closed():
-                return
-            poll_control_hotkeys_safely()
-        except Exception as exc:
-            print(f"控制熱鍵輪詢錯誤：{exc}")
-            if not auto_potion.is_closed():
-                auto_potion.gui.set_status(f"控制熱鍵輪詢錯誤：{exc}")
-        finally:
-            if not auto_potion.is_closed():
-                auto_potion.gui.root.after(CONTROL_HOTKEY_PUMP_DELAY_MS, control_hotkey_pump)
-
     def next_loop_delay_ms() -> int:
         if auto_potion.gui.is_window_interaction_active():
             return WINDOW_INTERACTION_LOOP_DELAY_MS
@@ -669,7 +655,6 @@ def main() -> None:
                 auto_potion.gui.root.after(next_loop_delay_ms(), loop_step)
 
     try:
-        auto_potion.gui.root.after(0, control_hotkey_pump)
         auto_potion.gui.root.after(0, loop_step)
         auto_potion.gui.root.mainloop()
     finally:

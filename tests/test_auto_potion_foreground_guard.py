@@ -21,6 +21,7 @@ from maple_star.controller import (
 from maple_star.constants import (
     ASYNC_KEY_DOWN_MASK,
     AUTO_DRINK_DISABLE_HOLD_SECONDS,
+    AUTO_DRINK_TOGGLE_DEBOUNCE_SECONDS,
     BAR_CONFIRM_CAPTURE_ATTEMPTS,
     BAR_TRANSIENT_CAPTURE_ATTEMPTS,
     DEFAULT_CAPTURE_INTERVAL_SECONDS,
@@ -28,6 +29,7 @@ from maple_star.constants import (
     EXPERIENCE_BURST_CAPTURE_INTERVAL_SECONDS,
     EXPERIENCE_CAPTURE_INTERVAL_SECONDS,
     PICKUP_DISABLE_HOLD_SECONDS,
+    PICKUP_TOGGLE_DEBOUNCE_SECONDS,
     POTION_CONTINUOUS_HOLD_REFRESH_SECONDS,
     POTION_FAST_CAPTURE_INTERVAL_SECONDS,
     POTION_EFFECT_NO_EFFECT_LIMIT,
@@ -143,6 +145,10 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.gui.set_exp_efficiency_enabled.side_effect = (
             lambda enabled: setattr(controller.settings, "exp_efficiency_enabled", enabled)
         )
+        controller.gui.set_potion_enabled.side_effect = lambda hp_enabled, mp_enabled: (
+            setattr(controller.settings, "hp_enabled", hp_enabled),
+            setattr(controller.settings, "mp_enabled", mp_enabled),
+        )
         controller.last_hp_drink_at = -999.0
         controller.last_mp_drink_at = -999.0
         controller.potion_send_prevalidated_at = -999.0
@@ -189,6 +195,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.emergency_stop_requested = False
         controller.auto_drink_enabled = True
         controller.scripts_enabled = True
+        controller.auto_drink_potion_option_snapshot = None
         controller.registered_toggle_hotkey_vk = 0
         controller.registered_emergency_stop_hotkey_vk = 0
         controller.registered_experience_toggle_hotkey_vk = 0
@@ -314,7 +321,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._sync_pickup_key_state = Mock()
         controller._save_settings_when_idle = Mock()
         controller._transition_pause_reason = Mock(return_value=None)
-        controller._capture_bar_percent = Mock(side_effect=[hp_percent, mp_percent])
+        controller._capture_bar_percents = Mock(return_value=(hp_percent, mp_percent))
         controller._maybe_drink_hp = Mock()
         controller._maybe_drink_mp = Mock()
         controller._update_potion_effect_watch_cycles = Mock()
@@ -348,6 +355,28 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(percent, 42.0)
         sample.assert_called_once_with((175, 263, 100, 6), "hp", require_clear_tail=False)
         find_regions.assert_not_called()
+
+    def test_capture_bar_percent_relocates_then_reads_direct_only(self):
+        controller = self.make_controller([])
+        fallback_region = (120, 220, 110, 12)
+
+        with (
+            patch.object(
+                controller,
+                "_capture_bar_percent_direct",
+                side_effect=[None, 42.0],
+            ) as direct,
+            patch.object(controller, "_find_bottom_bar_pair_regions", return_value={"hp": fallback_region}),
+            patch.object(controller, "_capture_bar_percent_from_region", return_value=55.0) as screenshot_percent,
+        ):
+            percent = AutoPotionController._capture_bar_percent(controller, "hp")
+
+        self.assertEqual(percent, 42.0)
+        direct.assert_has_calls([
+            call("hp", require_clear_tail=False),
+            call("hp", require_clear_tail=False),
+        ])
+        screenshot_percent.assert_not_called()
 
     def test_cached_bar_reuse_requires_both_hp_and_mp_to_sample(self):
         controller = self.make_controller([])
@@ -420,6 +449,32 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(reason, "OK:EmptyTrack")
         self.assertIsNone(tail_clear)
 
+    def test_direct_gdi_clamps_track_padding_before_sampling(self):
+        controller = self.make_controller([])
+        image = np.full((14, 130, 4), (245, 245, 245, 255), dtype=np.uint8)
+        image[3:11, 22:118] = (46, 46, 46, 255)
+        image[3:11, 22:64] = (35, 35, 225, 255)
+
+        percent, reason, tail_clear = controller._sample_direct_bar_percent_from_image(image, "hp")
+
+        self.assertIsNotNone(percent)
+        self.assertAlmostEqual(percent, 43.75, delta=3.0)
+        self.assertTrue(reason.startswith("OK:DirectClamp"))
+        self.assertIsNone(tail_clear)
+
+    def test_direct_gdi_clamps_mp_track_padding_before_sampling(self):
+        controller = self.make_controller([])
+        image = np.full((14, 130, 4), (245, 245, 245, 255), dtype=np.uint8)
+        image[3:11, 20:120] = (46, 46, 46, 255)
+        image[3:11, 20:55] = (230, 160, 25, 255)
+
+        percent, reason, tail_clear = controller._sample_direct_bar_percent_from_image(image, "mp")
+
+        self.assertIsNotNone(percent)
+        self.assertAlmostEqual(percent, 35.0, delta=3.0)
+        self.assertTrue(reason.startswith("OK:DirectClamp"))
+        self.assertIsNone(tail_clear)
+
     def test_direct_gdi_tooltip_obstruction_is_uncertain_not_zero_percent(self):
         controller = self.make_controller([])
         image = np.full((14, 140, 4), (92, 72, 48, 255), dtype=np.uint8)
@@ -433,24 +488,48 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertNotEqual(reason, "OK:EmptyTrack")
         self.assertIsNone(tail_clear)
 
-    def test_capture_bar_percent_falls_back_to_screenshot_when_direct_sampler_fails(self):
+    def test_capture_bar_percent_returns_none_without_screenshot_percent_fallback(self):
         controller = self.make_controller([])
         fallback_region = (10, 20, 100, 12)
         with (
-            patch.object(controller, "_capture_bar_percent_direct", return_value=None),
+            patch.object(controller, "_capture_bar_percent_direct", side_effect=[None, None]),
             patch.object(controller, "_find_bottom_bar_pair_regions", return_value={"hp": fallback_region}),
-            patch.object(controller, "_capture_bar_percent_from_region", return_value=25.0) as fallback,
+            patch.object(controller, "_capture_bar_percent_from_region", return_value=25.0) as screenshot_percent,
         ):
             percent = AutoPotionController._capture_bar_percent(controller, "hp")
 
+        self.assertIsNone(percent)
+        screenshot_percent.assert_not_called()
+        self.assertEqual(controller.direct_bar_failure_count, 1)
+
+    def test_capture_bar_percent_require_clear_tail_is_still_direct_only(self):
+        controller = self.make_controller([])
+        fallback_region = (10, 20, 100, 12)
+        with (
+            patch.object(controller, "_capture_bar_percent_direct", side_effect=[None, None]) as direct,
+            patch.object(controller, "_find_bottom_bar_pair_regions", return_value={"hp": fallback_region}),
+            patch.object(controller, "_capture_bar_percent_from_region", return_value=25.0) as screenshot_percent,
+        ):
+            percent = AutoPotionController._capture_bar_percent(controller, "hp", require_clear_tail=True)
+
+        self.assertIsNone(percent)
+        direct.assert_has_calls([
+            call("hp", require_clear_tail=True),
+            call("hp", require_clear_tail=True),
+        ])
+        screenshot_percent.assert_not_called()
+
+    def test_screenshot_bar_capture_still_reads_preview_percent(self):
+        controller = self.make_controller([])
+        region = (10, 20, 100, 12)
+
+        with (
+            patch.object(controller, "_foreground_client_bounds", return_value=(100, 200, 800, 600)),
+            patch.object(controller, "_bar_percent_from_region_snapshot", return_value=(25.0, "OK", None)),
+        ):
+            percent = controller._capture_bar_percent_from_region(region, "hp")
+
         self.assertEqual(percent, 25.0)
-        fallback.assert_called_once_with(
-            fallback_region,
-            "hp",
-            False,
-            "自動定位",
-            track_region=None,
-        )
 
     def test_combined_direct_bar_sampling_reads_hp_mp_from_one_capture(self):
         controller = self.make_controller([])
@@ -460,6 +539,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         }
         controller.bottom_bar_track_regions = dict(controller.bottom_bar_regions)
         controller._cache_bottom_bar_client_regions((100, 200, 800, 600))
+        controller.direct_bar_failure_count = 2
         union_image = np.zeros((8, 230, 4), dtype=np.uint8)
 
         with (
@@ -476,6 +556,94 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual((hp_percent, mp_percent), (55.0, 77.0))
         capture.assert_called_once_with((110, 205, 230, 8))
         self.assertEqual(sample.call_count, 2)
+        self.assertEqual(controller.direct_bar_failure_count, 0)
+
+    def test_runtime_bar_regions_sync_into_direct_cache(self):
+        controller = self.make_controller([])
+        controller._target_client_bounds = Mock(return_value=(100, 200, 800, 600))
+
+        controller._apply_runtime_bar_detection_region(
+            "hp",
+            (110, 205, 100, 8),
+            55.0,
+            (112, 206, 96, 6),
+        )
+        controller._apply_runtime_bar_detection_region(
+            "mp",
+            (240, 205, 100, 8),
+            77.0,
+            (242, 206, 96, 6),
+        )
+
+        cached = controller._cached_bottom_bar_screen_regions_for_current_client()
+
+        self.assertIsNotNone(cached)
+        regions, track_regions, client_bounds = cached
+        self.assertEqual(client_bounds, (100, 200, 800, 600))
+        self.assertEqual(regions["hp"], (110, 205, 100, 8))
+        self.assertEqual(regions["mp"], (240, 205, 100, 8))
+        self.assertEqual(track_regions["hp"], (112, 206, 96, 6))
+        self.assertEqual(track_regions["mp"], (242, 206, 96, 6))
+
+    def test_capture_bar_percents_locates_then_reads_direct_only(self):
+        controller = self.make_controller([])
+
+        with (
+            patch.object(
+                controller,
+                "_capture_bar_percents_direct",
+                side_effect=[None, (55.0, 77.0)],
+            ) as direct,
+            patch.object(
+                controller,
+                "_find_bottom_bar_pair_regions",
+                return_value={"hp": (10, 20, 100, 8), "mp": (10, 36, 100, 8)},
+            ) as locate,
+            patch.object(controller, "_capture_bar_percent_from_region") as screenshot_percent,
+        ):
+            hp_percent, mp_percent = controller._capture_bar_percents()
+
+        self.assertEqual((hp_percent, mp_percent), (55.0, 77.0))
+        self.assertEqual(direct.call_count, 2)
+        locate.assert_called_once()
+        screenshot_percent.assert_not_called()
+
+    def test_capture_bar_percents_returns_none_when_locator_succeeds_but_direct_fails(self):
+        controller = self.make_controller([])
+
+        with (
+            patch.object(controller, "_capture_bar_percents_direct", side_effect=[None, None]),
+            patch.object(
+                controller,
+                "_find_bottom_bar_pair_regions",
+                return_value={"hp": (10, 20, 100, 8), "mp": (10, 36, 100, 8)},
+            ),
+            patch.object(controller, "_capture_bar_percent_from_region") as screenshot_percent,
+        ):
+            hp_percent, mp_percent = controller._capture_bar_percents()
+
+        self.assertEqual((hp_percent, mp_percent), (None, None))
+        screenshot_percent.assert_not_called()
+        self.assertEqual(controller.direct_bar_failure_count, 1)
+
+    def test_direct_bar_failure_warning_after_three_failures_and_success_resets(self):
+        controller = self.make_controller([])
+        controller._record_direct_bar_failure("direct fail 1")
+        controller._record_direct_bar_failure("direct fail 2")
+        controller._record_direct_bar_failure("direct fail 3")
+
+        with patch("builtins.print") as print_mock:
+            emitted = controller._emit_direct_bar_failure_warning_if_needed(100.0)
+
+        self.assertTrue(emitted)
+        controller.gui.set_status.assert_called_with("HP/MP 直接取色連續失敗，已暫停自動喝水")
+        controller.gui.show_toggle_notice.assert_called_once_with("HP/MP 直接取色失敗")
+        print_mock.assert_called_once()
+
+        controller._record_direct_bar_success()
+
+        self.assertEqual(controller.direct_bar_failure_count, 0)
+        self.assertEqual(controller.last_direct_bar_failure_reason, "")
 
     def test_direct_bar_image_reuses_capture_context(self):
         controller = self.make_controller([])
@@ -1827,6 +1995,84 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         self.assertEqual(_potion_status_signature(base), _potion_status_signature(same_core))
 
+    def test_runtime_potion_status_signature_ignores_debug_percent_and_region_churn(self):
+        base = PotionStatus(
+            hp_percent=25.0,
+            mp_percent=80.0,
+            hp_debug="HP: 自動定位 | 25.00% | full=10,20,30,12 | track=11,21,28,10 | OK:F",
+            mp_debug="MP: 自動定位 | 80.00% | full=40,50,30,12 | track=41,51,28,10 | OK:F",
+            status="自動喝水監控中",
+            action="",
+            notice="",
+            trigger_interval_ms=None,
+            console_lines=(),
+            gameplay_hud_active=True,
+            scripts_enabled=True,
+            auto_drink_enabled=True,
+            hp_region=(10, 20, 30, 12),
+            mp_region=(40, 50, 30, 12),
+            hp_track_region=(11, 21, 28, 10),
+            mp_track_region=(41, 51, 28, 10),
+        )
+        same_core = PotionStatus(
+            hp_percent=25.0,
+            mp_percent=80.0,
+            hp_debug="HP: 自動定位 | 25.01% | full=10,20,30,12 | track=11,21,28,10 | OK:F",
+            mp_debug="MP: 自動定位 | 79.99% | full=40,50,30,12 | track=41,51,28,10 | OK:F",
+            status="自動喝水監控中",
+            action="",
+            notice="",
+            trigger_interval_ms=None,
+            console_lines=(),
+            gameplay_hud_active=True,
+            scripts_enabled=True,
+            auto_drink_enabled=True,
+            hp_region=(10, 20, 30, 12),
+            mp_region=(40, 50, 30, 12),
+            hp_track_region=(11, 21, 28, 10),
+            mp_track_region=(41, 51, 28, 10),
+        )
+        percent_changed = PotionStatus(
+            hp_percent=26.0,
+            mp_percent=80.0,
+            hp_debug="HP: 自動定位 | 26.00% | full=10,20,30,12 | track=11,21,28,10 | OK:F",
+            mp_debug="MP: 自動定位 | 80.00% | full=40,50,30,12 | track=41,51,28,10 | OK:F",
+            status="自動喝水監控中",
+            action="",
+            notice="",
+            trigger_interval_ms=None,
+            console_lines=(),
+            gameplay_hud_active=True,
+            scripts_enabled=True,
+            auto_drink_enabled=True,
+            hp_region=(10, 20, 30, 12),
+            mp_region=(40, 50, 30, 12),
+            hp_track_region=(11, 21, 28, 10),
+            mp_track_region=(41, 51, 28, 10),
+        )
+        reason_changed = PotionStatus(
+            hp_percent=25.0,
+            mp_percent=80.0,
+            hp_debug="HP: 自動定位 | 25.00% | full=10,20,30,12 | track=11,21,28,10 | ERR:色條驗證失敗",
+            mp_debug="MP: 自動定位 | 80.00% | full=40,50,30,12 | track=41,51,28,10 | OK:F",
+            status="自動喝水監控中",
+            action="",
+            notice="",
+            trigger_interval_ms=None,
+            console_lines=(),
+            gameplay_hud_active=True,
+            scripts_enabled=True,
+            auto_drink_enabled=True,
+            hp_region=(10, 20, 30, 12),
+            mp_region=(40, 50, 30, 12),
+            hp_track_region=(11, 21, 28, 10),
+            mp_track_region=(41, 51, 28, 10),
+        )
+
+        self.assertEqual(_potion_status_signature(base), _potion_status_signature(same_core))
+        self.assertNotEqual(_potion_status_signature(base), _potion_status_signature(percent_changed))
+        self.assertNotEqual(_potion_status_signature(base), _potion_status_signature(reason_changed))
+
     def test_runtime_experience_status_signature_tracks_snapshot_changes(self):
         first = ExperienceStatus(snapshot=ExperienceSnapshot(status="統計中", current_exp=100), status="統計中")
         second = ExperienceStatus(snapshot=ExperienceSnapshot(status="統計中", current_exp=200), status="統計中")
@@ -2135,7 +2381,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(controller.last_mp_drink_at, 10.0)
         self.assertEqual(controller._set_bar_detection_debug.call_count, 2)
 
-    def test_gameplay_hud_gate_reuses_stale_regions_when_old_bar_is_still_visible(self):
+    def test_gameplay_hud_gate_requires_fresh_hud_locator_before_sampling(self):
         controller = self.make_controller([])
         del controller._refresh_gameplay_hud_state
         old_regions = {
@@ -2150,10 +2396,11 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.bottom_bar_track_regions = dict(old_track_regions)
         controller.bottom_bar_client_bounds = (0, 0, 1000, 1000)
         controller.bottom_bar_regions_at = 0.0
-        controller._find_bottom_bar_pair_regions = Mock(return_value={})
+        controller._find_bottom_bar_pair_regions = Mock(return_value=old_regions)
         controller._foreground_client_bounds = Mock(return_value=(0, 0, 1000, 1000))
         controller._bar_percent_from_region_snapshot = Mock(return_value=(72.0, "OK", None))
         controller._set_bar_detection_debug = Mock()
+        controller._can_keep_current_bottom_bar_geometry = Mock(return_value=False)
 
         self.assertTrue(controller._refresh_gameplay_hud_state(10.0))
 
@@ -2162,21 +2409,72 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(controller.bottom_bar_track_regions, old_track_regions)
         self.assertEqual(controller.last_hp_drink_at, -999.0)
         self.assertEqual(controller.last_mp_drink_at, -999.0)
-        controller._find_bottom_bar_pair_regions.assert_not_called()
-        self.assertEqual(controller._bar_percent_from_region_snapshot.call_count, 2)
-        controller._bar_percent_from_region_snapshot.assert_any_call(
-            old_regions["mp"],
-            "mp",
-            require_clear_tail=False,
-            track_region=old_track_regions["mp"],
+        controller._find_bottom_bar_pair_regions.assert_called_once_with(
+            use_cache=False,
+            allow_stale_on_failure=False,
         )
-        controller._bar_percent_from_region_snapshot.assert_any_call(
-            old_regions["hp"],
-            "hp",
-            require_clear_tail=False,
-            track_region=old_track_regions["hp"],
-        )
+        controller._bar_percent_from_region_snapshot.assert_not_called()
         controller._set_bar_detection_debug.assert_not_called()
+
+    def test_gameplay_hud_gate_keeps_recent_geometry_when_locator_briefly_fails(self):
+        controller = self.make_controller([])
+        del controller._refresh_gameplay_hud_state
+        old_regions = {
+            "hp": (120, 220, 110, 12),
+            "mp": (260, 220, 110, 12),
+        }
+        old_track_regions = {
+            "hp": (125, 223, 100, 6),
+            "mp": (265, 223, 100, 6),
+        }
+        controller.bottom_bar_regions = dict(old_regions)
+        controller.bottom_bar_track_regions = dict(old_track_regions)
+        controller.bottom_bar_client_bounds = (100, 200, 800, 600)
+        controller.bottom_bar_regions_at = 9.5
+        controller._reuse_cached_bottom_bar_regions_with_direct_sample = Mock(return_value=False)
+        controller._can_reuse_stale_bottom_bar_regions = Mock(return_value=False)
+        controller._find_bottom_bar_pair_regions = Mock(return_value={})
+        controller._target_client_bounds = Mock(return_value=(100, 200, 800, 600))
+
+        self.assertFalse(controller._refresh_gameplay_hud_state(10.0))
+
+        self.assertFalse(controller.gameplay_hud_active)
+        self.assertEqual(controller.bottom_bar_regions, old_regions)
+        self.assertEqual(controller.bottom_bar_track_regions, old_track_regions)
+        controller._reuse_cached_bottom_bar_regions_with_direct_sample.assert_not_called()
+        controller._can_reuse_stale_bottom_bar_regions.assert_not_called()
+
+    def test_gameplay_hud_gate_keeps_geometry_when_bar_is_temporarily_obstructed(self):
+        controller = self.make_controller([])
+        del controller._refresh_gameplay_hud_state
+        old_regions = {
+            "hp": (120, 220, 110, 12),
+            "mp": (260, 220, 110, 12),
+        }
+        old_track_regions = {
+            "hp": (125, 223, 100, 6),
+            "mp": (265, 223, 100, 6),
+        }
+        controller.bottom_bar_regions = dict(old_regions)
+        controller.bottom_bar_track_regions = dict(old_track_regions)
+        controller.bottom_bar_client_bounds = (100, 200, 800, 600)
+        controller.bottom_bar_regions_at = 1.0
+        controller._reuse_cached_bottom_bar_regions_with_direct_sample = Mock(return_value=False)
+        controller._find_bottom_bar_pair_regions = Mock(return_value={})
+        controller._can_reuse_stale_bottom_bar_regions = Mock(return_value=False)
+        controller._target_client_bounds = Mock(return_value=(100, 200, 800, 600))
+
+        self.assertFalse(controller._refresh_gameplay_hud_state(10.0))
+
+        self.assertFalse(controller.gameplay_hud_active)
+        self.assertEqual(controller.bottom_bar_regions, {})
+        self.assertEqual(controller.bottom_bar_track_regions, {})
+        controller._find_bottom_bar_pair_regions.assert_called_once_with(
+            use_cache=False,
+            allow_stale_on_failure=False,
+        )
+        controller._reuse_cached_bottom_bar_regions_with_direct_sample.assert_not_called()
+        controller._can_reuse_stale_bottom_bar_regions.assert_not_called()
 
     def test_gameplay_hud_gate_rejects_stale_regions_when_one_bar_fails(self):
         controller = self.make_controller([])
@@ -2618,6 +2916,189 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(controller.next_capture_at, 100.0 + DEFAULT_CAPTURE_INTERVAL_SECONDS)
+        controller._capture_bar_percents.assert_not_called()
+        controller._maybe_drink_hp.assert_not_called()
+        controller._maybe_drink_mp.assert_not_called()
+        controller.gui.set_current_percentages.assert_called_with(None, None)
+
+    def test_update_skips_hp_mp_hud_refresh_when_auto_drink_is_disabled_and_exp_is_disabled(self):
+        controller = self.make_controller([True])
+        controller.next_capture_at = 0.0
+        controller.auto_drink_enabled = False
+        controller.settings.exp_efficiency_enabled = False
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._sync_pickup_key_state = Mock()
+        controller._save_settings_when_idle = Mock()
+        controller._transition_pause_reason = Mock(return_value=None)
+        controller._refresh_gameplay_hud_state = Mock(return_value=True)
+        controller._capture_bar_percents = Mock(return_value=(57.0, 80.0))
+        controller._maybe_drink_hp = Mock()
+        controller._maybe_drink_mp = Mock()
+        controller._stop_experience_ocr_job = Mock()
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot()
+
+        controller.update(100.0)
+
+        controller._transition_pause_reason.assert_not_called()
+        controller._refresh_gameplay_hud_state.assert_not_called()
+        controller._capture_bar_percents.assert_not_called()
+        controller._maybe_drink_hp.assert_not_called()
+        controller._maybe_drink_mp.assert_not_called()
+        controller.gui.set_current_percentages.assert_called_with(None, None)
+        controller.gui.set_status.assert_called_with(f"自動喝水已暫停，按 {controller.settings.toggle_hotkey} 恢復")
+
+    def test_update_skips_hp_mp_hud_refresh_when_auto_drink_is_disabled_and_exp_needs_hud(self):
+        controller = self.make_controller([True])
+        controller.next_capture_at = 0.0
+        controller.auto_drink_enabled = False
+        controller.settings.exp_efficiency_enabled = True
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._sync_pickup_key_state = Mock()
+        controller._save_settings_when_idle = Mock()
+        controller._transition_pause_reason = Mock(return_value=None)
+        controller._experience_runtime_has_cached_hud = Mock(return_value=False)
+        controller._refresh_gameplay_hud_state = Mock(return_value=True)
+        controller._capture_bar_percents = Mock(return_value=(57.0, 80.0))
+        controller._update_experience_efficiency = Mock()
+        controller._pause_experience_for_missing_hud = Mock()
+
+        controller.update(100.0)
+
+        controller._transition_pause_reason.assert_not_called()
+        controller._refresh_gameplay_hud_state.assert_not_called()
+        controller._capture_bar_percents.assert_not_called()
+        controller._update_experience_efficiency.assert_not_called()
+        controller._pause_experience_for_missing_hud.assert_called_once_with(100.0)
+        controller.gui.set_current_percentages.assert_called_with(None, None)
+
+    def test_update_allows_exp_with_cached_hud_when_auto_drink_is_disabled(self):
+        controller = self.make_controller([True])
+        controller.next_capture_at = 0.0
+        controller.auto_drink_enabled = False
+        controller.settings.exp_efficiency_enabled = True
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._sync_pickup_key_state = Mock()
+        controller._save_settings_when_idle = Mock()
+        controller._experience_runtime_has_cached_hud = Mock(return_value=True)
+        controller._refresh_gameplay_hud_state = Mock(return_value=True)
+        controller._capture_bar_percents = Mock(return_value=(57.0, 80.0))
+        controller._update_experience_efficiency = Mock()
+        controller._pause_experience_for_missing_hud = Mock()
+
+        controller.update(100.0)
+
+        controller._refresh_gameplay_hud_state.assert_not_called()
+        controller._capture_bar_percents.assert_not_called()
+        controller._update_experience_efficiency.assert_called_once_with(100.0)
+        controller._pause_experience_for_missing_hud.assert_not_called()
+        controller.gui.set_current_percentages.assert_called_with(None, None)
+
+    def test_update_skips_hp_mp_hud_refresh_when_no_potion_bar_is_enabled(self):
+        controller = self.make_controller([True])
+        controller.next_capture_at = 0.0
+        controller.auto_drink_enabled = True
+        controller.settings.hp_enabled = False
+        controller.settings.mp_enabled = False
+        controller.settings.exp_efficiency_enabled = False
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._sync_pickup_key_state = Mock()
+        controller._save_settings_when_idle = Mock()
+        controller._transition_pause_reason = Mock(return_value=None)
+        controller._refresh_gameplay_hud_state = Mock(return_value=True)
+        controller._capture_bar_percents = Mock(return_value=(57.0, 80.0))
+        controller._maybe_drink_hp = Mock()
+        controller._maybe_drink_mp = Mock()
+        controller._stop_experience_ocr_job = Mock()
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot()
+
+        controller.update(100.0)
+
+        controller._transition_pause_reason.assert_not_called()
+        controller._refresh_gameplay_hud_state.assert_not_called()
+        controller._capture_bar_percents.assert_not_called()
+        controller._maybe_drink_hp.assert_not_called()
+        controller._maybe_drink_mp.assert_not_called()
+        controller.gui.set_current_percentages.assert_called_with(None, None)
+        controller.gui.set_status.assert_called_with("未勾選紅水或藍水，暫停 HP/MP 檢查")
+
+    def test_update_skips_hp_mp_hud_refresh_when_no_potion_bar_is_enabled_and_exp_needs_hud(self):
+        controller = self.make_controller([True])
+        controller.next_capture_at = 0.0
+        controller.auto_drink_enabled = True
+        controller.settings.hp_enabled = False
+        controller.settings.mp_enabled = False
+        controller.settings.exp_efficiency_enabled = True
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._sync_pickup_key_state = Mock()
+        controller._save_settings_when_idle = Mock()
+        controller._experience_runtime_has_cached_hud = Mock(return_value=False)
+        controller._refresh_gameplay_hud_state = Mock(return_value=True)
+        controller._capture_bar_percents = Mock(return_value=(57.0, 80.0))
+        controller._update_experience_efficiency = Mock()
+        controller._pause_experience_for_missing_hud = Mock()
+
+        controller.update(100.0)
+
+        controller._refresh_gameplay_hud_state.assert_not_called()
+        controller._capture_bar_percents.assert_not_called()
+        controller._update_experience_efficiency.assert_not_called()
+        controller._pause_experience_for_missing_hud.assert_called_once_with(100.0)
+        controller.gui.set_current_percentages.assert_called_with(None, None)
+        controller.gui.set_status.assert_called_with("未勾選紅水或藍水，暫停 HP/MP 檢查")
+
+    def test_update_skips_hp_mp_capture_when_fresh_hud_locator_fails_with_cached_geometry(self):
+        controller = self.make_controller([True])
+        del controller._refresh_gameplay_hud_state
+        controller.next_capture_at = 0.0
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._sync_pickup_key_state = Mock()
+        controller._save_settings_when_idle = Mock()
+        controller._transition_pause_reason = Mock(return_value=None)
+        controller._release_all_potion_keys = Mock()
+        controller._pause_experience_for_missing_hud = Mock()
+        controller._capture_bar_percents = Mock(return_value=(30.0, 80.0))
+        controller._maybe_drink_hp = Mock()
+        controller._maybe_drink_mp = Mock()
+        controller._find_bottom_bar_pair_regions = Mock(return_value={})
+        controller._target_client_bounds = Mock(return_value=(100, 200, 800, 600))
+        controller.bottom_bar_regions = {
+            "hp": (120, 220, 110, 12),
+            "mp": (260, 220, 110, 12),
+        }
+        controller.bottom_bar_track_regions = {
+            "hp": (125, 223, 100, 6),
+            "mp": (265, 223, 100, 6),
+        }
+        controller.bottom_bar_client_bounds = (100, 200, 800, 600)
+        controller.bottom_bar_regions_at = 100.0
+
+        controller.update(100.0)
+
+        controller._find_bottom_bar_pair_regions.assert_called_once_with(
+            use_cache=False,
+            allow_stale_on_failure=False,
+        )
+        controller._capture_bar_percents.assert_not_called()
+        controller._maybe_drink_hp.assert_not_called()
+        controller._maybe_drink_mp.assert_not_called()
+        controller._release_all_potion_keys.assert_called_once()
+        controller._pause_experience_for_missing_hud.assert_called_once_with(100.0)
+        controller.gui.set_current_percentages.assert_called_with(None, None)
+        controller.gui.set_status.assert_called_with("未偵測到遊戲 HUD，暫停取樣")
 
     def test_update_ignores_disabled_or_held_potion_for_fast_capture_interval(self):
         disabled = self.run_capture_interval_update(
@@ -2818,7 +3299,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.settings.exp_efficiency_enabled = True
         controller._sync_registered_control_hotkeys = Mock()
         controller._transition_pause_reason = Mock(return_value=None)
-        controller._capture_bar_percent = Mock(side_effect=[80.0, 80.0])
+        controller._capture_bar_percents = Mock(return_value=(80.0, 80.0))
         order = []
         controller._maybe_drink_hp = Mock(side_effect=lambda now, percent: order.append("hp"))
         controller._maybe_drink_mp = Mock(side_effect=lambda now, percent: order.append("mp"))
@@ -2840,7 +3321,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.settings.exp_efficiency_enabled = True
         controller._sync_registered_control_hotkeys = Mock()
         controller._transition_pause_reason = Mock(return_value=None)
-        controller._capture_bar_percent = Mock(side_effect=[25.0, 80.0])
+        controller._capture_bar_percents = Mock(return_value=(25.0, 80.0))
         controller._maybe_drink_hp = Mock()
         controller._maybe_drink_mp = Mock()
         controller._update_potion_effect_watch_cycles = Mock()
@@ -2862,7 +3343,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.gameplay_hud_active = True
         controller._sync_registered_control_hotkeys = Mock()
         controller._transition_pause_reason = Mock(return_value=None)
-        controller._capture_bar_percent = Mock(side_effect=[25.0, 80.0])
+        controller._capture_bar_percents = Mock(return_value=(25.0, 80.0))
         controller._update_potion_effect_watch_cycles = Mock()
 
         with (
@@ -3599,6 +4080,40 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(play_media.call_args_list[0].args, (AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop"))
         self.assertEqual(play_media.call_args_list[1].args, (AUTO_DRINK_START_SOUND_PATH, "auto_drink_start"))
 
+    def test_toggle_auto_drink_syncs_gui_potion_options_and_restores_previous_selection(self):
+        controller = self.make_controller([])
+        controller.settings.hp_enabled = True
+        controller.settings.mp_enabled = False
+
+        with (
+            patch.object(controller, "_play_media_file"),
+            patch("builtins.print"),
+        ):
+            controller.toggle_auto_drink_enabled()
+            controller.toggle_auto_drink_enabled()
+
+        self.assertTrue(controller.auto_drink_enabled)
+        self.assertTrue(controller.settings.hp_enabled)
+        self.assertFalse(controller.settings.mp_enabled)
+        self.assertEqual(
+            controller.gui.set_potion_enabled.call_args_list,
+            [call(False, False), call(True, False)],
+        )
+
+    def test_runtime_toggle_auto_drink_syncs_gui_potion_options(self):
+        controller = self.make_controller([])
+        controller.runtime_processes_enabled = True
+        controller.runtime_processes = self.FakeRuntime()
+
+        with (
+            patch.object(controller, "_play_media_file"),
+            patch("builtins.print"),
+        ):
+            controller.toggle_auto_drink_enabled()
+
+        self.assertFalse(controller.auto_drink_enabled)
+        controller.gui.set_potion_enabled.assert_called_once_with(False, False)
+
     def test_auto_drink_hotkey_short_press_does_not_disable_when_enabled(self):
         controller = self.make_controller([])
         controller.settings.toggle_hotkey = "F11"
@@ -3662,6 +4177,25 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             controller._try_toggle_scripts_enabled(100.0)
 
         self.assertTrue(controller.auto_drink_enabled)
+        play_media.assert_called_once_with(AUTO_DRINK_START_SOUND_PATH, "auto_drink_start")
+
+    def test_auto_drink_toggle_debounce_accepts_next_toggle_after_shortened_interval(self):
+        controller = self.make_controller([])
+        controller.auto_drink_enabled = False
+        controller.toggle_hotkey_was_down = True
+
+        with (
+            patch.object(controller, "_play_media_file") as play_media,
+            patch("builtins.print"),
+        ):
+            controller._try_toggle_scripts_enabled(100.0)
+            controller._try_toggle_scripts_enabled(100.0 + AUTO_DRINK_TOGGLE_DEBOUNCE_SECONDS - 0.01)
+            self.assertEqual(controller.auto_drink_disable_hold_started_at, -999.0)
+
+            controller._try_toggle_scripts_enabled(100.0 + AUTO_DRINK_TOGGLE_DEBOUNCE_SECONDS + 0.001)
+
+        self.assertTrue(controller.auto_drink_enabled)
+        self.assertEqual(controller.auto_drink_disable_hold_started_at, 100.0 + AUTO_DRINK_TOGGLE_DEBOUNCE_SECONDS + 0.001)
         play_media.assert_called_once_with(AUTO_DRINK_START_SOUND_PATH, "auto_drink_start")
 
     def test_enable_disable_hotkeys_are_silently_ignored_outside_game_and_app_foreground(self):
@@ -4180,6 +4714,28 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(controller.pickup_held_vk, 0)
         key_up.assert_called_once_with(0x5A)
         play_media.assert_called_once_with(AUTO_PICKUP_STOP_SOUND_PATH, "pickup_stop")
+
+    def test_pickup_toggle_debounce_accepts_next_toggle_after_shortened_interval(self):
+        controller = self.make_controller([])
+        controller.settings.pickup_toggle_hotkey = "F7"
+        controller.settings.pickup_key = "Z"
+        controller.pickup_toggle_hotkey_was_down = True
+
+        with (
+            patch("maple_star.controller.key_down") as key_down,
+            patch.object(controller, "_play_media_file") as play_media,
+            patch("builtins.print"),
+        ):
+            controller._try_toggle_pickup(200.0)
+            controller._try_toggle_pickup(200.0 + PICKUP_TOGGLE_DEBOUNCE_SECONDS - 0.01)
+            self.assertEqual(controller.pickup_disable_hold_started_at, -999.0)
+
+            controller._try_toggle_pickup(200.0 + PICKUP_TOGGLE_DEBOUNCE_SECONDS + 0.001)
+
+        self.assertTrue(controller.pickup_enabled)
+        self.assertEqual(controller.pickup_disable_hold_started_at, 200.0 + PICKUP_TOGGLE_DEBOUNCE_SECONDS + 0.001)
+        key_down.assert_called_once_with(0x5A)
+        play_media.assert_called_once_with(AUTO_PICKUP_START_SOUND_PATH, "pickup_start")
 
     def test_pickup_toggle_without_key_stays_disabled(self):
         controller = self.make_controller([])

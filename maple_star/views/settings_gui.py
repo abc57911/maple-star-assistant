@@ -132,6 +132,8 @@ EXP_MONO_FONT = (MONO_FONT_FAMILY, 14)
 CONSOLE_FONT = (CONSOLE_FONT_FAMILY, 15)
 WINDOW_INTERACTION_GRACE_SECONDS = 0.12
 RESIZE_SETTLE_DELAY_MS = 140
+CONSOLE_FLUSH_DELAY_MS = 50
+RESTORE_REPAINT_GRACE_SECONDS = 0.22
 TOGGLE_NOTICE_VERTICAL_RATIO = 0.45
 TOGGLE_NOTICE_EDGE_PADDING = 16
 
@@ -211,6 +213,8 @@ class AutoPotionSettingsGui:
         self.console_collapsed = False
         self.console_resize_after_id: str | None = None
         self.console_height_after_id: str | None = None
+        self.console_flush_after_id: str | None = None
+        self.console_pending_text: list[str] = []
         self.console_resize_frozen = False
         self.resize_layout_suspended = False
         self.suppress_resize_suspend_until = 0.0
@@ -219,6 +223,9 @@ class AutoPotionSettingsGui:
         self.compact_experience_mode = False
         self.window_topmost = False
         self.last_root_size: tuple[int, int] | None = None
+        self.root_was_minimized = False
+        self.restore_repaint_until = 0.0
+        self.restore_repaint_after_id: str | None = None
         self.tooltip_window: ctk.CTkToplevel | None = None
         self.tooltip_windows: list[ctk.CTkToplevel] = []
         self.tooltip_anchor_widget: ctk.CTkBaseClass | None = None
@@ -592,19 +599,29 @@ class AutoPotionSettingsGui:
             return
         if self._root_is_minimized():
             self.window_interaction_pause_until = 0.0
+            self.root_was_minimized = True
             return
         current_size = (int(event.width), int(event.height))
         size_changed = self.last_root_size is not None and current_size != self.last_root_size
         self.last_root_size = current_size
-        self.window_interaction_pause_until = time.monotonic() + WINDOW_INTERACTION_GRACE_SECONDS
-        if size_changed and time.monotonic() >= self.suppress_resize_suspend_until:
+        now = time.monotonic()
+        restored_from_minimized = bool(getattr(self, "root_was_minimized", False))
+        self.root_was_minimized = False
+        if restored_from_minimized:
+            self._begin_restore_repaint(now)
+            return
+        if now < getattr(self, "restore_repaint_until", 0.0):
+            return
+        self.window_interaction_pause_until = now + WINDOW_INTERACTION_GRACE_SECONDS
+        if size_changed and now >= self.suppress_resize_suspend_until:
             self._suspend_layout_for_resize()
         self._schedule_window_interaction_finish()
 
     def is_window_interaction_active(self) -> bool:
         if self._root_is_minimized():
             return False
-        return time.monotonic() < self.window_interaction_pause_until
+        now = time.monotonic()
+        return now < self.window_interaction_pause_until or now < getattr(self, "restore_repaint_until", 0.0)
 
     def _root_is_minimized(self) -> bool:
         try:
@@ -984,6 +1001,37 @@ class AutoPotionSettingsGui:
         except tk.TclError:
             return
         self.resize_layout_suspended = False
+
+    def _begin_restore_repaint(self, now: float) -> None:
+        self.restore_repaint_until = max(
+            getattr(self, "restore_repaint_until", 0.0),
+            now + RESTORE_REPAINT_GRACE_SECONDS,
+        )
+        self.window_interaction_pause_until = self.restore_repaint_until
+        self.suppress_resize_suspend_until = max(
+            getattr(self, "suppress_resize_suspend_until", 0.0),
+            self.restore_repaint_until,
+        )
+        self._restore_layout_after_resize()
+        if self.restore_repaint_after_id is not None:
+            try:
+                self.root.after_cancel(self.restore_repaint_after_id)
+            except tk.TclError:
+                pass
+        try:
+            self.restore_repaint_after_id = self.root.after_idle(self._finish_restore_repaint)
+        except tk.TclError:
+            self.restore_repaint_after_id = None
+            self._finish_restore_repaint()
+
+    def _finish_restore_repaint(self) -> None:
+        self.restore_repaint_after_id = None
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            return
+        self._unfreeze_console_resize()
+        self._schedule_console_height_sync()
 
     def _schedule_window_interaction_finish(self) -> None:
         if self.console_resize_after_id is not None:
@@ -1723,6 +1771,18 @@ class AutoPotionSettingsGui:
             except tk.TclError:
                 pass
             self.console_height_after_id = None
+        if self.restore_repaint_after_id is not None:
+            try:
+                self.root.after_cancel(self.restore_repaint_after_id)
+            except tk.TclError:
+                pass
+            self.restore_repaint_after_id = None
+        if self.console_flush_after_id is not None:
+            try:
+                self.root.after_cancel(self.console_flush_after_id)
+            except tk.TclError:
+                pass
+            self.console_flush_after_id = None
         self.closed = True
         self.root.destroy()
 
@@ -2260,6 +2320,12 @@ class AutoPotionSettingsGui:
         self.exp_efficiency_enabled.set(enabled)
         self.settings.exp_efficiency_enabled = enabled
 
+    def set_potion_enabled(self, hp_enabled: bool, mp_enabled: bool) -> None:
+        self.hp_enabled.set(hp_enabled)
+        self.mp_enabled.set(mp_enabled)
+        self.settings.hp_enabled = hp_enabled
+        self.settings.mp_enabled = mp_enabled
+
     def _read_cooldown(self, var: tk.StringVar, fallback: float) -> float:
         return self._read_seconds(var, fallback, POTION_MIN_COOLDOWN_SECONDS, 60.0)
 
@@ -2501,6 +2567,21 @@ class AutoPotionSettingsGui:
     def append_console(self, text: str) -> None:
         if self.closed or not text:
             return
+        self.console_pending_text.append(text)
+        if self.console_flush_after_id is not None:
+            return
+        try:
+            self.console_flush_after_id = self.root.after(CONSOLE_FLUSH_DELAY_MS, self._flush_console_buffer)
+        except tk.TclError:
+            self.console_flush_after_id = None
+            self._flush_console_buffer()
+
+    def _flush_console_buffer(self) -> None:
+        self.console_flush_after_id = None
+        if self.closed or not self.console_pending_text:
+            return
+        text = "".join(self.console_pending_text)
+        self.console_pending_text.clear()
         try:
             self.console.configure(state="normal")
             self.console.insert("end", text)
@@ -2518,6 +2599,13 @@ class AutoPotionSettingsGui:
     def clear_console(self) -> None:
         if self.closed:
             return
+        self.console_pending_text.clear()
+        if self.console_flush_after_id is not None:
+            try:
+                self.root.after_cancel(self.console_flush_after_id)
+            except tk.TclError:
+                pass
+            self.console_flush_after_id = None
         try:
             self.console.configure(state="normal")
             self.console.delete("1.0", "end")
