@@ -125,7 +125,74 @@ class ExperienceTests(unittest.TestCase):
         self.assertIsNone(parse_experience_tooltip_text("EXP: 20 / 0"))
         self.assertIsNone(parse_experience_tooltip_text("EXP: 200 / 100"))
         self.assertIsNone(parse_experience_tooltip_text("EXP: 15261854"))
+        self.assertIsNone(parse_experience_tooltip_text("EXP1932594227264175062"))
+        self.assertIsNone(parse_experience_tooltip_text("278651855"))
         self.assertFalse(reading_from_tooltip_text("MP: 2188 / 2937", 0.99).success)
+
+    def test_tooltip_exp_parser_accepts_high_exp_when_separator_is_explicit(self):
+        self.assertEqual(
+            parse_experience_tooltip_text("EXP: 193259422 / 264175062"),
+            (193259422, 264175062, 73.16),
+        )
+
+    def test_tooltip_exp_parser_uses_continuity_to_accept_merged_high_exp(self):
+        hint = ExperienceOcrContinuityHint(
+            current_exp=186_171_002,
+            percent=70.47,
+            captured_at=100.0,
+            now=105.0,
+        )
+
+        self.assertEqual(
+            parse_experience_tooltip_text("EXP:1883572407264175062", continuity_hint=hint),
+            (188357240, 264175062, 71.3),
+        )
+
+    def test_tooltip_exp_parser_replays_recent_merged_log_samples(self):
+        first_hint = ExperienceOcrContinuityHint(
+            current_exp=186_171_002,
+            percent=70.47,
+            captured_at=100.0,
+            now=105.0,
+        )
+        second_hint = ExperienceOcrContinuityHint(
+            current_exp=188_391_532,
+            percent=71.31,
+            captured_at=100.0,
+            now=105.0,
+        )
+
+        self.assertEqual(
+            parse_experience_tooltip_text("EXP:1863572407264175062", continuity_hint=first_hint),
+            (186357240, 264175062, 70.54),
+        )
+        self.assertEqual(
+            parse_experience_tooltip_text("EXP:1885920967264175062", continuity_hint=second_hint),
+            (188592096, 264175062, 71.39),
+        )
+
+    def test_tooltip_exp_parser_rejects_merged_high_exp_when_trimmed_value_matches_continuity(self):
+        hint = ExperienceOcrContinuityHint(
+            current_exp=93_218_385,
+            percent=35.29,
+            captured_at=100.0,
+            now=105.0,
+        )
+
+        self.assertIsNone(parse_experience_tooltip_text("EXP1932594227264175062", continuity_hint=hint))
+
+    def test_tooltip_exp_parser_rejects_total_only_even_when_continuity_allows_level_up(self):
+        hint = ExperienceOcrContinuityHint(
+            current_exp=228_429_111,
+            percent=81.97,
+            captured_at=100.0,
+            now=105.0,
+        )
+
+        reading = reading_from_tooltip_text("278651855", 0.99, continuity_hint=hint)
+
+        self.assertFalse(reading.success)
+        self.assertIsNone(parse_experience_tooltip_text("278651855", continuity_hint=hint))
 
     def test_tooltip_paddle_reader_ignores_low_confidence_bonus_exp_line(self):
         result = [
@@ -161,6 +228,98 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(reading.current_exp, 62993072)
         self.assertEqual(reading.percent, 34.64)
         self.assertAlmostEqual(reading.confidence, 0.905)
+
+    def test_tooltip_reader_rejects_leading_digit_dropout_with_continuity_hint(self):
+        reader = PaddleExperienceTextReader()
+        reader._ensure_ocr = Mock(return_value=True)
+        reader._predict = Mock(
+            return_value=[
+                {
+                    "res": {
+                        "rec_texts": ["EXP:93245852/264175062"],
+                        "rec_scores": [0.97],
+                    }
+                }
+            ]
+        )
+        hint = ExperienceOcrContinuityHint(
+            current_exp=193_218_385,
+            percent=73.14,
+            captured_at=10.0,
+            now=15.0,
+        )
+
+        reading = reader.read_tooltip_exp(
+            ExperienceOcrImage(np.zeros((46, 340, 4), dtype=np.uint8), source_id="tooltip"),
+            continuity_hint=hint,
+        )
+
+        self.assertFalse(reading.success)
+        self.assertEqual(reading.current_exp, 93_245_852)
+        self.assertEqual(reading.percent, 35.3)
+        self.assertEqual(reading.reason, "EXP OCR 連續性不可信")
+        self.assertEqual(reading.continuity_status, "incompatible")
+
+    def test_prepare_experience_tooltip_ocr_images_keeps_dim_leading_digit_context(self):
+        image = np.zeros((42, 240, 4), dtype=np.uint8)
+        image[:, :, 3] = 255
+        image[:, :, :3] = (18, 18, 18)
+        cv2.putText(
+            image,
+            "1",
+            (28, 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (122, 122, 122, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            image,
+            "93252637 / 264175062",
+            (52, 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (240, 240, 240, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+        cropped = prepare_experience_tooltip_ocr_images(image)[0]
+
+        dim_text_pixels = (
+            (cropped[:, :, 0] >= 95)
+            & (cropped[:, :, 0] <= 135)
+            & (cropped[:, :, 1] >= 95)
+            & (cropped[:, :, 1] <= 135)
+            & (cropped[:, :, 2] >= 95)
+            & (cropped[:, :, 2] <= 135)
+        )
+        self.assertTrue(bool(dim_text_pixels.any()))
+
+    def test_prepare_experience_tooltip_ocr_images_defers_prefix_stripped_roi_to_retry(self):
+        image = np.zeros((42, 260, 4), dtype=np.uint8)
+        image[:, :, 3] = 255
+        image[:, :, :3] = (18, 18, 18)
+        cv2.putText(
+            image,
+            "EXP:93259422 / 264175062",
+            (20, 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (240, 240, 240, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+        variants = prepare_experience_tooltip_ocr_images(image)
+        retry_variants = prepare_experience_tooltip_ocr_images(image, include_retry=True)
+        retry_only = retry_variants[len(variants) :]
+
+        self.assertGreaterEqual(len(variants), 4)
+        self.assertGreaterEqual(variants[0].shape[1], 220)
+        self.assertGreater(variants[1].shape[1], variants[0].shape[1])
+        self.assertTrue(any(160 <= variant.shape[1] < variants[0].shape[1] for variant in retry_only))
 
     def test_paddle_reader_burst_uses_consensus_result(self):
         reader = PaddleExperienceTextReader()
@@ -3238,6 +3397,71 @@ class ExperienceTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(reader._predict.call_count, base_count + 1)
         self.assertEqual(reader.last_tooltip_ocr_telemetry["selected_variant_index"], base_count)
+
+    def test_tooltip_ocr_continues_after_guard_rejected_variant(self):
+        reader = PaddleExperienceTextReader()
+        reader.ocr = object()
+        reader._predict = Mock(return_value={"dummy": True})
+        image = ExperienceOcrImage(np.zeros((46, 340, 4), dtype=np.uint8), source_id="tooltip")
+        rejected = ExperienceTextReading(
+            text="9111/278651855",
+            confidence=0.97,
+            success=True,
+            current_exp=9_111,
+            percent=0.0,
+            reason="OK:Tooltip",
+            source="tooltip",
+        )
+        accepted = ExperienceTextReading(
+            text="EXP:28444555/278651855",
+            confidence=0.96,
+            success=True,
+            current_exp=28_444_555,
+            percent=10.21,
+            reason="OK:Tooltip",
+            source="tooltip",
+        )
+        hint = ExperienceOcrContinuityHint(
+            current_exp=28_151_119,
+            percent=10.1,
+            captured_at=100.0,
+            now=105.0,
+        )
+
+        with (
+            patch("maple_star.models.experience.reading_from_tooltip_paddle_result", side_effect=[rejected, accepted]),
+            patch("maple_star.models.experience.log_experience_debug"),
+        ):
+            result = reader.read_tooltip_exp(image, continuity_hint=hint)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.current_exp, 28_444_555)
+        self.assertEqual(reader._predict.call_count, 2)
+        self.assertEqual(reader.last_tooltip_ocr_telemetry["selected_variant_index"], 1)
+
+    def test_tooltip_ocr_failure_logs_variant_attempts(self):
+        reader = PaddleExperienceTextReader()
+        reader.ocr = object()
+        reader._predict = Mock(return_value={"dummy": True})
+        image = ExperienceOcrImage(np.zeros((46, 340, 4), dtype=np.uint8), source_id="tooltip")
+        failure = ExperienceTextReading(
+            text="bad",
+            confidence=0.91,
+            reason="浮動 EXP 解析失敗",
+            source="tooltip",
+        )
+
+        with (
+            patch("maple_star.models.experience.reading_from_tooltip_paddle_result", return_value=failure),
+            patch("maple_star.models.experience.log_experience_debug") as log_debug,
+        ):
+            result = reader.read_tooltip_exp(image)
+
+        self.assertFalse(result.success)
+        payload = log_debug.call_args.args[0]
+        self.assertIn("variant_attempts", payload)
+        self.assertEqual(len(payload["variant_attempts"]), reader.last_tooltip_ocr_telemetry["predict_count"])
+        self.assertEqual(payload["variant_attempts"][0]["text"], "bad")
 
     def test_tracker_reports_exp_rates_and_eta(self):
         tracker = ExperienceEfficiencyTracker()

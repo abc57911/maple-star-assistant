@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from maple_star.settings import (
     AutoPotionSettings,
+    COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP,
     COMBO_SCRIPT_REPEATING_JUMP_SKILL,
     COMBO_SCRIPT_SINGLE_JUMP_SKILL,
     load_settings,
@@ -63,15 +64,21 @@ class ControllerButtonSettingsTests(unittest.TestCase):
                                 "trigger_button": "Y",
                                 "jump_key": "A",
                                 "skill_key": "S",
+                                "attack_key": "Q",
+                                "attack_start_delay_seconds": 0.3,
+                                "attack_hold_seconds": 1.5,
                                 "skill_delay_seconds": 0.35,
                                 "jump_interval_seconds": 0.8,
                             },
                             "B": {
                                 "enabled": False,
-                                "script_id": COMBO_SCRIPT_REPEATING_JUMP_SKILL,
+                                "script_id": COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP,
                                 "trigger_button": "DPAD_LEFT",
                                 "jump_key": "X",
                                 "skill_key": "D",
+                                "attack_key": "E",
+                                "attack_start_delay_seconds": 0.6,
+                                "attack_hold_seconds": 0.4,
                                 "skill_delay_seconds": 0.1,
                                 "jump_interval_seconds": 0.7,
                             },
@@ -88,8 +95,14 @@ class ControllerButtonSettingsTests(unittest.TestCase):
         self.assertEqual(settings.rb_controller_button, "Y")
         self.assertEqual(settings.rb_jump_key, "A")
         self.assertEqual(settings.rb_skill_key, "S")
+        self.assertEqual(settings.combo_slots["A"]["attack_key"], "Q")
+        self.assertEqual(settings.combo_slots["A"]["attack_start_delay_seconds"], 0.3)
+        self.assertEqual(settings.combo_slots["A"]["attack_hold_seconds"], 1.5)
         self.assertEqual(settings.combo_slots["A"]["script_id"], COMBO_SCRIPT_SINGLE_JUMP_SKILL)
-        self.assertEqual(settings.combo_slots["B"]["script_id"], COMBO_SCRIPT_REPEATING_JUMP_SKILL)
+        self.assertEqual(settings.combo_slots["B"]["script_id"], COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP)
+        self.assertEqual(settings.combo_slots["B"]["attack_key"], "E")
+        self.assertEqual(settings.combo_slots["B"]["attack_start_delay_seconds"], 0.6)
+        self.assertEqual(settings.combo_slots["B"]["attack_hold_seconds"], 0.4)
         self.assertEqual(settings.combo_slots["B"]["jump_interval_seconds"], 0.7)
 
     def test_unknown_combo_script_falls_back_to_safe_default(self):
@@ -119,3 +132,43 @@ class ControllerButtonSettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.rb_jump_interval_seconds, 0.01)
         self.assertEqual(settings.combo_slots["A"]["jump_interval_seconds"], 0.01)
+
+    def test_combo_attack_key_defaults_to_skill_key(self):
+        settings = AutoPotionSettings(
+            combo_slots={
+                "A": {
+                    "enabled": True,
+                    "script_id": COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP,
+                    "trigger_button": "RB",
+                    "skill_key": "S",
+                }
+            }
+        )
+
+        self.assertEqual(settings.combo_slots["A"]["attack_key"], "S")
+
+    def test_combo_attack_hold_defaults_to_one_second(self):
+        settings = AutoPotionSettings(
+            combo_slots={
+                "A": {
+                    "enabled": True,
+                    "script_id": COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP,
+                    "trigger_button": "RB",
+                }
+            }
+        )
+
+        self.assertEqual(settings.combo_slots["A"]["attack_hold_seconds"], 1.0)
+
+    def test_combo_attack_start_delay_defaults_to_zero(self):
+        settings = AutoPotionSettings(
+            combo_slots={
+                "A": {
+                    "enabled": True,
+                    "script_id": COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP,
+                    "trigger_button": "RB",
+                }
+            }
+        )
+
+        self.assertEqual(settings.combo_slots["A"]["attack_start_delay_seconds"], 0.0)

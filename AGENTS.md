@@ -11,6 +11,7 @@
 - 遵循既有 MVC + services/adapters 結構；新實作不要放回舊 facade。
 - 保留舊公開 import path 相容性，例如 `maple_star.controller`、`maple_star.experience`、`maple_star.gui`、`maple_star.settings`。
 - `settings.json`、`.venv*/`、`.paddleocr/`、根目錄 `/models/`、`build/`、`dist/`、`release/`、`*.spec` 都不應提交。
+- 優化 EXP OCR 時，優先提升 ROI、前處理與 OCR 判讀正確性；guard 只能作為最後防線，不應用來取代可在影像層或辨識流程修正的解析錯誤。
 - 未經使用者明確要求，不要 commit、打包、建立 tag 或發佈 release。
 - 使用者要求 commit 時，先確認 staged 清單不含本機設定、venv、模型 cache 或打包產物。
 

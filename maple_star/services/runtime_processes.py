@@ -497,6 +497,9 @@ def _handle_experience_command(controller: Any, target_state: dict[str, int], co
             controller._pause_experience_clock(time.monotonic())
         if command.resume:
             now = time.monotonic()
+            if not getattr(controller.experience_tracker, "samples", []):
+                controller._reset_experience_baseline_calibration_attempts()
+                controller._mark_initial_experience_tooltip_baseline_start(now)
             controller._resume_exp_10m_checkpoint_schedule(now)
             controller._resume_experience_clock(now)
 

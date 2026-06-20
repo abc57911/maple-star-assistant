@@ -15,6 +15,7 @@ from ..adapters.win_input import (
 )
 from ..models.settings import (
     AutoPotionSettings,
+    COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP,
     COMBO_SCRIPT_REPEATING_JUMP_SKILL,
     COMBO_SCRIPT_SINGLE_JUMP_SKILL,
     COMBO_SLOT_IDS,
@@ -46,6 +47,8 @@ from ..adapters.window_target import (
 )
 
 JUMP_KEY_HOLD_SECONDS = 0.05
+HOLD_JUMP_REASSERT_INTERVAL_SECONDS = 0.10
+DEFAULT_ATTACK_KEY_HOLD_SECONDS = 1.0
 POLL_INTERVAL_SECONDS = 0.01
 MACRO_TIMING_GUARD_SECONDS = 0.12
 WINDOW_INTERACTION_LOOP_DELAY_MS = 120
@@ -58,6 +61,12 @@ def effective_repeating_jump_interval_seconds(slot: dict[str, object]) -> float:
     skill_delay = max(0.0, float(slot["skill_delay_seconds"]))
     configured_interval = max(0.0, float(slot["jump_interval_seconds"]))
     return max(JUMP_KEY_HOLD_SECONDS, configured_interval, skill_delay + 0.01)
+
+
+def effective_hold_jump_attack_interval_seconds(slot: dict[str, object]) -> float:
+    configured_interval = max(0.0, float(slot["jump_interval_seconds"]))
+    attack_hold_seconds = max(0.0, float(slot.get("attack_hold_seconds", DEFAULT_ATTACK_KEY_HOLD_SECONDS)))
+    return max(attack_hold_seconds + 0.01, configured_interval)
 
 
 def key_down(vk_code: int) -> None:
@@ -396,9 +405,183 @@ class LBJumpSkillMacro:
         return self.settings.combo_slot(self.slot_id)
 
 
+class HoldJumpAttackLoopMacro:
+    script_id = COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP
+
+    def __init__(self, settings: AutoPotionSettings, slot_id: str = "A", name: str | None = None) -> None:
+        self.settings = settings
+        self.slot_id = slot_id
+        self.name = name or f"組合{slot_id}"
+        self.active = False
+        self.trigger_is_down = False
+        self.jump_is_down = False
+        self.attack_is_down = False
+        self.held_jump_vk: int | None = None
+        self.held_attack_vk: int | None = None
+        self.attack_up_at: float | None = None
+        self.next_attack_at: float | None = None
+        self.next_jump_reassert_at: float | None = None
+
+    def on_button_down(self) -> None:
+        title = foreground_window_title()
+        active = is_target_window_active()
+        print(f"按下 {self.name} | target_active={active} | title={title}")
+
+        if self.active:
+            print(f"忽略 {self.name}：上一個 {self.name} function 尚未完成")
+            return
+
+        if not is_target_window_active():
+            print(f"忽略 {self.name}：目前前景視窗不是 {TARGET_DISPLAY_NAME}")
+            return
+
+        slot = self._slot()
+        jump_vk = self._parse_configured_key(str(slot["jump_key"]), "跳躍鍵")
+        attack_vk = self._parse_configured_key(str(slot["attack_key"]), "攻擊鍵")
+        if jump_vk is None or attack_vk is None:
+            return
+        if jump_vk == attack_vk:
+            print(f"{self.name} function 設定錯誤：跳躍鍵與攻擊鍵不可相同")
+            return
+
+        now = time.monotonic()
+        key_down(jump_vk)
+        self.active = True
+        self.trigger_is_down = True
+        self.jump_is_down = True
+        self.held_jump_vk = jump_vk
+        attack_start_delay_seconds = max(0.0, float(slot["attack_start_delay_seconds"]))
+        self.next_attack_at = now + attack_start_delay_seconds
+        self.next_jump_reassert_at = now + HOLD_JUMP_REASSERT_INTERVAL_SECONDS
+        print(
+            f"{self.name} function 開始：按住跳躍={slot['jump_key']}，"
+            f"起攻延遲={attack_start_delay_seconds:g} 秒，"
+            f"攻擊={slot['attack_key']}，攻擊按住={float(slot['attack_hold_seconds']):g} 秒，"
+            f"攻擊間隔={float(slot['jump_interval_seconds']):g} 秒"
+        )
+        if attack_start_delay_seconds <= 0.0:
+            self._start_attack_hold(now)
+
+    def on_button_up(self) -> None:
+        self.trigger_is_down = False
+        if self.active:
+            self.stop()
+
+    def update(self, now: float) -> None:
+        if self.attack_is_down and self.attack_up_at is not None and now >= self.attack_up_at:
+            if self.held_attack_vk is not None:
+                key_up(self.held_attack_vk)
+            self.attack_is_down = False
+            self.held_attack_vk = None
+            self.attack_up_at = None
+
+        if (
+            self.active
+            and self.trigger_is_down
+            and self.jump_is_down
+            and self.next_jump_reassert_at is not None
+            and now >= self.next_jump_reassert_at
+        ):
+            if not is_target_window_active():
+                print("視窗焦點離開目標，停止按住跳躍循環攻擊 function")
+                self.stop()
+                return
+            if self.held_jump_vk is not None:
+                key_down(self.held_jump_vk)
+            self.next_jump_reassert_at = now + HOLD_JUMP_REASSERT_INTERVAL_SECONDS
+
+        if (
+            self.active
+            and self.trigger_is_down
+            and not self.attack_is_down
+            and self.next_attack_at is not None
+            and now >= self.next_attack_at
+        ):
+            if not is_target_window_active():
+                print("視窗焦點離開目標，停止按住跳躍循環攻擊 function")
+                self.stop()
+                return
+            self._start_attack_hold(now)
+
+    def next_deadline_at(self) -> float | None:
+        deadlines = [
+            deadline
+            for deadline in (
+                self.attack_up_at,
+                self.next_jump_reassert_at if self.active and self.trigger_is_down and self.jump_is_down else None,
+                self.next_attack_at if self.active and self.trigger_is_down and not self.attack_is_down else None,
+            )
+            if deadline is not None
+        ]
+        if not deadlines:
+            return None
+        return min(deadlines)
+
+    def stop(self) -> None:
+        was_active = self.active or self.jump_is_down or self.attack_is_down
+        self.cleanup()
+        self.active = False
+        self.trigger_is_down = False
+        self.attack_up_at = None
+        self.next_attack_at = None
+        self.next_jump_reassert_at = None
+        self.held_jump_vk = None
+        self.held_attack_vk = None
+        if was_active:
+            print(f"停止 {self.name} function")
+
+    def cleanup(self) -> None:
+        if self.attack_is_down and self.held_attack_vk is not None:
+            key_up(self.held_attack_vk)
+            self.attack_is_down = False
+            self.held_attack_vk = None
+        if self.jump_is_down and self.held_jump_vk is not None:
+            key_up(self.held_jump_vk)
+            self.jump_is_down = False
+            self.held_jump_vk = None
+
+    def status_text(self) -> str:
+        if not self.active:
+            return ""
+        state = []
+        if self.jump_is_down:
+            key_name = key_display_name(self.held_jump_vk) if self.held_jump_vk is not None else "jump"
+            state.append(f"{key_name} down")
+        if self.attack_is_down:
+            key_name = key_display_name(self.held_attack_vk) if self.held_attack_vk is not None else "attack"
+            state.append(f"{key_name} down")
+        if self.trigger_is_down:
+            state.append("循環")
+        return f"{self.name}({', '.join(state) or 'active'})"
+
+    def _start_attack_hold(self, now: float) -> None:
+        slot = self._slot()
+        attack_vk = self._parse_configured_key(str(slot["attack_key"]), "攻擊鍵")
+        if attack_vk is None:
+            self.stop()
+            return
+        key_down(attack_vk)
+        attack_hold_seconds = max(0.0, float(slot["attack_hold_seconds"]))
+        self.attack_is_down = True
+        self.held_attack_vk = attack_vk
+        self.attack_up_at = now + attack_hold_seconds
+        self.next_attack_at = now + effective_hold_jump_attack_interval_seconds(slot)
+
+    def _parse_configured_key(self, key: str, label: str) -> int | None:
+        try:
+            return parse_vk_key(key)
+        except ValueError as exc:
+            print(f"{self.name} function {label} 設定錯誤：{exc}")
+            return None
+
+    def _slot(self) -> dict[str, object]:
+        return self.settings.combo_slot(self.slot_id)
+
+
 COMBO_SCRIPT_BINDING_CLASSES = {
     COMBO_SCRIPT_REPEATING_JUMP_SKILL: RBJumpSlashMacro,
     COMBO_SCRIPT_SINGLE_JUMP_SKILL: LBJumpSkillMacro,
+    COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP: HoldJumpAttackLoopMacro,
 }
 
 

@@ -31,8 +31,13 @@ from ..models.settings import (
     SETTINGS_PATH,
     AutoPotionSettings,
     CONTROLLER_BUTTON_CHOICES,
+    COMBO_ATTACK_START_DELAY_MAX_SECONDS,
+    COMBO_ATTACK_START_DELAY_MIN_SECONDS,
+    COMBO_ATTACK_HOLD_MAX_SECONDS,
+    COMBO_ATTACK_HOLD_MIN_SECONDS,
     COMBO_JUMP_INTERVAL_MAX_SECONDS,
     COMBO_JUMP_INTERVAL_MIN_SECONDS,
+    COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP,
     COMBO_SCRIPT_LABELS,
     COMBO_SCRIPT_REPEATING_JUMP_SKILL,
     COMBO_SCRIPT_SINGLE_JUMP_SKILL,
@@ -86,10 +91,10 @@ POTION_KEY_ENTRY_WIDTH = 76
 COMBO_KEY_ENTRY_WIDTH = 58
 SECONDS_ENTRY_WIDTH = 46
 CONTROLLER_COMBO_WIDTH = 100
-COMBO_COMPACT_KEY_ENTRY_WIDTH = 50
-COMBO_COMPACT_SECONDS_ENTRY_WIDTH = 42
-COMBO_COMPACT_CONTROLLER_WIDTH = 88
-COMBO_SCRIPT_COMBO_WIDTH = 118
+COMBO_COMPACT_KEY_ENTRY_WIDTH = 44
+COMBO_COMPACT_SECONDS_ENTRY_WIDTH = 50
+COMBO_COMPACT_CONTROLLER_WIDTH = 76
+COMBO_SCRIPT_COMBO_WIDTH = 128
 COMBO_SCRIPT_LABEL_TO_ID = {label: script_id for script_id, label in COMBO_SCRIPT_LABELS.items()}
 COMBO_SCRIPT_LABEL_VALUES = tuple(COMBO_SCRIPT_LABELS[script_id] for script_id in COMBO_SCRIPT_LABELS)
 LEFT_PANEL_MAX_WIDTH = 720
@@ -136,6 +141,52 @@ CONSOLE_FLUSH_DELAY_MS = 50
 RESTORE_REPAINT_GRACE_SECONDS = 0.22
 TOGGLE_NOTICE_VERTICAL_RATIO = 0.45
 TOGGLE_NOTICE_EDGE_PADDING = 16
+FLOW_GAP_X = 8
+FLOW_GAP_Y = 4
+
+
+class FlowLayout:
+    def __init__(self, parent: tk.Misc, *, gap_x: int = FLOW_GAP_X, gap_y: int = FLOW_GAP_Y) -> None:
+        self.frame = ctk.CTkFrame(parent, fg_color="transparent")
+        self.gap_x = gap_x
+        self.gap_y = gap_y
+        self.items: list[dict[str, object]] = []
+        self.frame.bind("<Configure>", lambda _event: self.layout(), add="+")
+
+    def add(self, widget: tk.Misc, min_width: int) -> None:
+        self.items.append({"widget": widget, "min_width": min_width, "visible": True})
+        self.layout()
+
+    def set_visible(self, widget: tk.Misc, visible: bool) -> None:
+        changed = False
+        for item in self.items:
+            if item["widget"] is widget and item["visible"] != visible:
+                item["visible"] = visible
+                changed = True
+        if changed:
+            self.layout()
+
+    def layout(self) -> None:
+        width = max(1, self.frame.winfo_width())
+        row = 0
+        column = 0
+        row_width = 0
+        for item in self.items:
+            widget = item["widget"]
+            min_width = int(item["min_width"])
+            if not isinstance(widget, tk.Misc):
+                continue
+            if not item["visible"]:
+                widget.grid_remove()
+                continue
+            next_width = min_width if column == 0 else row_width + self.gap_x + min_width
+            if column > 0 and next_width > width:
+                row += 1
+                column = 0
+                row_width = 0
+            widget.grid(row=row, column=column, sticky="w", padx=(0, self.gap_x), pady=(0, self.gap_y))
+            row_width = min_width if column == 0 else row_width + self.gap_x + min_width
+            column += 1
 
 
 class GuiConsoleWriter:
@@ -247,18 +298,30 @@ class AutoPotionSettingsGui:
         self.mp_continuous_enabled = tk.BooleanVar(value=settings.mp_continuous_enabled)
         self.rb_jump_key = tk.StringVar(value=settings.rb_jump_key)
         self.rb_skill_key = tk.StringVar(value=settings.rb_skill_key)
+        self.rb_attack_key = tk.StringVar(value=str(settings.combo_slot("A")["attack_key"]))
+        self.rb_attack_start_delay = tk.StringVar(value=f"{float(settings.combo_slot('A')['attack_start_delay_seconds']):g}")
+        self.rb_attack_hold = tk.StringVar(value=f"{float(settings.combo_slot('A')['attack_hold_seconds']):g}")
         self.rb_controller_button = tk.StringVar(value=settings.rb_controller_button)
         self.rb_skill_delay = tk.StringVar(value=f"{settings.rb_skill_delay_seconds:g}")
         self.rb_jump_interval = tk.StringVar(value=f"{settings.rb_jump_interval_seconds:g}")
         self.lb_enabled = tk.BooleanVar(value=settings.lb_enabled)
         self.lb_jump_key = tk.StringVar(value=settings.lb_jump_key)
         self.lb_skill_key = tk.StringVar(value=settings.lb_skill_key)
+        self.lb_attack_key = tk.StringVar(value=str(settings.combo_slot("B")["attack_key"]))
+        self.lb_attack_start_delay = tk.StringVar(value=f"{float(settings.combo_slot('B')['attack_start_delay_seconds']):g}")
+        self.lb_attack_hold = tk.StringVar(value=f"{float(settings.combo_slot('B')['attack_hold_seconds']):g}")
         self.lb_controller_button = tk.StringVar(value=settings.lb_controller_button)
         self.lb_skill_delay = tk.StringVar(value=f"{settings.lb_skill_delay_seconds:g}")
         self.lb_jump_interval = tk.StringVar(value=f"{float(settings.combo_slot('B')['jump_interval_seconds']):g}")
         self.combo_a_script = tk.StringVar(value=self._combo_script_label(str(settings.combo_slot("A")["script_id"])))
         self.combo_b_script = tk.StringVar(value=self._combo_script_label(str(settings.combo_slot("B")["script_id"])))
-        self.combo_jump_interval_fields: dict[str, tuple[ctk.CTkLabel, ctk.CTkFrame]] = {}
+        self.combo_skill_key_fields: dict[str, tuple[tk.Misc, ...]] = {}
+        self.combo_attack_key_fields: dict[str, tuple[tk.Misc, ...]] = {}
+        self.combo_skill_delay_fields: dict[str, tuple[tk.Misc, ...]] = {}
+        self.combo_attack_start_delay_fields: dict[str, tuple[tk.Misc, ...]] = {}
+        self.combo_attack_hold_fields: dict[str, tuple[tk.Misc, ...]] = {}
+        self.combo_jump_interval_fields: dict[str, tuple[tk.Misc, ...]] = {}
+        self.combo_field_flows: dict[str, FlowLayout] = {}
         self.exp_efficiency_enabled = tk.BooleanVar(value=settings.exp_efficiency_enabled)
         self.toggle_hotkey = tk.StringVar(value=settings.toggle_hotkey)
         self.emergency_stop_hotkey = tk.StringVar(value=settings.emergency_stop_hotkey)
@@ -489,6 +552,9 @@ class AutoPotionSettingsGui:
             self.combo_a_script,
             self.rb_jump_key,
             self.rb_skill_key,
+            self.rb_attack_key,
+            self.rb_attack_start_delay,
+            self.rb_attack_hold,
             self.rb_skill_delay,
             self.rb_jump_interval,
             self._combo_a_description,
@@ -502,6 +568,9 @@ class AutoPotionSettingsGui:
             self.combo_b_script,
             self.lb_jump_key,
             self.lb_skill_key,
+            self.lb_attack_key,
+            self.lb_attack_start_delay,
+            self.lb_attack_hold,
             self.lb_skill_delay,
             self.lb_jump_interval,
             self._combo_b_description,
@@ -1495,6 +1564,9 @@ class AutoPotionSettingsGui:
             self.combo_a_script,
             self.rb_jump_key,
             self.rb_skill_key,
+            self.rb_attack_key,
+            self.rb_attack_start_delay,
+            self.rb_attack_hold,
             self.rb_skill_delay,
             self.rb_jump_interval,
         )
@@ -1506,6 +1578,9 @@ class AutoPotionSettingsGui:
             self.combo_b_script,
             self.lb_jump_key,
             self.lb_skill_key,
+            self.lb_attack_key,
+            self.lb_attack_start_delay,
+            self.lb_attack_hold,
             self.lb_skill_delay,
             self.lb_jump_interval,
         )
@@ -1517,10 +1592,19 @@ class AutoPotionSettingsGui:
         script_var: tk.StringVar,
         jump_key_var: tk.StringVar,
         skill_key_var: tk.StringVar,
+        attack_key_var: tk.StringVar,
+        attack_start_delay_var: tk.StringVar,
+        attack_hold_var: tk.StringVar,
         skill_delay_var: tk.StringVar,
         jump_interval_var: tk.StringVar,
     ) -> str:
         script_id = self._combo_script_id(script_var.get(), COMBO_SCRIPT_SINGLE_JUMP_SKILL)
+        if script_id == COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP:
+            return (
+                f"組合{slot_id} 按住 {trigger_var.get()} 時按住 {jump_key_var.get()} 跳躍，"
+                f"{attack_start_delay_var.get()} 秒後開始攻擊，"
+                f"每 {jump_interval_var.get()} 秒按住 {attack_key_var.get()} 攻擊 {attack_hold_var.get()} 秒。"
+            )
         if script_id == COMBO_SCRIPT_REPEATING_JUMP_SKILL:
             return (
                 f"組合{slot_id} 按下 {trigger_var.get()} 時，每 {jump_interval_var.get()} 秒短按 "
@@ -1583,16 +1667,102 @@ class AutoPotionSettingsGui:
         key_var: tk.StringVar,
         pady: int | tuple[int, int] = 6,
         compact: bool = False,
-    ) -> None:
-        self._label(parent, label).grid(row=row, column=column, sticky="w", padx=(0, 2 if compact else 4), pady=pady)
+    ) -> tuple[ctk.CTkLabel, ctk.CTkEntry]:
+        label_widget = self._label(parent, label)
+        label_widget.grid(row=row, column=column, sticky="w", padx=(0, 2 if compact else 4), pady=pady)
         key_entry = self._entry(
             parent,
             key_var,
             width=COMBO_COMPACT_KEY_ENTRY_WIDTH if compact else COMBO_KEY_ENTRY_WIDTH,
             justify="center",
         )
-        key_entry.grid(row=row, column=column + 1, sticky="w", padx=(0, 4 if compact else 8), pady=pady)
+        key_entry.grid(row=row, column=column + 1, sticky="w", padx=(0, 2 if compact else 8), pady=pady)
         key_entry.bind("<Button-1>", lambda event, var=key_var, name=label: self._start_key_detection_from_entry(event, var, name))
+        return label_widget, key_entry
+
+    def _combo_title_field(
+        self,
+        parent: tk.Misc,
+        slot_id: str,
+        enabled_var: tk.BooleanVar,
+    ) -> ctk.CTkFrame:
+        field = ctk.CTkFrame(parent, fg_color="transparent")
+        self._checkbox(field, "", enabled_var, width=20).grid(row=0, column=0, sticky="w", padx=(0, 0), pady=0)
+        label = self._title_label(field, f"組合{slot_id}")
+        label.grid(row=0, column=1, sticky="w", padx=(2, 0), pady=0)
+        self._bind_checkbox_label(label, enabled_var)
+        return field
+
+    def _combo_key_field(
+        self,
+        parent: tk.Misc,
+        label: str,
+        key_var: tk.StringVar,
+    ) -> ctk.CTkFrame:
+        field = ctk.CTkFrame(parent, fg_color="transparent")
+        self._label(field, label).grid(row=0, column=0, sticky="w", padx=(0, 2), pady=0)
+        key_entry = self._entry(field, key_var, width=COMBO_COMPACT_KEY_ENTRY_WIDTH, justify="center")
+        key_entry.grid(row=0, column=1, sticky="w", padx=0, pady=0)
+        key_entry.bind("<Button-1>", lambda event, var=key_var, name=label: self._start_key_detection_from_entry(event, var, name))
+        return field
+
+    def _combo_controller_field(
+        self,
+        parent: tk.Misc,
+        label: str,
+        button_var: tk.StringVar,
+    ) -> ctk.CTkFrame:
+        field = ctk.CTkFrame(parent, fg_color="transparent")
+        self._label(field, label).grid(row=0, column=0, sticky="w", padx=(0, 2), pady=0)
+        button_select = self._combo(
+            field,
+            textvariable=button_var,
+            values=CONTROLLER_BUTTON_CHOICES,
+            width=COMBO_COMPACT_CONTROLLER_WIDTH,
+        )
+        button_select.grid(row=0, column=1, sticky="w", padx=0, pady=0)
+        return field
+
+    def _combo_script_field(
+        self,
+        parent: tk.Misc,
+        label: str,
+        script_var: tk.StringVar,
+    ) -> ctk.CTkFrame:
+        field = ctk.CTkFrame(parent, fg_color="transparent")
+        self._label(field, label).grid(row=0, column=0, sticky="w", padx=(0, 2), pady=0)
+        script_select = self._combo(
+            field,
+            textvariable=script_var,
+            values=COMBO_SCRIPT_LABEL_VALUES,
+            width=COMBO_SCRIPT_COMBO_WIDTH,
+            command=lambda _value: self._on_combo_script_changed(),
+        )
+        script_select.grid(row=0, column=1, sticky="w", padx=0, pady=0)
+        return field
+
+    def _combo_seconds_field(
+        self,
+        parent: tk.Misc,
+        label: str,
+        value_var: tk.StringVar,
+        minimum: float,
+        maximum: float,
+    ) -> ctk.CTkFrame:
+        field = ctk.CTkFrame(parent, fg_color="transparent")
+        self._label(field, label).grid(row=0, column=0, sticky="w", padx=(0, 2), pady=0)
+        self._build_seconds_stepper(
+            field,
+            0,
+            1,
+            value_var,
+            minimum,
+            maximum,
+            pady=0,
+            columnspan=1,
+            compact=True,
+        )
+        return field
 
     def _build_combo_slot_row(
         self,
@@ -1604,42 +1774,70 @@ class AutoPotionSettingsGui:
         script_var: tk.StringVar,
         jump_key_var: tk.StringVar,
         skill_key_var: tk.StringVar,
+        attack_key_var: tk.StringVar,
+        attack_start_delay_var: tk.StringVar,
+        attack_hold_var: tk.StringVar,
         skill_delay_var: tk.StringVar,
         jump_interval_var: tk.StringVar,
         description_factory: Callable[[], str],
     ) -> None:
         row_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        row_frame.grid(row=row, column=0, sticky="ew", pady=(0, 6))
-        for column in range(12):
-            row_frame.columnconfigure(column, weight=0)
-        row_frame.columnconfigure(11, weight=1)
+        row_frame.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+        row_frame.columnconfigure(0, weight=1)
 
-        self._checkbox(row_frame, "", enabled_var, width=20).grid(row=0, column=0, sticky="w", padx=(0, 0), pady=2)
-        combo_label = self._title_label(row_frame, f"組合{slot_id}")
-        combo_label.grid(row=0, column=1, sticky="w", padx=(2, 8), pady=2)
-        self._bind_checkbox_label(combo_label, enabled_var)
-        self._build_controller_button_select(row_frame, 0, 2, "觸發", trigger_var, pady=2, compact=True)
-        self._build_combo_script_select(row_frame, 0, 4, "腳本", script_var, pady=2)
-        self._info_icon(row_frame, description_factory).grid(row=0, column=11, sticky="e", padx=(8, 0), pady=2)
+        header_flow = FlowLayout(row_frame)
+        header_flow.frame.grid(row=0, column=0, sticky="ew", pady=(0, 2))
+        header_flow.add(self._combo_title_field(header_flow.frame, slot_id, enabled_var), 82)
+        header_flow.add(self._combo_controller_field(header_flow.frame, "觸發", trigger_var), 124)
+        header_flow.add(self._combo_script_field(header_flow.frame, "腳本", script_var), 176)
+        info_field = ctk.CTkFrame(header_flow.frame, fg_color="transparent")
+        self._info_icon(info_field, description_factory).grid(row=0, column=0, sticky="w", padx=0, pady=0)
+        header_flow.add(info_field, 28)
 
-        self._build_key_entry(row_frame, 1, 1, "跳躍鍵", jump_key_var, pady=(2, 0), compact=True)
-        self._build_key_entry(row_frame, 1, 3, "技能鍵", skill_key_var, pady=(2, 0), compact=True)
-        self._label(row_frame, "技能延遲").grid(row=1, column=5, sticky="w", padx=(0, 2), pady=(2, 0))
-        self._build_seconds_stepper(row_frame, 1, 6, skill_delay_var, 0.0, 10.0, pady=(2, 0), columnspan=2, compact=True)
-        interval_label = self._label(row_frame, "跳躍間隔")
-        interval_label.grid(row=1, column=8, sticky="w", padx=(4, 2), pady=(2, 0))
-        interval_field = self._build_seconds_stepper(
-            row_frame,
-            1,
-            9,
+        field_flow = FlowLayout(row_frame)
+        field_flow.frame.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        self.combo_field_flows[slot_id] = field_flow
+
+        jump_field = self._combo_key_field(field_flow.frame, "跳躍", jump_key_var)
+        skill_field = self._combo_key_field(field_flow.frame, "技能", skill_key_var)
+        attack_field = self._combo_key_field(field_flow.frame, "攻擊", attack_key_var)
+        skill_delay_field = self._combo_seconds_field(field_flow.frame, "延遲", skill_delay_var, 0.0, 10.0)
+        attack_start_delay_field = self._combo_seconds_field(
+            field_flow.frame,
+            "起攻",
+            attack_start_delay_var,
+            COMBO_ATTACK_START_DELAY_MIN_SECONDS,
+            COMBO_ATTACK_START_DELAY_MAX_SECONDS,
+        )
+        attack_hold_field = self._combo_seconds_field(
+            field_flow.frame,
+            "按住",
+            attack_hold_var,
+            COMBO_ATTACK_HOLD_MIN_SECONDS,
+            COMBO_ATTACK_HOLD_MAX_SECONDS,
+        )
+        interval_field = self._combo_seconds_field(
+            field_flow.frame,
+            "間隔",
             jump_interval_var,
             COMBO_JUMP_INTERVAL_MIN_SECONDS,
             COMBO_JUMP_INTERVAL_MAX_SECONDS,
-            pady=(2, 0),
-            columnspan=2,
-            compact=True,
         )
-        self.combo_jump_interval_fields[slot_id] = (interval_label, interval_field)
+
+        field_flow.add(jump_field, 88)
+        field_flow.add(skill_field, 88)
+        field_flow.add(attack_field, 88)
+        field_flow.add(skill_delay_field, 142)
+        field_flow.add(attack_start_delay_field, 142)
+        field_flow.add(attack_hold_field, 142)
+        field_flow.add(interval_field, 142)
+
+        self.combo_skill_key_fields[slot_id] = (skill_field,)
+        self.combo_attack_key_fields[slot_id] = (attack_field,)
+        self.combo_skill_delay_fields[slot_id] = (skill_delay_field,)
+        self.combo_attack_start_delay_fields[slot_id] = (attack_start_delay_field,)
+        self.combo_attack_hold_fields[slot_id] = (attack_hold_field,)
+        self.combo_jump_interval_fields[slot_id] = (interval_field,)
 
     def _build_combo_script_select(
         self,
@@ -1658,7 +1856,7 @@ class AutoPotionSettingsGui:
             width=COMBO_SCRIPT_COMBO_WIDTH,
             command=lambda _value: self._on_combo_script_changed(),
         )
-        script_select.grid(row=row, column=column + 1, sticky="w", padx=(0, 4), pady=pady)
+        script_select.grid(row=row, column=column + 1, sticky="w", padx=(0, 2), pady=pady)
 
     def _on_combo_script_changed(self) -> None:
         self._refresh_combo_script_visibility()
@@ -1669,16 +1867,41 @@ class AutoPotionSettingsGui:
             "A": self.combo_a_script,
             "B": self.combo_b_script,
         }
-        for slot_id, widgets in self.combo_jump_interval_fields.items():
+        for slot_id in ("A", "B"):
+            widgets_by_kind = {
+                "skill_key": self.combo_skill_key_fields.get(slot_id, ()),
+                "attack_key": self.combo_attack_key_fields.get(slot_id, ()),
+                "skill_delay": self.combo_skill_delay_fields.get(slot_id, ()),
+                "attack_start_delay": self.combo_attack_start_delay_fields.get(slot_id, ()),
+                "attack_hold": self.combo_attack_hold_fields.get(slot_id, ()),
+                "jump_interval": self.combo_jump_interval_fields.get(slot_id, ()),
+            }
             script_var = script_vars.get(slot_id)
             if script_var is None:
                 continue
-            visible = self._combo_script_id(script_var.get(), COMBO_SCRIPT_SINGLE_JUMP_SKILL) == COMBO_SCRIPT_REPEATING_JUMP_SKILL
-            for widget in widgets:
-                if visible:
-                    widget.grid()
-                else:
-                    widget.grid_remove()
+            script_id = self._combo_script_id(script_var.get(), COMBO_SCRIPT_SINGLE_JUMP_SKILL)
+            show_skill_fields = script_id != COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP
+            show_attack_fields = script_id == COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP
+            show_interval = script_id in (COMBO_SCRIPT_REPEATING_JUMP_SKILL, COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP)
+            visibility = {
+                "skill_key": show_skill_fields,
+                "attack_key": show_attack_fields,
+                "skill_delay": show_skill_fields,
+                "attack_start_delay": show_attack_fields,
+                "attack_hold": show_attack_fields,
+                "jump_interval": show_interval,
+            }
+            field_flow = self.combo_field_flows.get(slot_id)
+            for kind, widgets in widgets_by_kind.items():
+                for widget in widgets:
+                    if field_flow is not None:
+                        field_flow.set_visible(widget, visibility[kind])
+                    elif visibility[kind]:
+                        widget.grid()
+                    else:
+                        widget.grid_remove()
+            if field_flow is not None:
+                field_flow.layout()
 
     def _build_controller_button_select(
         self,
@@ -1697,7 +1920,7 @@ class AutoPotionSettingsGui:
             values=CONTROLLER_BUTTON_CHOICES,
             width=COMBO_COMPACT_CONTROLLER_WIDTH if compact else CONTROLLER_COMBO_WIDTH,
         )
-        button_select.grid(row=row, column=column + 1, sticky="w", padx=(0, 4 if compact else 8), pady=pady)
+        button_select.grid(row=row, column=column + 1, sticky="w", padx=(0, 2 if compact else 8), pady=pady)
 
     def _build_seconds_stepper(
         self,
@@ -1718,20 +1941,20 @@ class AutoPotionSettingsGui:
             value_var,
             width=COMBO_COMPACT_SECONDS_ENTRY_WIDTH if compact else SECONDS_ENTRY_WIDTH,
         ).grid(row=0, column=0, sticky="w", padx=(0, 2), pady=0)
-        self._label(field_group, "秒").grid(row=0, column=1, sticky="w", padx=(0, 3 if compact else 8), pady=0)
+        self._label(field_group, "秒").grid(row=0, column=1, sticky="w", padx=(0, 1 if compact else 8), pady=0)
         button_group = ctk.CTkFrame(field_group, fg_color="transparent")
-        button_group.grid(row=0, column=2, sticky="w", padx=(0, 2 if compact else 4), pady=0)
+        button_group.grid(row=0, column=2, sticky="w", padx=(0, 1 if compact else 4), pady=0)
         self._button(
             button_group,
             "-",
             lambda: self._step_seconds(value_var, -0.01, minimum, maximum),
-            width=24 if compact else 28,
-        ).grid(row=0, column=0, sticky="w", padx=(0, 4 if compact else 8), pady=0)
+            width=22 if compact else 28,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 2 if compact else 8), pady=0)
         self._button(
             button_group,
             "+",
             lambda: self._step_seconds(value_var, 0.01, minimum, maximum),
-            width=24 if compact else 28,
+            width=22 if compact else 28,
         ).grid(row=0, column=1, sticky="w", padx=0, pady=0)
         return field_group
 
@@ -1926,11 +2149,17 @@ class AutoPotionSettingsGui:
         self.mp_continuous_enabled.set(self.settings.mp_continuous_enabled)
         self.rb_jump_key.set(self.settings.rb_jump_key)
         self.rb_skill_key.set(self.settings.rb_skill_key)
+        self.rb_attack_key.set(str(self.settings.combo_slot("A")["attack_key"]))
+        self.rb_attack_start_delay.set(f"{float(self.settings.combo_slot('A')['attack_start_delay_seconds']):g}")
+        self.rb_attack_hold.set(f"{float(self.settings.combo_slot('A')['attack_hold_seconds']):g}")
         self.rb_controller_button.set(self.settings.rb_controller_button)
         self.rb_skill_delay.set(f"{self.settings.rb_skill_delay_seconds:g}")
         self.rb_jump_interval.set(f"{self.settings.rb_jump_interval_seconds:g}")
         self.lb_jump_key.set(self.settings.lb_jump_key)
         self.lb_skill_key.set(self.settings.lb_skill_key)
+        self.lb_attack_key.set(str(self.settings.combo_slot("B")["attack_key"]))
+        self.lb_attack_start_delay.set(f"{float(self.settings.combo_slot('B')['attack_start_delay_seconds']):g}")
+        self.lb_attack_hold.set(f"{float(self.settings.combo_slot('B')['attack_hold_seconds']):g}")
         self.lb_controller_button.set(self.settings.lb_controller_button)
         self.lb_skill_delay.set(f"{self.settings.lb_skill_delay_seconds:g}")
         self.lb_jump_interval.set(f"{float(self.settings.combo_slot('B')['jump_interval_seconds']):g}")
@@ -2211,6 +2440,19 @@ class AutoPotionSettingsGui:
         lb_enabled = self.lb_enabled.get()
         rb_jump_key = self.rb_jump_key.get().strip()
         rb_skill_key = self.rb_skill_key.get().strip()
+        rb_attack_key = self.rb_attack_key.get().strip()
+        rb_attack_start_delay_seconds = self._read_seconds(
+            self.rb_attack_start_delay,
+            float(self.settings.combo_slots["A"]["attack_start_delay_seconds"]),
+            COMBO_ATTACK_START_DELAY_MIN_SECONDS,
+            COMBO_ATTACK_START_DELAY_MAX_SECONDS,
+        )
+        rb_attack_hold_seconds = self._read_seconds(
+            self.rb_attack_hold,
+            float(self.settings.combo_slots["A"]["attack_hold_seconds"]),
+            COMBO_ATTACK_HOLD_MIN_SECONDS,
+            COMBO_ATTACK_HOLD_MAX_SECONDS,
+        )
         rb_controller_button = normalize_controller_button_name(
             self.rb_controller_button.get(),
             self.settings.rb_controller_button,
@@ -2229,6 +2471,19 @@ class AutoPotionSettingsGui:
         )
         lb_jump_key = self.lb_jump_key.get().strip()
         lb_skill_key = self.lb_skill_key.get().strip()
+        lb_attack_key = self.lb_attack_key.get().strip()
+        lb_attack_start_delay_seconds = self._read_seconds(
+            self.lb_attack_start_delay,
+            float(self.settings.combo_slots["B"]["attack_start_delay_seconds"]),
+            COMBO_ATTACK_START_DELAY_MIN_SECONDS,
+            COMBO_ATTACK_START_DELAY_MAX_SECONDS,
+        )
+        lb_attack_hold_seconds = self._read_seconds(
+            self.lb_attack_hold,
+            float(self.settings.combo_slots["B"]["attack_hold_seconds"]),
+            COMBO_ATTACK_HOLD_MIN_SECONDS,
+            COMBO_ATTACK_HOLD_MAX_SECONDS,
+        )
         lb_controller_button = normalize_controller_button_name(
             self.lb_controller_button.get(),
             self.settings.lb_controller_button,
@@ -2277,6 +2532,9 @@ class AutoPotionSettingsGui:
                     "trigger_button": rb_controller_button,
                     "jump_key": rb_jump_key,
                     "skill_key": rb_skill_key,
+                    "attack_key": rb_attack_key,
+                    "attack_start_delay_seconds": rb_attack_start_delay_seconds,
+                    "attack_hold_seconds": rb_attack_hold_seconds,
                     "skill_delay_seconds": rb_skill_delay_seconds,
                     "jump_interval_seconds": rb_jump_interval_seconds,
                 },
@@ -2286,6 +2544,9 @@ class AutoPotionSettingsGui:
                     "trigger_button": lb_controller_button,
                     "jump_key": lb_jump_key,
                     "skill_key": lb_skill_key,
+                    "attack_key": lb_attack_key,
+                    "attack_start_delay_seconds": lb_attack_start_delay_seconds,
+                    "attack_hold_seconds": lb_attack_hold_seconds,
                     "skill_delay_seconds": lb_skill_delay_seconds,
                     "jump_interval_seconds": lb_jump_interval_seconds,
                 },
@@ -2295,6 +2556,12 @@ class AutoPotionSettingsGui:
         self.lb_enabled.set(self.settings.lb_enabled)
         self.rb_controller_button.set(self.settings.rb_controller_button)
         self.lb_controller_button.set(self.settings.lb_controller_button)
+        self.rb_attack_key.set(str(self.settings.combo_slot("A")["attack_key"]))
+        self.lb_attack_key.set(str(self.settings.combo_slot("B")["attack_key"]))
+        self.rb_attack_start_delay.set(f"{float(self.settings.combo_slot('A')['attack_start_delay_seconds']):g}")
+        self.lb_attack_start_delay.set(f"{float(self.settings.combo_slot('B')['attack_start_delay_seconds']):g}")
+        self.rb_attack_hold.set(f"{float(self.settings.combo_slot('A')['attack_hold_seconds']):g}")
+        self.lb_attack_hold.set(f"{float(self.settings.combo_slot('B')['attack_hold_seconds']):g}")
         self.rb_jump_interval.set(f"{self.settings.rb_jump_interval_seconds:g}")
         self.lb_jump_interval.set(f"{float(self.settings.combo_slot('B')['jump_interval_seconds']):g}")
         self.settings.exp_efficiency_enabled = self.exp_efficiency_enabled.get()

@@ -46,16 +46,23 @@ CONTROLLER_BUTTON_ALIASES = {
 COMBO_SLOT_IDS = ("A", "B")
 COMBO_SCRIPT_REPEATING_JUMP_SKILL = "repeating_jump_skill"
 COMBO_SCRIPT_SINGLE_JUMP_SKILL = "single_jump_skill"
+COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP = "hold_jump_attack_loop"
 COMBO_SCRIPT_IDS = (
     COMBO_SCRIPT_REPEATING_JUMP_SKILL,
     COMBO_SCRIPT_SINGLE_JUMP_SKILL,
+    COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP,
 )
 COMBO_SCRIPT_LABELS = {
     COMBO_SCRIPT_REPEATING_JUMP_SKILL: "循環跳躍技能",
     COMBO_SCRIPT_SINGLE_JUMP_SKILL: "單次跳躍技能",
+    COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP: "按住跳躍循環攻擊",
 }
 COMBO_JUMP_INTERVAL_MIN_SECONDS = 0.01
 COMBO_JUMP_INTERVAL_MAX_SECONDS = 10.0
+COMBO_ATTACK_START_DELAY_MIN_SECONDS = 0.0
+COMBO_ATTACK_START_DELAY_MAX_SECONDS = 10.0
+COMBO_ATTACK_HOLD_MIN_SECONDS = 0.01
+COMBO_ATTACK_HOLD_MAX_SECONDS = 10.0
 
 
 def normalize_controller_button_name(value: object, fallback: str) -> str:
@@ -101,6 +108,19 @@ def _combo_slots_from_legacy_values(values: dict[str, object]) -> dict[str, dict
             "trigger_button": normalize_controller_button_name(values.get("rb_controller_button"), "RB"),
             "jump_key": str(values.get("rb_jump_key") or "X"),
             "skill_key": str(values.get("rb_skill_key") or "C"),
+            "attack_key": str(values.get("rb_attack_key") or values.get("rb_skill_key") or "C"),
+            "attack_start_delay_seconds": _coerce_float_value(
+                values.get("rb_attack_start_delay_seconds"),
+                0.0,
+                COMBO_ATTACK_START_DELAY_MIN_SECONDS,
+                COMBO_ATTACK_START_DELAY_MAX_SECONDS,
+            ),
+            "attack_hold_seconds": _coerce_float_value(
+                values.get("rb_attack_hold_seconds"),
+                1.0,
+                COMBO_ATTACK_HOLD_MIN_SECONDS,
+                COMBO_ATTACK_HOLD_MAX_SECONDS,
+            ),
             "skill_delay_seconds": _coerce_float_value(values.get("rb_skill_delay_seconds"), 0.2, 0.0, 10.0),
             "jump_interval_seconds": _coerce_float_value(
                 values.get("rb_jump_interval_seconds"),
@@ -115,6 +135,19 @@ def _combo_slots_from_legacy_values(values: dict[str, object]) -> dict[str, dict
             "trigger_button": normalize_controller_button_name(values.get("lb_controller_button"), "LB"),
             "jump_key": str(values.get("lb_jump_key") or "X"),
             "skill_key": str(values.get("lb_skill_key") or "C"),
+            "attack_key": str(values.get("lb_attack_key") or values.get("lb_skill_key") or "C"),
+            "attack_start_delay_seconds": _coerce_float_value(
+                values.get("lb_attack_start_delay_seconds"),
+                0.0,
+                COMBO_ATTACK_START_DELAY_MIN_SECONDS,
+                COMBO_ATTACK_START_DELAY_MAX_SECONDS,
+            ),
+            "attack_hold_seconds": _coerce_float_value(
+                values.get("lb_attack_hold_seconds"),
+                1.0,
+                COMBO_ATTACK_HOLD_MIN_SECONDS,
+                COMBO_ATTACK_HOLD_MAX_SECONDS,
+            ),
             "skill_delay_seconds": _coerce_float_value(values.get("lb_skill_delay_seconds"), 0.2, 0.0, 10.0),
             "jump_interval_seconds": 0.66,
         },
@@ -136,12 +169,26 @@ def normalize_combo_slots(
         fallback = fallback_slots[slot_id]
         raw = raw_slots.get(slot_id)
         data = raw if isinstance(raw, dict) else {}
+        skill_key = _normalize_non_empty_string(data.get("skill_key"), str(fallback["skill_key"]))
         slots[slot_id] = {
             "enabled": data.get("enabled") if isinstance(data.get("enabled"), bool) else fallback["enabled"],
             "script_id": normalize_combo_script_id(data.get("script_id"), str(fallback["script_id"])),
             "trigger_button": normalize_controller_button_name(data.get("trigger_button"), str(fallback["trigger_button"])),
             "jump_key": _normalize_non_empty_string(data.get("jump_key"), str(fallback["jump_key"])),
-            "skill_key": _normalize_non_empty_string(data.get("skill_key"), str(fallback["skill_key"])),
+            "skill_key": skill_key,
+            "attack_key": _normalize_non_empty_string(data.get("attack_key"), skill_key),
+            "attack_start_delay_seconds": _coerce_float_value(
+                data.get("attack_start_delay_seconds"),
+                float(fallback["attack_start_delay_seconds"]),
+                COMBO_ATTACK_START_DELAY_MIN_SECONDS,
+                COMBO_ATTACK_START_DELAY_MAX_SECONDS,
+            ),
+            "attack_hold_seconds": _coerce_float_value(
+                data.get("attack_hold_seconds"),
+                float(fallback["attack_hold_seconds"]),
+                COMBO_ATTACK_HOLD_MIN_SECONDS,
+                COMBO_ATTACK_HOLD_MAX_SECONDS,
+            ),
             "skill_delay_seconds": _coerce_float_value(
                 data.get("skill_delay_seconds"),
                 float(fallback["skill_delay_seconds"]),

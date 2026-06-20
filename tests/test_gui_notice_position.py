@@ -71,11 +71,17 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.mp_continuous_enabled = FakeVar(False)
         gui.rb_jump_key = FakeVar("X")
         gui.rb_skill_key = FakeVar("C")
+        gui.rb_attack_key = FakeVar("A")
+        gui.rb_attack_start_delay = FakeVar("0.35")
+        gui.rb_attack_hold = FakeVar("1.25")
         gui.rb_controller_button = FakeVar("RB")
         gui.rb_skill_delay = FakeVar("0.05")
         gui.rb_jump_interval = FakeVar("0.01")
         gui.lb_jump_key = FakeVar("X")
         gui.lb_skill_key = FakeVar("C")
+        gui.lb_attack_key = FakeVar("B")
+        gui.lb_attack_start_delay = FakeVar("0.65")
+        gui.lb_attack_hold = FakeVar("0.75")
         gui.lb_controller_button = FakeVar("LB")
         gui.lb_skill_delay = FakeVar("0.2")
         gui.lb_jump_interval = FakeVar("0.88")
@@ -98,7 +104,13 @@ class ToggleNoticePositionTests(unittest.TestCase):
 
         self.assertEqual(gui.settings.rb_jump_interval_seconds, 0.01)
         self.assertEqual(gui.settings.combo_slots["A"]["jump_interval_seconds"], 0.01)
+        self.assertEqual(gui.settings.combo_slots["A"]["attack_key"], "A")
+        self.assertEqual(gui.settings.combo_slots["A"]["attack_start_delay_seconds"], 0.35)
+        self.assertEqual(gui.settings.combo_slots["A"]["attack_hold_seconds"], 1.25)
         self.assertEqual(gui.settings.combo_slots["B"]["jump_interval_seconds"], 0.88)
+        self.assertEqual(gui.settings.combo_slots["B"]["attack_key"], "B")
+        self.assertEqual(gui.settings.combo_slots["B"]["attack_start_delay_seconds"], 0.65)
+        self.assertEqual(gui.settings.combo_slots["B"]["attack_hold_seconds"], 0.75)
 
     def test_set_potion_enabled_syncs_checkbox_vars_and_settings(self):
         class FakeVar:

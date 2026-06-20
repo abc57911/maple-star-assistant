@@ -29,6 +29,7 @@ from maple_star.constants import (
     EXPERIENCE_BURST_CAPTURE_INTERVAL_SECONDS,
     EXPERIENCE_CAPTURE_INTERVAL_SECONDS,
     PICKUP_DISABLE_HOLD_SECONDS,
+    PICKUP_HUD_REFRESH_INTERVAL_SECONDS,
     PICKUP_TOGGLE_DEBOUNCE_SECONDS,
     POTION_CONTINUOUS_HOLD_REFRESH_SECONDS,
     POTION_FAST_CAPTURE_INTERVAL_SECONDS,
@@ -235,6 +236,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.experience_10m_checkpoint_attempts = 0
         controller.experience_baseline_cursor_position = None
         controller.experience_tooltip_baseline_failed = False
+        controller.experience_initial_tooltip_baseline_started_at = None
         controller.experience_pause_started_at = None
         controller.experience_total_paused_seconds = 0.0
         controller.runtime_processes_enabled = False
@@ -853,6 +855,29 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(events, ["lock", "unlock"])
         controller.sct.grab.assert_called_once_with({"left": 406, "top": 132, "width": 370, "height": 90})
 
+    def test_experience_tooltip_submit_passes_continuity_hint(self):
+        class ImmediateExecutor:
+            def submit(self, fn, *args, **kwargs):
+                self.call = (fn, args, kwargs)
+                return Mock()
+
+        controller = self.make_controller([])
+        controller.experience_ocr_executor = ImmediateExecutor()
+        controller.experience_tracker.add_reading(100.0, 193_218_385, 73.14, confidence=0.96)
+        ocr_image = ExperienceOcrImage(np.zeros((46, 340, 4), dtype=np.uint8), source_id="tooltip")
+        controller._capture_experience_tooltip_image = Mock(return_value=ocr_image)
+
+        started = controller._start_experience_tooltip_ocr_capture(105.0, effective_now=105.0)
+
+        self.assertTrue(started)
+        submitted_fn, submitted_args, _submitted_kwargs = controller.experience_ocr_executor.call
+        self.assertEqual(submitted_fn, read_experience_tooltip_in_worker)
+        self.assertEqual(submitted_args[0], ocr_image)
+        self.assertEqual(submitted_args[1].current_exp, 193_218_385)
+        self.assertEqual(submitted_args[1].percent, 73.14)
+        self.assertEqual(submitted_args[1].captured_at, 100.0)
+        self.assertEqual(submitted_args[1].now, 105.0)
+
     def test_experience_tooltip_capture_retries_when_cursor_moves_during_lock(self):
         class FakeMouseLock:
             def __enter__(self):
@@ -1012,19 +1037,47 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._start_experience_tooltip_ocr_capture.assert_called_once_with(13.1, effective_now=13.1)
         controller._start_bottom_experience_ocr_capture.assert_not_called()
 
-    def test_mouse_activity_defers_baseline_without_opening_stat_window(self):
+    def test_initial_baseline_ignores_mouse_activity_before_enable(self):
+        class ImmediateExecutor:
+            def submit(self, fn, *args, **kwargs):
+                self.call = (fn, args, kwargs)
+                return Mock()
+
         controller = self.make_controller([])
         controller.settings.exp_efficiency_enabled = True
         controller.gameplay_hud_active = True
         controller.mouse_activity_observer = SimpleNamespace(last_activity_at=8.0)
-        controller._capture_experience_tooltip_image = Mock()
+        controller.experience_ocr_executor = ImmediateExecutor()
+        tooltip_image = ExperienceOcrImage(np.zeros((46, 340, 4), dtype=np.uint8), source_id="tooltip")
+        controller._capture_experience_tooltip_image = Mock(return_value=tooltip_image)
         controller._toggle_experience_stat_window = Mock()
+        controller._mark_initial_experience_tooltip_baseline_start(10.0)
 
         handled = controller._process_experience_baseline_calibration(10.0, effective_now=10.0)
 
         self.assertTrue(handled)
+        controller._capture_experience_tooltip_image.assert_called_once()
+        controller._toggle_experience_stat_window.assert_not_called()
+        submitted_fn, submitted_args, _submitted_kwargs = controller.experience_ocr_executor.call
+        self.assertEqual(submitted_fn, read_experience_tooltip_in_worker)
+        self.assertIs(submitted_args[0], tooltip_image)
+        self.assertEqual(controller.experience_baseline_ocr_job.source, "tooltip_baseline")
+
+    def test_mouse_activity_after_enable_defers_initial_baseline_without_opening_stat_window(self):
+        controller = self.make_controller([])
+        controller.settings.exp_efficiency_enabled = True
+        controller.gameplay_hud_active = True
+        controller.mouse_activity_observer = SimpleNamespace(last_activity_at=10.2)
+        controller._capture_experience_tooltip_image = Mock()
+        controller._toggle_experience_stat_window = Mock()
+        controller._mark_initial_experience_tooltip_baseline_start(10.0)
+
+        handled = controller._process_experience_baseline_calibration(10.3, effective_now=10.3)
+
+        self.assertTrue(handled)
         controller._capture_experience_tooltip_image.assert_not_called()
         controller._toggle_experience_stat_window.assert_not_called()
+        self.assertAlmostEqual(controller.next_experience_capture_at, 10.2 + EXPERIENCE_MOUSE_IDLE_DELAY_SECONDS)
 
     def test_mouse_activity_defers_exp_10m_checkpoint_without_opening_stat_window(self):
         controller = self.make_controller([])
@@ -1837,6 +1890,37 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(runtime.targets_sent, [4321])
         self.assertEqual(runtime.settings_sent, [controller.settings.snapshot()])
         self.assertEqual(runtime.potion_controls[-1], PotionControl(enabled=True, scripts_enabled=True, generation=1))
+
+    def test_runtime_pickup_refreshes_local_hud_when_auto_drink_is_disabled(self):
+        controller = self.make_controller([True])
+        runtime = self.FakeRuntime()
+        controller.runtime_processes_enabled = True
+        controller.runtime_processes = runtime
+        controller.target_window_provider = Mock(return_value=4321)
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller.auto_drink_enabled = False
+        controller.pickup_enabled = True
+        controller.settings.pickup_key = "Z"
+        controller.gameplay_hud_active = False
+        controller.next_capture_at = 0.0
+        controller._save_settings_when_idle = Mock()
+
+        def refresh_hud(now):
+            controller.gameplay_hud_active = True
+            return True
+
+        controller._refresh_gameplay_hud_state = Mock(side_effect=refresh_hud)
+        controller._capture_bar_percents = Mock()
+
+        with patch("maple_star.controller.key_down") as key_down:
+            controller.update(100.0)
+
+        controller._refresh_gameplay_hud_state.assert_called_once_with(100.0)
+        controller._capture_bar_percents.assert_not_called()
+        key_down.assert_called_once_with(0x5A)
+        self.assertEqual(controller.pickup_held_vk, 0x5A)
+        self.assertAlmostEqual(controller.next_capture_at, 100.0 + PICKUP_HUD_REFRESH_INTERVAL_SECONDS)
 
     def test_experience_only_runtime_skips_potion_capture_until_exp_work_needs_hud(self):
         controller = self.make_controller([True])
@@ -2950,6 +3034,44 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.gui.set_current_percentages.assert_called_with(None, None)
         controller.gui.set_status.assert_called_with(f"自動喝水已暫停，按 {controller.settings.toggle_hotkey} 恢復")
 
+    def test_pickup_refreshes_hud_without_hp_mp_capture_when_auto_drink_is_disabled(self):
+        controller = self.make_controller([True])
+        controller.next_capture_at = 0.0
+        controller.auto_drink_enabled = False
+        controller.settings.exp_efficiency_enabled = False
+        controller.pickup_enabled = True
+        controller.settings.pickup_key = "Z"
+        controller.gameplay_hud_active = False
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._save_settings_when_idle = Mock()
+        controller._capture_bar_percents = Mock(return_value=(57.0, 80.0))
+        controller._maybe_drink_hp = Mock()
+        controller._maybe_drink_mp = Mock()
+        controller._stop_experience_ocr_job = Mock()
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot()
+
+        def refresh_hud(now):
+            controller.gameplay_hud_active = True
+            return True
+
+        controller._refresh_gameplay_hud_state = Mock(side_effect=refresh_hud)
+
+        with patch("maple_star.controller.key_down") as key_down:
+            controller.update(100.0)
+
+        controller._refresh_gameplay_hud_state.assert_called_once_with(100.0)
+        controller._capture_bar_percents.assert_not_called()
+        controller._maybe_drink_hp.assert_not_called()
+        controller._maybe_drink_mp.assert_not_called()
+        key_down.assert_called_once_with(0x5A)
+        self.assertEqual(controller.pickup_held_vk, 0x5A)
+        self.assertAlmostEqual(controller.next_capture_at, 100.0 + PICKUP_HUD_REFRESH_INTERVAL_SECONDS)
+        controller.gui.set_current_percentages.assert_called_with(None, None)
+        controller.gui.set_status.assert_called_with(f"自動喝水已暫停，按 {controller.settings.toggle_hotkey} 恢復")
+
     def test_update_skips_hp_mp_hud_refresh_when_auto_drink_is_disabled_and_exp_needs_hud(self):
         controller = self.make_controller([True])
         controller.next_capture_at = 0.0
@@ -3028,6 +3150,46 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._capture_bar_percents.assert_not_called()
         controller._maybe_drink_hp.assert_not_called()
         controller._maybe_drink_mp.assert_not_called()
+        controller.gui.set_current_percentages.assert_called_with(None, None)
+        controller.gui.set_status.assert_called_with("未勾選紅水或藍水，暫停 HP/MP 檢查")
+
+    def test_pickup_refreshes_hud_without_hp_mp_capture_when_no_potion_bar_is_enabled(self):
+        controller = self.make_controller([True])
+        controller.next_capture_at = 0.0
+        controller.auto_drink_enabled = True
+        controller.settings.hp_enabled = False
+        controller.settings.mp_enabled = False
+        controller.settings.exp_efficiency_enabled = False
+        controller.pickup_enabled = True
+        controller.settings.pickup_key = "Z"
+        controller.gameplay_hud_active = False
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._save_settings_when_idle = Mock()
+        controller._capture_bar_percents = Mock(return_value=(57.0, 80.0))
+        controller._maybe_drink_hp = Mock()
+        controller._maybe_drink_mp = Mock()
+        controller._stop_experience_ocr_job = Mock()
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot()
+
+        def refresh_hud(now):
+            controller.gameplay_hud_active = True
+            return True
+
+        controller._refresh_gameplay_hud_state = Mock(side_effect=refresh_hud)
+
+        with patch("maple_star.controller.key_down") as key_down:
+            controller.update(100.0)
+
+        controller._refresh_gameplay_hud_state.assert_called_once_with(100.0)
+        controller._capture_bar_percents.assert_not_called()
+        controller._maybe_drink_hp.assert_not_called()
+        controller._maybe_drink_mp.assert_not_called()
+        key_down.assert_called_once_with(0x5A)
+        self.assertEqual(controller.pickup_held_vk, 0x5A)
+        self.assertAlmostEqual(controller.next_capture_at, 100.0 + PICKUP_HUD_REFRESH_INTERVAL_SECONDS)
         controller.gui.set_current_percentages.assert_called_with(None, None)
         controller.gui.set_status.assert_called_with("未勾選紅水或藍水，暫停 HP/MP 檢查")
 
@@ -4150,6 +4312,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         play_media.assert_called_once_with(AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop")
 
     def test_auto_drink_hotkey_long_press_disables_when_enabled(self):
+        self.assertEqual(AUTO_DRINK_DISABLE_HOLD_SECONDS, 0.50)
         controller = self.make_controller([])
         controller.settings.toggle_hotkey = "F11"
         controller.auto_drink_enabled = True
@@ -4180,6 +4343,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         play_media.assert_called_once_with(AUTO_DRINK_START_SOUND_PATH, "auto_drink_start")
 
     def test_auto_drink_toggle_debounce_accepts_next_toggle_after_shortened_interval(self):
+        self.assertEqual(AUTO_DRINK_TOGGLE_DEBOUNCE_SECONDS, 0.08)
         controller = self.make_controller([])
         controller.auto_drink_enabled = False
         controller.toggle_hotkey_was_down = True
@@ -4190,13 +4354,49 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         ):
             controller._try_toggle_scripts_enabled(100.0)
             controller._try_toggle_scripts_enabled(100.0 + AUTO_DRINK_TOGGLE_DEBOUNCE_SECONDS - 0.01)
-            self.assertEqual(controller.auto_drink_disable_hold_started_at, -999.0)
+            self.assertEqual(
+                controller.auto_drink_disable_hold_started_at,
+                100.0 + AUTO_DRINK_TOGGLE_DEBOUNCE_SECONDS - 0.01,
+            )
 
             controller._try_toggle_scripts_enabled(100.0 + AUTO_DRINK_TOGGLE_DEBOUNCE_SECONDS + 0.001)
 
         self.assertTrue(controller.auto_drink_enabled)
-        self.assertEqual(controller.auto_drink_disable_hold_started_at, 100.0 + AUTO_DRINK_TOGGLE_DEBOUNCE_SECONDS + 0.001)
+        self.assertEqual(
+            controller.auto_drink_disable_hold_started_at,
+            100.0 + AUTO_DRINK_TOGGLE_DEBOUNCE_SECONDS - 0.01,
+        )
         play_media.assert_called_once_with(AUTO_DRINK_START_SOUND_PATH, "auto_drink_start")
+
+    def test_auto_drink_can_start_disable_hold_immediately_after_enable(self):
+        controller = self.make_controller([])
+        controller.auto_drink_enabled = False
+        controller.toggle_hotkey_was_down = True
+
+        with (
+            patch.object(controller, "_play_media_file") as play_media,
+            patch("builtins.print"),
+        ):
+            controller._try_toggle_scripts_enabled(100.0)
+            self.assertTrue(controller.auto_drink_enabled)
+
+            disable_hold_started_at = 100.0 + AUTO_DRINK_TOGGLE_DEBOUNCE_SECONDS / 2
+            controller._try_toggle_scripts_enabled(disable_hold_started_at)
+            self.assertEqual(controller.auto_drink_disable_hold_started_at, disable_hold_started_at)
+
+            controller._process_pending_auto_drink_disable(
+                disable_hold_started_at + AUTO_DRINK_DISABLE_HOLD_SECONDS
+            )
+
+        self.assertFalse(controller.auto_drink_enabled)
+        self.assertEqual(controller.auto_drink_disable_hold_started_at, -999.0)
+        self.assertEqual(
+            play_media.call_args_list,
+            [
+                call(AUTO_DRINK_START_SOUND_PATH, "auto_drink_start"),
+                call(AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop"),
+            ],
+        )
 
     def test_enable_disable_hotkeys_are_silently_ignored_outside_game_and_app_foreground(self):
         controller = self.make_controller([False, False, False, False, False])
@@ -4657,6 +4857,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
     def test_pickup_toggle_holds_and_releases_configured_key_with_sounds(self):
         controller = self.make_controller([])
         controller.settings.pickup_key = "Z"
+        controller.gameplay_hud_active = True
 
         with (
             patch("maple_star.controller.key_down") as key_down,
@@ -4673,6 +4874,23 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(play_media.call_args_list[1].args, (AUTO_PICKUP_STOP_SOUND_PATH, "pickup_stop"))
         self.assertFalse(controller.pickup_enabled)
         self.assertEqual(controller.pickup_held_vk, 0)
+
+    def test_pickup_toggle_enables_without_holding_key_when_hud_is_missing(self):
+        controller = self.make_controller([])
+        controller.settings.pickup_key = "Z"
+        controller.gameplay_hud_active = False
+
+        with (
+            patch("maple_star.controller.key_down") as key_down,
+            patch.object(controller, "_play_media_file") as play_media,
+            patch("builtins.print"),
+        ):
+            controller.toggle_pickup_enabled()
+
+        self.assertTrue(controller.pickup_enabled)
+        self.assertEqual(controller.pickup_held_vk, 0)
+        key_down.assert_not_called()
+        play_media.assert_called_once_with(AUTO_PICKUP_START_SOUND_PATH, "pickup_start")
 
     def test_pickup_hotkey_short_press_does_not_disable_when_enabled(self):
         controller = self.make_controller([])
@@ -4696,6 +4914,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         play_media.assert_not_called()
 
     def test_pickup_hotkey_long_press_disables_when_enabled(self):
+        self.assertEqual(PICKUP_DISABLE_HOLD_SECONDS, 0.50)
         controller = self.make_controller([])
         controller.settings.pickup_toggle_hotkey = "F7"
         controller.pickup_enabled = True
@@ -4720,6 +4939,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.settings.pickup_toggle_hotkey = "F7"
         controller.settings.pickup_key = "Z"
         controller.pickup_toggle_hotkey_was_down = True
+        controller.gameplay_hud_active = True
 
         with (
             patch("maple_star.controller.key_down") as key_down,
@@ -4728,14 +4948,54 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         ):
             controller._try_toggle_pickup(200.0)
             controller._try_toggle_pickup(200.0 + PICKUP_TOGGLE_DEBOUNCE_SECONDS - 0.01)
-            self.assertEqual(controller.pickup_disable_hold_started_at, -999.0)
+            self.assertEqual(
+                controller.pickup_disable_hold_started_at,
+                200.0 + PICKUP_TOGGLE_DEBOUNCE_SECONDS - 0.01,
+            )
 
             controller._try_toggle_pickup(200.0 + PICKUP_TOGGLE_DEBOUNCE_SECONDS + 0.001)
 
         self.assertTrue(controller.pickup_enabled)
-        self.assertEqual(controller.pickup_disable_hold_started_at, 200.0 + PICKUP_TOGGLE_DEBOUNCE_SECONDS + 0.001)
+        self.assertEqual(
+            controller.pickup_disable_hold_started_at,
+            200.0 + PICKUP_TOGGLE_DEBOUNCE_SECONDS - 0.01,
+        )
         key_down.assert_called_once_with(0x5A)
         play_media.assert_called_once_with(AUTO_PICKUP_START_SOUND_PATH, "pickup_start")
+
+    def test_pickup_can_start_disable_hold_immediately_after_enable(self):
+        controller = self.make_controller([])
+        controller.settings.pickup_toggle_hotkey = "F7"
+        controller.settings.pickup_key = "Z"
+        controller.pickup_toggle_hotkey_was_down = True
+        controller.gameplay_hud_active = True
+
+        with (
+            patch("maple_star.controller.key_down") as key_down,
+            patch("maple_star.controller.key_up") as key_up,
+            patch.object(controller, "_play_media_file") as play_media,
+            patch("builtins.print"),
+        ):
+            controller._try_toggle_pickup(200.0)
+            self.assertTrue(controller.pickup_enabled)
+
+            disable_hold_started_at = 200.0 + PICKUP_TOGGLE_DEBOUNCE_SECONDS / 2
+            controller._try_toggle_pickup(disable_hold_started_at)
+            self.assertEqual(controller.pickup_disable_hold_started_at, disable_hold_started_at)
+
+            controller._process_pending_pickup_disable(disable_hold_started_at + PICKUP_DISABLE_HOLD_SECONDS)
+
+        self.assertFalse(controller.pickup_enabled)
+        self.assertEqual(controller.pickup_disable_hold_started_at, -999.0)
+        key_down.assert_called_once_with(0x5A)
+        key_up.assert_called_once_with(0x5A)
+        self.assertEqual(
+            play_media.call_args_list,
+            [
+                call(AUTO_PICKUP_START_SOUND_PATH, "pickup_start"),
+                call(AUTO_PICKUP_STOP_SOUND_PATH, "pickup_stop"),
+            ],
+        )
 
     def test_pickup_toggle_without_key_stays_disabled(self):
         controller = self.make_controller([])
@@ -4801,6 +5061,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller = self.make_controller([True, False, True])
         controller.settings.pickup_key = "Z"
         controller.pickup_enabled = True
+        controller.gameplay_hud_active = True
         controller.control_hotkey_worker = None
         controller.next_capture_at = 999.0
         controller.pending_settings_snapshot = controller.settings.snapshot()
@@ -4826,6 +5087,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.settings.pickup_key = "Z"
         controller.pickup_enabled = True
         controller.pickup_held_vk = 0x5A
+        controller.gameplay_hud_active = True
 
         with (
             patch("maple_star.controller.key_down") as key_down,
@@ -4839,6 +5101,42 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         play_media.assert_not_called()
         self.assertTrue(controller.pickup_enabled)
         self.assertEqual(controller.pickup_held_vk, 0x5A)
+
+    def test_pickup_releases_when_hud_becomes_inactive(self):
+        controller = self.make_controller([])
+        controller.pickup_enabled = True
+        controller.pickup_held_vk = 0x5A
+
+        with patch("maple_star.controller.key_up") as key_up:
+            controller._set_gameplay_hud_active(False, 100.0)
+
+        key_up.assert_called_once_with(0x5A)
+        self.assertTrue(controller.pickup_enabled)
+        self.assertEqual(controller.pickup_held_vk, 0)
+
+    def test_pickup_releases_when_hud_refresh_fails(self):
+        controller = self.make_controller([True])
+        controller.settings.pickup_key = "Z"
+        controller.pickup_enabled = True
+        controller.pickup_held_vk = 0x5A
+        controller.gameplay_hud_active = True
+        controller.control_hotkey_worker = None
+        controller.next_capture_at = 0.0
+        controller.pending_settings_snapshot = controller.settings.snapshot()
+        controller.next_settings_save_at = None
+        controller.gui.pump.return_value = True
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._save_settings_when_idle = Mock()
+        controller._transition_pause_reason = Mock(return_value=None)
+        controller._refresh_gameplay_hud_state = Mock(return_value=False)
+
+        with patch("maple_star.controller.key_up") as key_up:
+            controller.update(100.0)
+
+        key_up.assert_called_once_with(0x5A)
+        self.assertTrue(controller.pickup_enabled)
+        self.assertEqual(controller.pickup_held_vk, 0)
+        controller.gui.set_status.assert_called_with("未偵測到遊戲 HUD，暫停取樣")
 
     def test_cleanup_releases_pickup_key(self):
         controller = self.make_controller([])

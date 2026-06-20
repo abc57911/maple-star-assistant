@@ -1,14 +1,18 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from maple_gamepad_macro import (
+    DEFAULT_ATTACK_KEY_HOLD_SECONDS,
+    HoldJumpAttackLoopMacro,
     build_controller_button_bindings,
+    effective_hold_jump_attack_interval_seconds,
     effective_repeating_jump_interval_seconds,
     first_enabled_controller_binding,
     sync_runtime_settings_before_controller_events,
 )
 from maple_star.controller_worker import CONTROLLER_BUTTONS_BY_NAME
-from maple_star.settings import AutoPotionSettings
+from maple_star.settings import AutoPotionSettings, COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP
 
 
 class GamepadMacroTests(unittest.TestCase):
@@ -146,6 +150,143 @@ class GamepadMacroTests(unittest.TestCase):
         }
 
         self.assertAlmostEqual(effective_repeating_jump_interval_seconds(slot), 0.06)
+
+    def test_hold_jump_attack_interval_respects_attack_hold_floor(self):
+        slot = {
+            "jump_interval_seconds": 0.2,
+        }
+
+        self.assertAlmostEqual(effective_hold_jump_attack_interval_seconds(slot), DEFAULT_ATTACK_KEY_HOLD_SECONDS + 0.01)
+
+    def test_hold_jump_attack_loop_holds_jump_and_cycles_attack(self):
+        settings = AutoPotionSettings(
+            combo_slots={
+                "A": {
+                    "enabled": True,
+                    "script_id": COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP,
+                    "trigger_button": "RB",
+                    "jump_key": "X",
+                    "attack_key": "C",
+                    "attack_hold_seconds": 0.4,
+                    "jump_interval_seconds": 1.2,
+                }
+            }
+        )
+        macro = HoldJumpAttackLoopMacro(settings, "A", "組合A")
+        events: list[tuple[str, int]] = []
+
+        def parse_key(key: str) -> int:
+            return {"X": 1, "C": 2}[key]
+
+        with (
+            patch("maple_star.controllers.gamepad_controller.foreground_window_title", return_value="MSW"),
+            patch("maple_star.controllers.gamepad_controller.is_target_window_active", return_value=True),
+            patch("maple_star.controllers.gamepad_controller.time.monotonic", return_value=100.0),
+            patch("maple_star.controllers.gamepad_controller.parse_vk_key", side_effect=parse_key),
+            patch("maple_star.controllers.gamepad_controller.key_down", side_effect=lambda vk: events.append(("down", vk))),
+            patch("maple_star.controllers.gamepad_controller.key_up", side_effect=lambda vk: events.append(("up", vk))),
+        ):
+            macro.on_button_down()
+            macro.update(100.1)
+            macro.update(100.4)
+            macro.update(101.2)
+            macro.on_button_up()
+
+        self.assertEqual(
+            events,
+            [
+                ("down", 1),
+                ("down", 2),
+                ("down", 1),
+                ("up", 2),
+                ("down", 1),
+                ("down", 1),
+                ("down", 2),
+                ("up", 2),
+                ("up", 1),
+            ],
+        )
+
+    def test_hold_jump_attack_interval_respects_configured_attack_hold(self):
+        slot = {
+            "attack_hold_seconds": 1.8,
+            "jump_interval_seconds": 0.2,
+        }
+
+        self.assertAlmostEqual(effective_hold_jump_attack_interval_seconds(slot), 1.81)
+
+    def test_hold_jump_attack_loop_waits_for_configured_start_delay(self):
+        settings = AutoPotionSettings(
+            combo_slots={
+                "A": {
+                    "enabled": True,
+                    "script_id": COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP,
+                    "trigger_button": "RB",
+                    "jump_key": "X",
+                    "attack_key": "C",
+                    "attack_start_delay_seconds": 0.3,
+                    "attack_hold_seconds": 0.4,
+                    "jump_interval_seconds": 1.2,
+                }
+            }
+        )
+        macro = HoldJumpAttackLoopMacro(settings, "A", "組合A")
+        events: list[tuple[str, int]] = []
+
+        def parse_key(key: str) -> int:
+            return {"X": 1, "C": 2}[key]
+
+        with (
+            patch("maple_star.controllers.gamepad_controller.foreground_window_title", return_value="MSW"),
+            patch("maple_star.controllers.gamepad_controller.is_target_window_active", return_value=True),
+            patch("maple_star.controllers.gamepad_controller.time.monotonic", return_value=100.0),
+            patch("maple_star.controllers.gamepad_controller.parse_vk_key", side_effect=parse_key),
+            patch("maple_star.controllers.gamepad_controller.key_down", side_effect=lambda vk: events.append(("down", vk))),
+            patch("maple_star.controllers.gamepad_controller.key_up", side_effect=lambda vk: events.append(("up", vk))),
+        ):
+            macro.on_button_down()
+            macro.update(100.1)
+            macro.update(100.29)
+            macro.update(100.3)
+            macro.on_button_up()
+
+        self.assertEqual(
+            events,
+            [
+                ("down", 1),
+                ("down", 1),
+                ("down", 1),
+                ("down", 2),
+                ("up", 2),
+                ("up", 1),
+            ],
+        )
+
+    def test_hold_jump_attack_loop_rejects_same_jump_and_attack_key(self):
+        settings = AutoPotionSettings(
+            combo_slots={
+                "A": {
+                    "enabled": True,
+                    "script_id": COMBO_SCRIPT_HOLD_JUMP_ATTACK_LOOP,
+                    "trigger_button": "RB",
+                    "jump_key": "X",
+                    "attack_key": "X",
+                }
+            }
+        )
+        macro = HoldJumpAttackLoopMacro(settings, "A", "組合A")
+        events: list[tuple[str, int]] = []
+
+        with (
+            patch("maple_star.controllers.gamepad_controller.foreground_window_title", return_value="MSW"),
+            patch("maple_star.controllers.gamepad_controller.is_target_window_active", return_value=True),
+            patch("maple_star.controllers.gamepad_controller.parse_vk_key", return_value=1),
+            patch("maple_star.controllers.gamepad_controller.key_down", side_effect=lambda vk: events.append(("down", vk))),
+        ):
+            macro.on_button_down()
+
+        self.assertFalse(macro.active)
+        self.assertEqual(events, [])
 
 
 if __name__ == "__main__":

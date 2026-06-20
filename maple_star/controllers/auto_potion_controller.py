@@ -65,6 +65,7 @@ from ..constants import (
     LOADING_GUARD_LOW_SATURATION_RATIO,
     LOADING_GUARD_MEAN_LUMINANCE,
     PICKUP_DISABLE_HOLD_SECONDS,
+    PICKUP_HUD_REFRESH_INTERVAL_SECONDS,
     PICKUP_TOGGLE_DEBOUNCE_SECONDS,
     PM_REMOVE,
     POTION_EFFECT_AUTO_HOLD_BAR_TYPES,
@@ -490,6 +491,9 @@ class AutoPotionController:
         self.experience_baseline_calibration_attempts = 0
         self.next_experience_baseline_calibration_at = 0.0
         self.experience_tooltip_baseline_failed = False
+        self.experience_initial_tooltip_baseline_started_at: float | None = (
+            time.monotonic() if bool(getattr(self.settings, "exp_efficiency_enabled", False)) else None
+        )
         self.experience_10m_checkpoint_capture: ExperienceBaselineCalibration | None = None
         self.experience_10m_checkpoint_ocr_job: ExperienceOcrJob | None = None
         self.next_experience_10m_checkpoint_at = 0.0
@@ -638,16 +642,21 @@ class AutoPotionController:
             return
         self._save_settings_when_idle(now)
         target_active = self.is_target_window_active()
-        if target_active and not self.is_key_capture_blocking_actions():
-            self._sync_pickup_key_state()
-        else:
+        key_capture_blocking = self.is_key_capture_blocking_actions()
+        if not target_active or key_capture_blocking:
             self._release_pickup_key()
-            if self.is_key_capture_blocking_actions():
+            if key_capture_blocking:
                 self._send_runtime_release_all_potions()
         self._send_runtime_target_if_needed()
         self._send_runtime_settings_if_needed()
         self._send_runtime_controls_if_needed()
         self._drain_runtime_statuses()
+        if target_active and not key_capture_blocking:
+            if self._pickup_needs_local_hud_refresh(now):
+                self.next_capture_at = now + PICKUP_HUD_REFRESH_INTERVAL_SECONDS
+                self._refresh_pickup_key_state_for_hud(now)
+            else:
+                self._sync_pickup_key_state()
         self._report_runtime_worker_failures()
         self._recover_stale_runtime_potion_process(now)
 
@@ -722,7 +731,8 @@ class AutoPotionController:
         self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
 
     def _apply_potion_status(self, status: PotionStatus) -> None:
-        self.last_runtime_potion_status_at = time.monotonic()
+        now = time.monotonic()
+        self.last_runtime_potion_status_at = now
         signature = _potion_status_signature(status)
         if (
             signature == getattr(self, "last_applied_potion_status_signature", None)
@@ -731,7 +741,7 @@ class AutoPotionController:
         ):
             return
         self.last_applied_potion_status_signature = signature
-        self.gameplay_hud_active = status.gameplay_hud_active
+        self._set_gameplay_hud_active(status.gameplay_hud_active, now)
         self.gui.set_current_percentages(status.hp_percent, status.mp_percent)
         self.gui.set_bar_detection_debug(status.hp_debug, status.mp_debug)
         self._apply_runtime_bar_detection_region(
@@ -1244,14 +1254,19 @@ class AutoPotionController:
         self.emergency_stop()
 
     def _try_toggle_scripts_enabled(self, now: float) -> None:
+        starts_disable_hold = self.auto_drink_enabled and not self._has_out_of_potion_hold()
+        if starts_disable_hold:
+            if self.auto_drink_disable_hold_started_at >= 0:
+                return
+            if not self._control_hotkey_requires_allowed_foreground("停用自動喝水"):
+                return
+            self.auto_drink_disable_hold_started_at = now
+            print(f"自動喝水停用確認：按住 {self.settings.toggle_hotkey} {AUTO_DRINK_DISABLE_HOLD_SECONDS:.2f} 秒")
+            return
         if now - self.last_toggle_hotkey_at < AUTO_DRINK_TOGGLE_DEBOUNCE_SECONDS:
             return
         self.last_toggle_hotkey_at = now
         if not self._control_hotkey_requires_allowed_foreground("切換自動喝水"):
-            return
-        if self.auto_drink_enabled and not self._has_out_of_potion_hold():
-            self.auto_drink_disable_hold_started_at = now
-            print(f"自動喝水停用確認：按住 {self.settings.toggle_hotkey} {AUTO_DRINK_DISABLE_HOLD_SECONDS:.2f} 秒")
             return
         self.toggle_auto_drink_enabled()
 
@@ -1278,6 +1293,14 @@ class AutoPotionController:
         print(f"{self.settings.experience_reset_hotkey}：經驗統計已重置")
 
     def _try_toggle_pickup(self, now: float) -> None:
+        if self.pickup_enabled:
+            if self.pickup_disable_hold_started_at >= 0:
+                return
+            if not self._control_hotkey_requires_allowed_foreground("停用拾取"):
+                return
+            self.pickup_disable_hold_started_at = now
+            print(f"拾取停用確認：按住 {self.settings.pickup_toggle_hotkey} {PICKUP_DISABLE_HOLD_SECONDS:.2f} 秒")
+            return
         if now - self.last_pickup_toggle_hotkey_at < PICKUP_TOGGLE_DEBOUNCE_SECONDS:
             return
         self.last_pickup_toggle_hotkey_at = now
@@ -1289,10 +1312,6 @@ class AutoPotionController:
             f"held_vk={getattr(self, 'pickup_held_vk', 0)} "
             f"toggle_down={self.pickup_toggle_hotkey_was_down}"
         )
-        if self.pickup_enabled:
-            self.pickup_disable_hold_started_at = now
-            print(f"拾取停用確認：按住 {self.settings.pickup_toggle_hotkey} {PICKUP_DISABLE_HOLD_SECONDS:.2f} 秒")
-            return
         self.toggle_pickup_enabled()
 
     def _process_pending_auto_drink_disable(self, now: float) -> None:
@@ -1373,7 +1392,12 @@ class AutoPotionController:
         print("拾取：已啟用")
 
     def _sync_pickup_key_state(self) -> None:
-        if not self.pickup_enabled or not self.scripts_enabled or self.is_key_capture_blocking_actions():
+        if (
+            not self.pickup_enabled
+            or not self.scripts_enabled
+            or not self.gameplay_hud_active
+            or self.is_key_capture_blocking_actions()
+        ):
             self._release_pickup_key()
             return
 
@@ -1397,6 +1421,28 @@ class AutoPotionController:
         self._release_pickup_key()
         key_down(pickup_vk)
         self.pickup_held_vk = pickup_vk
+
+    def _pickup_needs_local_hud_refresh(self, now: float) -> bool:
+        if now < getattr(self, "next_capture_at", 0.0):
+            return False
+        return self._pickup_requires_local_hud_refresh()
+
+    def _pickup_requires_local_hud_refresh(self) -> bool:
+        if not getattr(self, "pickup_enabled", False):
+            return False
+        return (
+            not getattr(self, "auto_drink_enabled", False)
+            or not self._has_enabled_potion_bar()
+            or not getattr(self, "gameplay_hud_active", False)
+        )
+
+    def _refresh_pickup_key_state_for_hud(self, now: float) -> None:
+        if not getattr(self, "pickup_enabled", False):
+            return
+        if self._refresh_gameplay_hud_state(now):
+            self._sync_pickup_key_state()
+        else:
+            self._release_pickup_key()
 
     def _release_pickup_key(self) -> None:
         held_vk = getattr(self, "pickup_held_vk", 0)
@@ -1613,6 +1659,7 @@ class AutoPotionController:
             self.next_experience_capture_at = 0.0
             if not getattr(self.experience_tracker, "samples", []):
                 self._reset_experience_baseline_calibration_attempts()
+                self._mark_initial_experience_tooltip_baseline_start(now)
             self.experience_tracker.clear_transient_rejection()
             snapshot = self.experience_tracker.snapshot(effective_now)
             snapshot.status = "等待下一次 EXP 樣本" if snapshot.sample_count else "等待有效 EXP 樣本"
@@ -1625,6 +1672,7 @@ class AutoPotionController:
             return
 
         self._stop_experience_ocr_job()
+        self.experience_initial_tooltip_baseline_started_at = None
         effective_now = self._pause_experience_clock(now)
         snapshot = self.experience_tracker.snapshot(effective_now)
         snapshot.status = "已停用，保留統計" if snapshot.sample_count else "已停用"
@@ -1860,6 +1908,7 @@ class AutoPotionController:
                 return
 
             if not self._refresh_gameplay_hud_state(now):
+                self._release_pickup_key()
                 self._release_all_potion_keys()
                 self._pause_experience_for_missing_hud(now)
                 self.gui.set_status("未偵測到遊戲 HUD，暫停取樣")
@@ -1870,6 +1919,7 @@ class AutoPotionController:
                 )
                 return
 
+            self._sync_pickup_key_state()
             hp_percent, mp_percent = self._capture_bar_percents()
             self.next_capture_at = now + self._capture_interval_after_potion_sample(hp_percent, mp_percent)
             self.gui.set_current_percentages(hp_percent, mp_percent)
@@ -1924,6 +1974,11 @@ class AutoPotionController:
         self._release_all_potion_keys()
         self.gui.set_current_percentages(None, None)
         self.gui.set_status(status)
+        if self._pickup_requires_local_hud_refresh():
+            self.next_capture_at = now + PICKUP_HUD_REFRESH_INTERVAL_SECONDS
+            self._refresh_pickup_key_state_for_hud(now)
+        else:
+            self._sync_pickup_key_state()
 
         try:
             if self.settings.exp_efficiency_enabled:
@@ -2042,6 +2097,10 @@ class AutoPotionController:
         self.next_experience_capture_at = 0.0
         self._reset_exp_10m_checkpoint_state()
         self._reset_experience_baseline_calibration_attempts()
+        if getattr(self.settings, "exp_efficiency_enabled", False):
+            self._mark_initial_experience_tooltip_baseline_start(time.monotonic())
+        else:
+            self.experience_initial_tooltip_baseline_started_at = None
         return True
 
     def _experience_effective_time(self, now: float) -> float:
@@ -2073,6 +2132,7 @@ class AutoPotionController:
         self.gameplay_hud_active = active
         if active:
             return
+        self._release_pickup_key()
         self.last_hp_drink_at = now
         self.last_mp_drink_at = now
 
@@ -2421,6 +2481,8 @@ class AutoPotionController:
     ) -> bool:
         observer = getattr(self, "mouse_activity_observer", None)
         last_activity_at = getattr(observer, "last_activity_at", -999.0) if observer is not None else -999.0
+        if self._should_ignore_initial_tooltip_baseline_mouse_activity(phase, last_activity_at):
+            return False
         defer_until = float(last_activity_at) + EXPERIENCE_MOUSE_IDLE_DELAY_SECONDS
         if now >= defer_until:
             return False
@@ -2476,6 +2538,31 @@ class AutoPotionController:
                 "ocr_success_count": self._experience_debug_number(snapshot.ocr_success_count),
             }
         )
+
+    def _mark_initial_experience_tooltip_baseline_start(self, now: float) -> None:
+        samples = getattr(self.experience_tracker, "samples", [])
+        if isinstance(samples, list) and samples:
+            self.experience_initial_tooltip_baseline_started_at = None
+            return
+        self.experience_initial_tooltip_baseline_started_at = float(now)
+
+    def _should_ignore_initial_tooltip_baseline_mouse_activity(
+        self,
+        phase: str,
+        last_activity_at: float,
+    ) -> bool:
+        if phase != "tooltip_baseline":
+            return False
+        started_at = getattr(self, "experience_initial_tooltip_baseline_started_at", None)
+        if started_at is None:
+            return False
+        samples = getattr(self.experience_tracker, "samples", [])
+        if not isinstance(samples, list) or samples:
+            return False
+        try:
+            return float(last_activity_at) <= float(started_at)
+        except (TypeError, ValueError):
+            return False
 
     def _last_experience_tooltip_skip_was_mouse_drift(self) -> bool:
         details = getattr(self, "last_experience_tooltip_capture_skip", None)
@@ -2540,7 +2627,11 @@ class AutoPotionController:
                 return True
             return False
         image_signature = self._experience_ocr_image_signature([[ocr_image]])
-        future = self.experience_ocr_executor.submit(read_experience_tooltip_in_worker, ocr_image)
+        continuity_hint = self._experience_ocr_continuity_hint(effective_now)
+        if continuity_hint is None:
+            future = self.experience_ocr_executor.submit(read_experience_tooltip_in_worker, ocr_image)
+        else:
+            future = self.experience_ocr_executor.submit(read_experience_tooltip_in_worker, ocr_image, continuity_hint)
         self.experience_ocr_job = ExperienceOcrJob(
             submitted_at=now,
             future=future,

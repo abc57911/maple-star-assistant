@@ -1765,7 +1765,12 @@ class PaddleExperienceTextReader:
         final = best_reading or ExperienceTextReading(reason="能力值 EXP OCR 未取得文字", source="stat_window")
         return final
 
-    def read_tooltip_exp(self, image: np.ndarray | ExperienceOcrImage) -> ExperienceTextReading:
+    def read_tooltip_exp(
+        self,
+        image: np.ndarray | ExperienceOcrImage,
+        *,
+        continuity_hint: ExperienceOcrContinuityHint | None = None,
+    ) -> ExperienceTextReading:
         ocr_image = _coerce_experience_ocr_image(image)
         if not self._ensure_ocr():
             return ExperienceTextReading(
@@ -1775,6 +1780,7 @@ class PaddleExperienceTextReader:
 
         best_reading: ExperienceTextReading | None = None
         selected_variant_index: int | None = None
+        variant_attempts: list[dict[str, object]] = []
         predict_count = 0
         started_at = time.perf_counter()
 
@@ -1788,10 +1794,16 @@ class PaddleExperienceTextReader:
                 except Exception as exc:
                     reading = ExperienceTextReading(reason=f"浮動 EXP OCR 辨識失敗：{exc}", source="tooltip")
                 else:
-                    reading = reading_from_tooltip_paddle_result(result)
+                    reading = reading_from_tooltip_paddle_result(result, continuity_hint=continuity_hint)
                 if reading.success:
-                    selected_variant_index = variant_index
-                    return reading
+                    guarded = _apply_experience_ocr_continuity_guard(reading, continuity_hint)
+                    variant_attempts.append(_tooltip_ocr_variant_attempt(variant_index, guarded))
+                    if guarded.success:
+                        selected_variant_index = variant_index
+                        return guarded
+                    reading = guarded
+                else:
+                    variant_attempts.append(_tooltip_ocr_variant_attempt(variant_index, reading))
                 if best_reading is None or reading.confidence > best_reading.confidence:
                     best_reading = reading
             return None
@@ -1813,23 +1825,26 @@ class PaddleExperienceTextReader:
             "success": bool(final.success),
             "reason": final.reason,
         }
+        if not final.success:
+            self.last_tooltip_ocr_telemetry["variant_attempts"] = variant_attempts
         self._log_tooltip_ocr_telemetry(self.last_tooltip_ocr_telemetry)
         return final
 
     def _log_tooltip_ocr_telemetry(self, telemetry: dict[str, object]) -> None:
+        payload = {
+            "event": "experience_tooltip_ocr",
+            "source": "tooltip",
+            "predict_count": telemetry.get("predict_count"),
+            "variant_count": telemetry.get("variant_count"),
+            "selected_variant_index": telemetry.get("selected_variant_index"),
+            "elapsed_ms": telemetry.get("elapsed_ms"),
+            "success": telemetry.get("success"),
+            "reason": telemetry.get("reason"),
+        }
+        if not telemetry.get("success") and telemetry.get("variant_attempts"):
+            payload["variant_attempts"] = telemetry.get("variant_attempts")
         try:
-            log_experience_debug(
-                {
-                    "event": "experience_tooltip_ocr",
-                    "source": "tooltip",
-                    "predict_count": telemetry.get("predict_count"),
-                    "variant_count": telemetry.get("variant_count"),
-                    "selected_variant_index": telemetry.get("selected_variant_index"),
-                    "elapsed_ms": telemetry.get("elapsed_ms"),
-                    "success": telemetry.get("success"),
-                    "reason": telemetry.get("reason"),
-                }
-            )
+            log_experience_debug(payload)
         except Exception:
             pass
 
@@ -1933,6 +1948,17 @@ class PaddleExperienceTextReader:
         return self.ocr.ocr(image, cls=False)
 
 
+def _tooltip_ocr_variant_attempt(variant_index: int, reading: ExperienceTextReading) -> dict[str, object]:
+    return {
+        "variant_index": variant_index,
+        "success": bool(reading.success),
+        "text": reading.text,
+        "confidence": reading.confidence,
+        "reason": reading.reason,
+        "continuity_status": reading.continuity_status,
+    }
+
+
 _EXPERIENCE_WORKER_READER: PaddleExperienceTextReader | None = None
 
 
@@ -1957,8 +1983,11 @@ def read_stat_window_exp_in_worker(image: np.ndarray | ExperienceOcrImage) -> Ex
     return _experience_worker_reader().read_stat_window_exp(image)
 
 
-def read_experience_tooltip_in_worker(image: np.ndarray | ExperienceOcrImage) -> ExperienceTextReading:
-    return _experience_worker_reader().read_tooltip_exp(image)
+def read_experience_tooltip_in_worker(
+    image: np.ndarray | ExperienceOcrImage,
+    continuity_hint: ExperienceOcrContinuityHint | None = None,
+) -> ExperienceTextReading:
+    return _experience_worker_reader().read_tooltip_exp(image, continuity_hint=continuity_hint)
 
 
 def prepare_experience_ocr_image(image: np.ndarray) -> np.ndarray:
@@ -2096,6 +2125,7 @@ def prepare_experience_tooltip_ocr_images(image: np.ndarray, *, include_retry: b
         return [bgr]
 
     cropped = _crop_experience_tooltip_text_image(bgr)
+    prefix_stripped = _strip_experience_tooltip_exp_prefix_image(cropped)
     padding = max(5, round(max(1, cropped.shape[0]) * 0.24))
     padded = cv2.copyMakeBorder(
         cropped,
@@ -2113,11 +2143,31 @@ def prepare_experience_tooltip_ocr_images(image: np.ndarray, *, include_retry: b
         ),
         interpolation=cv2.INTER_CUBIC,
     )
+    scaled_prefix_stripped = None
+    if prefix_stripped is not None:
+        stripped_padding = max(5, round(max(1, prefix_stripped.shape[0]) * 0.24))
+        stripped_padded = cv2.copyMakeBorder(
+            prefix_stripped,
+            stripped_padding,
+            stripped_padding,
+            stripped_padding,
+            stripped_padding,
+            borderType=cv2.BORDER_REPLICATE,
+        )
+        scaled_prefix_stripped = cv2.resize(
+            stripped_padded,
+            (
+                max(1, stripped_padded.shape[1] * EXP_STAT_WINDOW_OCR_PREPARED_SCALE),
+                max(1, stripped_padded.shape[0] * EXP_STAT_WINDOW_OCR_PREPARED_SCALE),
+            ),
+            interpolation=cv2.INTER_CUBIC,
+        )
     binary = _binarize_experience_tooltip_text_image(scaled)
     variants = [cropped, scaled, bgr]
     if binary is not None:
         variants.append(binary)
     if include_retry:
+        variants.extend(variant for variant in (prefix_stripped, scaled_prefix_stripped) if variant is not None)
         contrast = cv2.convertScaleAbs(scaled, alpha=1.55, beta=8)
         sharpened = _sharpen_experience_text_image(contrast)
         variants.extend([contrast, sharpened])
@@ -2150,7 +2200,8 @@ def _crop_experience_tooltip_text_image(image: np.ndarray) -> np.ndarray:
         if line_xs.size and line_ys.size:
             top = max(0, row_top + int(line_ys.min()) - 4)
             bottom = min(bgr.shape[0], row_top + int(line_ys.max()) + 5)
-            left = max(0, int(line_xs.min()) - 6)
+            left_padding = max(12, round((row_bottom - row_top) * 1.2))
+            left = max(0, int(line_xs.min()) - left_padding)
             right = min(bgr.shape[1], int(line_xs.max()) + 7)
             if right - left >= 20 and bottom - top >= 8:
                 return bgr[top:bottom, left:right].copy()
@@ -2160,11 +2211,52 @@ def _crop_experience_tooltip_text_image(image: np.ndarray) -> np.ndarray:
         return bgr
     top = max(0, int(ys.min()) - 4)
     bottom = min(bgr.shape[0], int(ys.max()) + 5)
-    left = max(0, int(xs.min()) - 6)
+    left_padding = max(12, round((bottom - top) * 1.2))
+    left = max(0, int(xs.min()) - left_padding)
     right = min(bgr.shape[1], int(xs.max()) + 7)
     if right - left < 20 or bottom - top < 8:
         return bgr
     return bgr[top:bottom, left:right].copy()
+
+
+def _strip_experience_tooltip_exp_prefix_image(image: np.ndarray) -> np.ndarray | None:
+    bgr = image[:, :, :3]
+    if bgr.size == 0 or bgr.shape[1] < 40:
+        return None
+    sample = bgr.astype(np.float32)
+    blue = sample[:, :, 0]
+    green = sample[:, :, 1]
+    red = sample[:, :, 2]
+    luminance = red * 0.299 + green * 0.587 + blue * 0.114
+    chroma = np.maximum.reduce([red, green, blue]) - np.minimum.reduce([red, green, blue])
+    mask = (luminance >= 135.0) & (chroma <= 95.0)
+    ys, xs = np.nonzero(mask)
+    if not xs.size or not ys.size:
+        return None
+
+    content_left = int(xs.min())
+    content_right = int(xs.max()) + 1
+    line_height = int(ys.max()) - int(ys.min()) + 1
+    prefix_probe_right = min(mask.shape[1], content_left + max(18, round(line_height * 3.4)))
+    if prefix_probe_right <= content_left:
+        return None
+
+    column_active = mask[:, content_left:prefix_probe_right].sum(axis=0) >= max(1, round(line_height * 0.12))
+    edges = np.flatnonzero(np.diff(np.concatenate(([False], column_active, [False]))))
+    runs = [(int(start), int(end)) for start, end in zip(edges[::2], edges[1::2]) if end - start >= 2]
+    if len(runs) < 3:
+        return None
+
+    third_run_end = content_left + runs[2][1]
+    min_digit_start = third_run_end + max(2, round(line_height * 0.18))
+    active_after_prefix = np.flatnonzero(mask[:, min_digit_start:content_right].sum(axis=0) >= max(1, round(line_height * 0.12)))
+    if active_after_prefix.size == 0:
+        return None
+
+    strip_left = max(0, min_digit_start + int(active_after_prefix[0]) - 2)
+    if strip_left <= content_left or content_right - strip_left < 24:
+        return None
+    return bgr[:, strip_left:].copy()
 
 
 def _experience_tooltip_exp_line_band(mask: np.ndarray) -> tuple[int, int] | None:
@@ -4023,12 +4115,16 @@ def reading_from_stat_window_paddle_result(result: object) -> ExperienceTextRead
     return reading_from_stat_window_text(text, confidence)
 
 
-def reading_from_tooltip_paddle_result(result: object) -> ExperienceTextReading:
+def reading_from_tooltip_paddle_result(
+    result: object,
+    *,
+    continuity_hint: ExperienceOcrContinuityHint | None = None,
+) -> ExperienceTextReading:
     text_items = extract_paddle_text_items(result)
     text = " ".join(item_text for item_text, _score in text_items).strip()
     confidence_values = [score for _item_text, score in text_items if score is not None]
     confidence = float(np.mean(confidence_values)) if confidence_values else 0.0
-    candidates = [reading_from_tooltip_text(text, confidence)]
+    candidates = [reading_from_tooltip_text(text, confidence, continuity_hint=continuity_hint)]
     non_empty_items = [(item_text.strip(), item_score) for item_text, item_score in text_items if item_text.strip()]
     for start_index in range(len(non_empty_items)):
         for end_index in range(start_index + 1, len(non_empty_items) + 1):
@@ -4036,7 +4132,7 @@ def reading_from_tooltip_paddle_result(result: object) -> ExperienceTextReading:
             item_text = " ".join(item_text for item_text, _item_score in item_slice)
             item_scores = [item_score for _item_text, item_score in item_slice if item_score is not None]
             item_confidence = float(np.mean(item_scores)) if item_scores else 0.0
-            candidates.append(reading_from_tooltip_text(item_text, item_confidence))
+            candidates.append(reading_from_tooltip_text(item_text, item_confidence, continuity_hint=continuity_hint))
     return max(candidates, key=lambda reading: (reading.success, reading.confidence))
 
 
@@ -4068,8 +4164,13 @@ def reading_from_stat_window_text(text: str, confidence: float = 1.0) -> Experie
     )
 
 
-def reading_from_tooltip_text(text: str, confidence: float = 1.0) -> ExperienceTextReading:
-    parsed = parse_experience_tooltip_text(text)
+def reading_from_tooltip_text(
+    text: str,
+    confidence: float = 1.0,
+    *,
+    continuity_hint: ExperienceOcrContinuityHint | None = None,
+) -> ExperienceTextReading:
+    parsed = parse_experience_tooltip_text(text, continuity_hint=continuity_hint)
     if parsed is None:
         return ExperienceTextReading(
             text=text,
@@ -4135,7 +4236,10 @@ def parse_stat_window_exp_text(text: str) -> tuple[int, float] | None:
     return None
 
 
-def parse_experience_tooltip_text(text: str) -> tuple[int, int, float] | None:
+def parse_experience_tooltip_text(
+    text: str,
+    continuity_hint: ExperienceOcrContinuityHint | None = None,
+) -> tuple[int, int, float] | None:
     if not text:
         return None
 
@@ -4166,7 +4270,11 @@ def parse_experience_tooltip_text(text: str) -> tuple[int, int, float] | None:
     if not source_pairs:
         return None
     for parse_source, preserved_source in source_pairs:
-        parsed = _parse_experience_tooltip_source(parse_source, preserved_source)
+        parsed = _parse_experience_tooltip_source(
+            parse_source,
+            preserved_source,
+            continuity_hint=continuity_hint,
+        )
         if parsed is not None:
             return parsed
     return None
@@ -4187,7 +4295,12 @@ def _experience_tooltip_parse_sources(upper: str, preserved_upper: str) -> list[
     return [(upper, preserved_upper)]
 
 
-def _parse_experience_tooltip_source(parse_source: str, preserved_source: str) -> tuple[int, int, float] | None:
+def _parse_experience_tooltip_source(
+    parse_source: str,
+    preserved_source: str,
+    *,
+    continuity_hint: ExperienceOcrContinuityHint | None = None,
+) -> tuple[int, int, float] | None:
     matches = list(re.finditer(r"([0-9][0-9,.]*)/([0-9][0-9,.]*)", parse_source))
     matches.extend(re.finditer(r"([0-9][0-9,.]*)\s+7\s+([0-9][0-9,.]*)", preserved_source))
     for match in reversed(matches):
@@ -4214,11 +4327,60 @@ def _parse_experience_tooltip_source(parse_source: str, preserved_source: str) -
             continue
         current_digits = digits[:separator_index]
         total_digits = digits[separator_index + 1 :]
+        if len(current_digits) < 4 or current_digits.startswith("0"):
+            continue
         current_exp = int(current_digits)
         total_exp = int(total_digits)
         if total_exp <= 0 or current_exp > total_exp:
             continue
-        return current_exp, total_exp, round(current_exp / total_exp * 100.0, 2)
+        percent = round(current_exp / total_exp * 100.0, 2)
+        leading_digit_alternative = _merged_tooltip_leading_digit_alternative(digits, separator_index, total_digits)
+        if leading_digit_alternative is not None:
+            if continuity_hint is None:
+                return None
+            alternative_current_exp, alternative_total_exp, alternative_percent = leading_digit_alternative
+            if alternative_total_exp != total_exp:
+                return None
+            current_status = _experience_ocr_continuity_status(current_exp, percent, continuity_hint)
+            alternative_status = _experience_ocr_continuity_status(
+                alternative_current_exp,
+                alternative_percent,
+                continuity_hint,
+            )
+            if current_status == "compatible" and alternative_status != "compatible":
+                pass
+            elif _continuity_group_rank(current_exp, percent, continuity_hint) <= _continuity_group_rank(
+                alternative_current_exp,
+                alternative_percent,
+                continuity_hint,
+            ):
+                return None
+        return current_exp, total_exp, percent
+    return None
+
+
+def _merged_tooltip_leading_digit_alternative(
+    digits: str,
+    separator_index: int,
+    total_digits: str,
+) -> tuple[int, int, float] | None:
+    if separator_index <= 1 or not digits:
+        return None
+    trimmed_digits = digits[1:]
+    for total_length in range(7, min(12, len(trimmed_digits) - 2) + 1):
+        trimmed_separator_index = len(trimmed_digits) - total_length - 1
+        if trimmed_separator_index <= 0 or trimmed_digits[trimmed_separator_index] != "7":
+            continue
+        trimmed_current_digits = trimmed_digits[:trimmed_separator_index]
+        trimmed_total_digits = trimmed_digits[trimmed_separator_index + 1 :]
+        if trimmed_total_digits != total_digits:
+            continue
+        if not trimmed_current_digits or trimmed_current_digits.startswith("0"):
+            continue
+        trimmed_current_exp = int(trimmed_current_digits)
+        trimmed_total_exp = int(trimmed_total_digits)
+        if trimmed_total_exp > 0 and trimmed_current_exp <= trimmed_total_exp:
+            return trimmed_current_exp, trimmed_total_exp, round(trimmed_current_exp / trimmed_total_exp * 100.0, 2)
     return None
 
 
