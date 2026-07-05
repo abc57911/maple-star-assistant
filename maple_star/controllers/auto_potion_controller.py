@@ -84,6 +84,7 @@ from ..constants import (
     POTION_EFFECT_WATCH_CHANGE_TOLERANCE_PERCENT,
     POTION_EFFECT_WATCH_VOLATILITY_TOLERANCE_PERCENT,
     POTION_CONTINUOUS_HOLD_REFRESH_SECONDS,
+    POTION_CONTINUOUS_STOP_MARGIN_MAX_PERCENT,
     POTION_FAST_CAPTURE_INTERVAL_SECONDS,
     POTION_MIN_COOLDOWN_SECONDS,
     POTION_NEAR_THRESHOLD_FAST_MARGIN_PERCENT,
@@ -144,6 +145,7 @@ from ..services.bar_detection import (
     bgra_image_to_ppm_data,
     loading_screen_metrics,
     normalize_bar_percent,
+    should_continue_continuous_drink,
     should_drink_for_threshold,
 )
 from ..views.settings_gui import AutoPotionSettingsGui, GuiConsoleWriter
@@ -452,6 +454,8 @@ class AutoPotionController:
         self.pickup_disable_hold_started_at = -999.0
         self.pickup_enabled = False
         self.pickup_held_vk = 0
+        self._install_gui_runtime_toggle_handlers()
+        self._sync_gui_runtime_toggles()
         self.hp_potion_held_vk = 0
         self.mp_potion_held_vk = 0
         self.hp_potion_hold_refreshed_at = -999.0
@@ -559,6 +563,47 @@ class AutoPotionController:
 
     def _runtime_processes_active(self) -> bool:
         return bool(getattr(self, "runtime_processes_enabled", False) and getattr(self, "runtime_processes", None) is not None)
+
+    def _install_gui_runtime_toggle_handlers(self) -> None:
+        set_auto_handler = getattr(self.gui, "set_auto_drink_toggle_handler", None)
+        if callable(set_auto_handler):
+            set_auto_handler(self.set_auto_drink_enabled)
+        set_pickup_handler = getattr(self.gui, "set_pickup_toggle_handler", None)
+        if callable(set_pickup_handler):
+            set_pickup_handler(self.set_pickup_enabled)
+
+    def _sync_gui_runtime_toggles(self) -> None:
+        self._sync_gui_auto_drink_enabled()
+        self._sync_gui_pickup_enabled()
+
+    def _sync_gui_auto_drink_enabled(self) -> None:
+        set_auto_enabled = getattr(self.gui, "set_auto_drink_enabled", None)
+        if callable(set_auto_enabled):
+            set_auto_enabled(bool(getattr(self, "auto_drink_enabled", False)))
+
+    def _sync_gui_pickup_enabled(self) -> None:
+        set_pickup_enabled = getattr(self.gui, "set_pickup_enabled", None)
+        if callable(set_pickup_enabled):
+            set_pickup_enabled(bool(getattr(self, "pickup_enabled", False)))
+
+    def set_auto_drink_enabled(self, enabled: bool) -> bool:
+        desired = bool(enabled)
+        if desired == bool(getattr(self, "auto_drink_enabled", False)):
+            self._sync_gui_auto_drink_enabled()
+            return True
+        if desired:
+            self.toggle_auto_drink_enabled()
+            return bool(getattr(self, "auto_drink_enabled", False))
+        self._disable_auto_drink_from_gui()
+        return not bool(getattr(self, "auto_drink_enabled", False))
+
+    def set_pickup_enabled(self, enabled: bool) -> bool:
+        desired = bool(enabled)
+        if desired == bool(getattr(self, "pickup_enabled", False)):
+            self._sync_gui_pickup_enabled()
+            return True
+        self.toggle_pickup_enabled()
+        return bool(getattr(self, "pickup_enabled", False)) == desired
 
     def _start_runtime_processes(self) -> None:
         if getattr(self, "runtime_processes", None) is not None:
@@ -821,6 +866,7 @@ class AutoPotionController:
             self.runtime_potion_crash_reported = True
             self.auto_drink_enabled = False
             self.gameplay_hud_active = False
+            self._sync_gui_auto_drink_enabled()
             self.gui.set_status(f"喝水 process 已停止：{crash.message}")
             self.gui.show_toggle_notice("喝水 process 已停止")
         elif crash.worker == "experience":
@@ -1355,6 +1401,7 @@ class AutoPotionController:
         if self.pickup_enabled:
             self.pickup_enabled = False
             self._release_pickup_key()
+            self._sync_gui_pickup_enabled()
             self._play_media_file(AUTO_PICKUP_STOP_SOUND_PATH, "pickup_stop")
             self.gui.set_status("拾取已停用")
             self.gui.show_toggle_notice("拾取已停用")
@@ -1366,6 +1413,7 @@ class AutoPotionController:
         if not pickup_key:
             self.pickup_enabled = False
             self._release_pickup_key()
+            self._sync_gui_pickup_enabled()
             self.gui.set_status("拾取鍵未設定")
             self.gui.show_toggle_notice("拾取鍵未設定")
             self.last_action = "拾取鍵未設定"
@@ -1377,6 +1425,7 @@ class AutoPotionController:
         except ValueError:
             self.pickup_enabled = False
             self._release_pickup_key()
+            self._sync_gui_pickup_enabled()
             self.gui.set_status("拾取鍵設定無效")
             self.gui.show_toggle_notice("拾取鍵設定無效")
             self.last_action = "拾取鍵設定無效"
@@ -1385,6 +1434,7 @@ class AutoPotionController:
 
         self.pickup_enabled = True
         self._sync_pickup_key_state()
+        self._sync_gui_pickup_enabled()
         self._play_media_file(AUTO_PICKUP_START_SOUND_PATH, "pickup_start")
         self.gui.set_status("拾取已啟用")
         self.gui.show_toggle_notice("拾取已啟用")
@@ -1405,6 +1455,7 @@ class AutoPotionController:
         if not pickup_key:
             self.pickup_enabled = False
             self._release_pickup_key()
+            self._sync_gui_pickup_enabled()
             return
 
         try:
@@ -1412,6 +1463,7 @@ class AutoPotionController:
         except ValueError:
             self.pickup_enabled = False
             self._release_pickup_key()
+            self._sync_gui_pickup_enabled()
             self.gui.set_status("拾取鍵設定無效")
             self.gui.show_toggle_notice("拾取鍵設定無效")
             return
@@ -1549,11 +1601,13 @@ class AutoPotionController:
             if self.auto_drink_enabled and self._has_out_of_potion_hold():
                 self._clear_potion_effect_state()
                 self.auto_drink_enabled = True
+                self._sync_gui_auto_drink_enabled()
                 notice = "自動喝水已恢復"
                 action = f"{self.settings.toggle_hotkey} 自動喝水恢復"
             else:
                 self.auto_drink_enabled = not self.auto_drink_enabled
                 self._sync_gui_potion_options_after_auto_drink_toggle()
+                self._sync_gui_auto_drink_enabled()
                 notice = "自動喝水已啟用" if self.auto_drink_enabled else "自動喝水已暫停"
                 action = f"{self.settings.toggle_hotkey} {'自動喝水啟用' if self.auto_drink_enabled else '自動喝水暫停'}"
             if self.auto_drink_enabled:
@@ -1573,6 +1627,7 @@ class AutoPotionController:
 
         if self.auto_drink_enabled and self._has_out_of_potion_hold():
             self._clear_potion_effect_state()
+            self._sync_gui_auto_drink_enabled()
             self._play_media_file(AUTO_DRINK_START_SOUND_PATH, "auto_drink_start")
             self.gui.set_status("自動喝水已恢復")
             self.gui.show_toggle_notice("自動喝水已恢復")
@@ -1582,6 +1637,7 @@ class AutoPotionController:
 
         self.auto_drink_enabled = not self.auto_drink_enabled
         self._sync_gui_potion_options_after_auto_drink_toggle()
+        self._sync_gui_auto_drink_enabled()
         if self.auto_drink_enabled:
             self._clear_potion_effect_state()
             self._play_media_file(AUTO_DRINK_START_SOUND_PATH, "auto_drink_start")
@@ -1602,22 +1658,55 @@ class AutoPotionController:
         self.last_action = f"{self.settings.toggle_hotkey} 自動喝水暫停"
         print(f"{self.settings.toggle_hotkey}：自動喝水已暫停")
 
+    def _disable_auto_drink_from_gui(self) -> None:
+        self.auto_drink_disable_hold_started_at = -999.0
+        if not self.auto_drink_enabled:
+            self._sync_gui_auto_drink_enabled()
+            return
+        self.auto_drink_enabled = False
+        self._sync_gui_potion_options_after_auto_drink_toggle()
+        self._sync_gui_auto_drink_enabled()
+        if self._runtime_processes_active():
+            self._send_runtime_release_all_potions()
+            self._play_media_file(AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop")
+            self.gui.set_current_percentages(None, None)
+            self.gui.set_status(f"自動喝水已暫停，按 {self.settings.toggle_hotkey} 恢復")
+            self.gui.show_toggle_notice("自動喝水已暫停")
+            self.last_action = f"{self.settings.toggle_hotkey} 自動喝水暫停"
+            self.runtime_control_state = None
+            self._send_runtime_controls_if_needed()
+            print(f"{self.settings.toggle_hotkey}：自動喝水已暫停")
+            return
+        self.last_hp_drink_at = time.monotonic()
+        self.last_mp_drink_at = self.last_hp_drink_at
+        self._clear_potion_effect_state()
+        self._release_all_potion_keys()
+        self._play_media_file(AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop")
+        self.gui.set_status(f"自動喝水已暫停，按 {self.settings.toggle_hotkey} 恢復")
+        self.gui.show_toggle_notice("自動喝水已暫停")
+        self.gui.set_current_percentages(None, None)
+        self.last_action = f"{self.settings.toggle_hotkey} 自動喝水暫停"
+        print(f"{self.settings.toggle_hotkey}：自動喝水已暫停")
+
     def _sync_gui_potion_options_after_auto_drink_toggle(self) -> None:
         if self.auto_drink_enabled:
             restored = getattr(self, "auto_drink_potion_option_snapshot", None)
             hp_enabled, mp_enabled = restored or (self.settings.hp_enabled, self.settings.mp_enabled)
             self.auto_drink_potion_option_snapshot = None
+            update_settings = True
         else:
             if getattr(self, "auto_drink_potion_option_snapshot", None) is None:
                 self.auto_drink_potion_option_snapshot = (self.settings.hp_enabled, self.settings.mp_enabled)
             hp_enabled, mp_enabled = False, False
+            update_settings = False
 
         set_potion_enabled = getattr(self.gui, "set_potion_enabled", None)
         if callable(set_potion_enabled):
-            set_potion_enabled(hp_enabled, mp_enabled)
+            set_potion_enabled(hp_enabled, mp_enabled, update_settings=update_settings)
             return
-        self.settings.hp_enabled = hp_enabled
-        self.settings.mp_enabled = mp_enabled
+        if update_settings:
+            self.settings.hp_enabled = hp_enabled
+            self.settings.mp_enabled = mp_enabled
 
     def toggle_scripts_enabled(self) -> None:
         self.toggle_auto_drink_enabled()
@@ -1688,6 +1777,7 @@ class AutoPotionController:
         if not self.scripts_enabled:
             self.scripts_enabled = True
             self.auto_drink_enabled = True
+            self._sync_gui_auto_drink_enabled()
             self._clear_potion_effect_state()
             self._sync_pickup_key_state()
             self._play_toggle_beep(RESUME_BEEP_PATTERN)
@@ -1702,6 +1792,7 @@ class AutoPotionController:
 
         self.scripts_enabled = False
         self.auto_drink_enabled = False
+        self._sync_gui_auto_drink_enabled()
         self._release_pickup_key()
         self._release_all_potion_keys()
         if self._runtime_processes_active():
@@ -4471,6 +4562,7 @@ class AutoPotionController:
             self.settings.hp_threshold_percent,
             self.settings.hp_key,
             self.settings.hp_continuous_enabled,
+            self.settings.hp_continuous_stop_margin_percent,
         )
 
     def _maybe_drink_mp(self, now: float, mp_percent: float | None) -> None:
@@ -4483,6 +4575,7 @@ class AutoPotionController:
             self.settings.mp_threshold_percent,
             self.settings.mp_key,
             self.settings.mp_continuous_enabled,
+            self.settings.mp_continuous_stop_margin_percent,
         )
 
     def _maybe_drink_potion(
@@ -4495,6 +4588,7 @@ class AutoPotionController:
         threshold_percent: float,
         key_name: str,
         continuous_enabled: bool,
+        continuous_stop_margin_percent: float,
     ) -> None:
         if not enabled:
             self._clear_potion_bar_state(bar_type)
@@ -4509,7 +4603,12 @@ class AutoPotionController:
                 self._emit_direct_bar_failure_warning_if_needed(now)
                 self._log_unstable_bar(now, label)
                 return
-        if not should_drink_for_threshold(percent, threshold_percent):
+        if not self._should_drink_for_current_mode(
+            percent,
+            threshold_percent,
+            continuous_enabled,
+            continuous_stop_margin_percent,
+        ):
             self._release_potion_key(bar_type)
             self._clear_potion_attempt_state(bar_type)
             return
@@ -4542,7 +4641,12 @@ class AutoPotionController:
             self._log_unstable_bar(now, label)
             self._play_potion_blocked_sound(now)
             return
-        if not should_drink_for_threshold(percent, threshold_percent):
+        if not self._should_drink_for_current_mode(
+            percent,
+            threshold_percent,
+            continuous_enabled,
+            continuous_stop_margin_percent,
+        ):
             self._release_potion_key(bar_type)
             self._clear_potion_attempt_state(bar_type)
             return
@@ -4572,6 +4676,14 @@ class AutoPotionController:
         self._set_last_potion_drink_at(bar_type, now)
         self._record_potion_effect_attempt(bar_type, now, percent)
         self.last_action = f"{label} 喝水：{key_name}"
+
+    def _continuous_stop_threshold_percent(self, threshold_percent: float, margin_percent: float) -> float:
+        try:
+            margin = float(margin_percent)
+        except (TypeError, ValueError):
+            margin = 0.0
+        margin = max(0.0, min(POTION_CONTINUOUS_STOP_MARGIN_MAX_PERCENT, margin))
+        return max(1.0, float(threshold_percent) - margin)
 
     def _process_due_potion_sends(self, now: float) -> None:
         if not self.auto_drink_enabled:
@@ -4652,12 +4764,16 @@ class AutoPotionController:
             hp_percent,
             self.settings.hp_enabled,
             self.settings.hp_threshold_percent,
+            self.settings.hp_continuous_enabled,
+            self.settings.hp_continuous_stop_margin_percent,
             now,
         ) or self._should_defer_experience_for_potion_bar(
             "mp",
             mp_percent,
             self.settings.mp_enabled,
             self.settings.mp_threshold_percent,
+            self.settings.mp_continuous_enabled,
+            self.settings.mp_continuous_stop_margin_percent,
             now,
         )
 
@@ -4667,15 +4783,36 @@ class AutoPotionController:
         percent: float | None,
         enabled: bool,
         threshold_percent: float,
+        continuous_enabled: bool,
+        continuous_stop_margin_percent: float,
         now: float,
     ) -> bool:
         if not enabled or self._out_of_potion_hold(bar_type) is not None:
             return False
         if self._potion_held_vk(bar_type):
             return True
-        if percent is not None and should_drink_for_threshold(percent, threshold_percent):
+        if percent is not None and self._should_drink_for_current_mode(
+            percent,
+            threshold_percent,
+            continuous_enabled,
+            continuous_stop_margin_percent,
+        ):
             return True
         return now - self._last_potion_drink_at(bar_type) < POTION_EXPERIENCE_DEFER_SECONDS
+
+    def _should_drink_for_current_mode(
+        self,
+        percent: float,
+        threshold_percent: float,
+        continuous_enabled: bool,
+        continuous_stop_margin_percent: float,
+    ) -> bool:
+        if not continuous_enabled:
+            return should_drink_for_threshold(percent, threshold_percent)
+        return should_continue_continuous_drink(
+            percent,
+            self._continuous_stop_threshold_percent(threshold_percent, continuous_stop_margin_percent),
+        )
 
     def _capture_interval_after_potion_sample(self, hp_percent: float | None, mp_percent: float | None) -> float:
         if not self._should_use_fast_potion_capture_interval(hp_percent, mp_percent):
@@ -6506,7 +6643,7 @@ class AutoPotionController:
         image: np.ndarray,
         bar_type: str,
     ) -> tuple[float | None, str, bool | None]:
-        mask = self._bar_color_mask(image, bar_type)
+        mask = self._direct_bar_color_mask(image, bar_type)
         percent, reason, tail_clear = self._percent_from_bar_mask_result(
             mask,
             image,
@@ -6516,7 +6653,7 @@ class AutoPotionController:
             clamped = self._direct_bar_track_like_crop(image, mask, bar_type)
             if clamped is not None:
                 clamped_image, crop_reason = clamped
-                clamped_mask = self._bar_color_mask(clamped_image, bar_type)
+                clamped_mask = self._direct_bar_color_mask(clamped_image, bar_type)
                 percent, clamped_reason, tail_clear = self._percent_from_bar_mask_result(
                     clamped_mask,
                     clamped_image,
@@ -6981,6 +7118,24 @@ class AutoPotionController:
         if bar_type == "mp":
             return (blue > 140) & (green > 75) & (red < 140) & (blue > red + 35)
         return (green > 130) & (red < 170) & (blue < 170) & (green > red + 25) & (green > blue + 25)
+
+    def _direct_bar_color_mask(self, image: np.ndarray, bar_type: str) -> np.ndarray:
+        mask = self._bar_color_mask(image, bar_type)
+        if bar_type != "hp":
+            return mask
+
+        bgra = image[:, :, :3]
+        blue = bgra[:, :, 0].astype(np.int16)
+        green = bgra[:, :, 1].astype(np.int16)
+        red = bgra[:, :, 2].astype(np.int16)
+        damage_flash = (
+            (red > 180)
+            & (green < 215)
+            & (blue < 215)
+            & (red > green + 25)
+            & (red > blue + 25)
+        )
+        return mask | damage_flash
 
     def _is_transition_fade_active(self) -> bool:
         gameplay_left, gameplay_top, gameplay_width, gameplay_height = self._gameplay_content_bounds(

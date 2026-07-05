@@ -18,6 +18,10 @@ def should_drink_for_threshold(percent: float, threshold_percent: float) -> bool
     return percent <= threshold_percent
 
 
+def should_continue_continuous_drink(percent: float, threshold_percent: float) -> bool:
+    return percent < threshold_percent
+
+
 def loading_screen_metrics(image: np.ndarray) -> tuple[float, float, float]:
     sample = image[::8, ::8, :3].astype(np.float32)
     blue = sample[:, :, 0]
@@ -68,4 +72,3 @@ def bgra_image_to_ppm_data(
     height, width, _channels = rgb.shape
     header = f"P6\n{width} {height}\n255\n".encode("ascii")
     return header + np.ascontiguousarray(rgb).tobytes()
-

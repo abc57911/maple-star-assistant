@@ -13,7 +13,12 @@ from typing import Any, Callable
 
 import customtkinter as ctk
 
-from ..constants import MAX_CONSOLE_CHARS, MAX_CONSOLE_LINES, POTION_MIN_COOLDOWN_SECONDS
+from ..constants import (
+    MAX_CONSOLE_CHARS,
+    MAX_CONSOLE_LINES,
+    POTION_CONTINUOUS_STOP_MARGIN_MAX_PERCENT,
+    POTION_MIN_COOLDOWN_SECONDS,
+)
 from ..adapters.debug_logging import install_tk_exception_logging, write_debug_text
 from ..models.experience import (
     ExperienceSnapshot,
@@ -235,6 +240,8 @@ class AutoPotionSettingsGui:
         self.toggle_notice_message = ""
         self.bar_preview_provider: Callable[[bool], dict[str, dict[str, object]]] | None = None
         self.experience_reset_handler: Callable[[], bool | None] | None = None
+        self.auto_drink_toggle_handler: Callable[[bool], bool | None] | None = None
+        self.pickup_toggle_handler: Callable[[bool], bool | None] | None = None
         self.bar_preview_labels: dict[str, ctk.CTkLabel] = {}
         self.bar_preview_images: list[ctk.CTkImage] = []
         self.bar_preview_has_snapshot = False
@@ -283,8 +290,11 @@ class AutoPotionSettingsGui:
         self.tooltip_after_id: str | None = None
         self.tooltip_hide_after_id: str | None = None
         self.active_profile = tk.StringVar(value=settings.active_profile)
+        self.auto_drink_enabled = tk.BooleanVar(value=True)
+        self.pickup_enabled = tk.BooleanVar(value=False)
         self.hp_enabled = tk.BooleanVar(value=settings.hp_enabled)
         self.mp_enabled = tk.BooleanVar(value=settings.mp_enabled)
+        self.potion_enabled_ui_only_snapshot: tuple[bool, bool, bool, bool] | None = None
         self.rb_enabled = tk.BooleanVar(value=settings.rb_enabled)
         self.hp_threshold = tk.DoubleVar(value=settings.hp_threshold_percent)
         self.mp_threshold = tk.DoubleVar(value=settings.mp_threshold_percent)
@@ -296,6 +306,8 @@ class AutoPotionSettingsGui:
         self.mp_cooldown = tk.StringVar(value=f"{settings.mp_cooldown_seconds:g}")
         self.hp_continuous_enabled = tk.BooleanVar(value=settings.hp_continuous_enabled)
         self.mp_continuous_enabled = tk.BooleanVar(value=settings.mp_continuous_enabled)
+        self.hp_continuous_stop_margin = tk.StringVar(value=f"{settings.hp_continuous_stop_margin_percent:g}")
+        self.mp_continuous_stop_margin = tk.StringVar(value=f"{settings.mp_continuous_stop_margin_percent:g}")
         self.rb_jump_key = tk.StringVar(value=settings.rb_jump_key)
         self.rb_skill_key = tk.StringVar(value=settings.rb_skill_key)
         self.rb_attack_key = tk.StringVar(value=str(settings.combo_slot("A")["attack_key"]))
@@ -415,6 +427,13 @@ class AutoPotionSettingsGui:
             "<Button-1>",
             lambda event: self._start_key_detection_from_entry(event, self.pickup_toggle_hotkey, "拾取熱鍵"),
         )
+        self._checkbox(
+            control_hotkey_frame,
+            "自動拾取",
+            self.pickup_enabled,
+            width=86,
+            command=self._toggle_pickup_enabled_from_checkbox,
+        ).grid(row=1, column=2, sticky="w", padx=(0, 8), pady=(0, 6))
         self._label(control_hotkey_frame, "拾取鍵").grid(row=1, column=4, sticky="w", padx=(0, 4), pady=(0, 6))
         pickup_key_entry = self._entry(
             control_hotkey_frame,
@@ -447,7 +466,14 @@ class AutoPotionSettingsGui:
         self._button(profile_frame, "匯入", self.import_settings, width=64).grid(row=0, column=5, sticky="w", padx=(0, 4), pady=(0, 4))
         self._button(profile_frame, "匯出", self.export_settings, width=64).grid(row=0, column=6, sticky="w", pady=(0, 4))
 
-        potion_section, _header, controls = self._build_section(controls_frame, "藥水監控", row=2)
+        potion_section, potion_header, controls = self._build_section(controls_frame, "藥水監控", row=2)
+        self._checkbox(
+            potion_header,
+            "自動喝水",
+            self.auto_drink_enabled,
+            width=88,
+            command=self._toggle_auto_drink_enabled_from_checkbox,
+        ).grid(row=0, column=98, sticky="e", padx=(8, 8), pady=4)
         controls.columnconfigure(1, weight=1)
         self._build_row(
             controls,
@@ -459,6 +485,7 @@ class AutoPotionSettingsGui:
             self.hp_key,
             self.hp_cooldown,
             self.hp_continuous_enabled,
+            self.hp_continuous_stop_margin,
             self.hp_current,
         )
         self._build_row(
@@ -471,6 +498,7 @@ class AutoPotionSettingsGui:
             self.mp_key,
             self.mp_cooldown,
             self.mp_continuous_enabled,
+            self.mp_continuous_stop_margin,
             self.mp_current,
         )
 
@@ -1627,6 +1655,7 @@ class AutoPotionSettingsGui:
         key_var: tk.StringVar,
         cooldown_var: tk.StringVar,
         continuous_var: tk.BooleanVar,
+        continuous_stop_margin_var: tk.StringVar,
         current_var: tk.StringVar,
     ) -> None:
         self._checkbox(parent, label, enabled_var, width=70).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
@@ -1653,7 +1682,10 @@ class AutoPotionSettingsGui:
         self._entry(parent, cooldown_var, width=SECONDS_ENTRY_WIDTH).grid(row=row, column=5, sticky="w", padx=(0, 4), pady=4)
         self._label(parent, "秒").grid(row=row, column=6, sticky="w", pady=4)
         self._checkbox(parent, "連續", continuous_var, width=64).grid(row=row, column=7, sticky="w", padx=(10, 0), pady=4)
-        self._label(parent, textvariable=current_var, width=82, anchor="e", font=MONO_FONT).grid(row=row, column=8, sticky="e", padx=(12, 0), pady=4)
+        self._label(parent, "誤差").grid(row=row, column=8, sticky="w", padx=(8, 4), pady=4)
+        self._entry(parent, continuous_stop_margin_var, width=PERCENT_ENTRY_WIDTH).grid(row=row, column=9, sticky="w", padx=(0, 4), pady=4)
+        self._label(parent, "%").grid(row=row, column=10, sticky="w", pady=4)
+        self._label(parent, textvariable=current_var, width=82, anchor="e", font=MONO_FONT).grid(row=row, column=11, sticky="e", padx=(12, 0), pady=4)
 
         entry.bind("<Return>", lambda _event, var=threshold_var, text=threshold_text: self._apply_percent_text(var, text))
         entry.bind("<FocusOut>", lambda _event, var=threshold_var, text=threshold_text: self._apply_percent_text(var, text))
@@ -2015,6 +2047,12 @@ class AutoPotionSettingsGui:
     def set_experience_reset_handler(self, handler: Callable[[], bool | None]) -> None:
         self.experience_reset_handler = handler
 
+    def set_auto_drink_toggle_handler(self, handler: Callable[[bool], bool | None]) -> None:
+        self.auto_drink_toggle_handler = handler
+
+    def set_pickup_toggle_handler(self, handler: Callable[[bool], bool | None]) -> None:
+        self.pickup_toggle_handler = handler
+
     def reset_experience_statistics(self) -> None:
         if self.experience_reset_handler is not None:
             if self.experience_reset_handler() is False:
@@ -2135,6 +2173,7 @@ class AutoPotionSettingsGui:
         self.active_profile.set(self.settings.active_profile)
         self.hp_enabled.set(self.settings.hp_enabled)
         self.mp_enabled.set(self.settings.mp_enabled)
+        self.potion_enabled_ui_only_snapshot = None
         self.rb_enabled.set(self.settings.rb_enabled)
         self.lb_enabled.set(self.settings.lb_enabled)
         self.hp_threshold.set(self.settings.hp_threshold_percent)
@@ -2147,6 +2186,8 @@ class AutoPotionSettingsGui:
         self.mp_cooldown.set(f"{self.settings.mp_cooldown_seconds:g}")
         self.hp_continuous_enabled.set(self.settings.hp_continuous_enabled)
         self.mp_continuous_enabled.set(self.settings.mp_continuous_enabled)
+        self.hp_continuous_stop_margin.set(f"{self.settings.hp_continuous_stop_margin_percent:g}")
+        self.mp_continuous_stop_margin.set(f"{self.settings.mp_continuous_stop_margin_percent:g}")
         self.rb_jump_key.set(self.settings.rb_jump_key)
         self.rb_skill_key.set(self.settings.rb_skill_key)
         self.rb_attack_key.set(str(self.settings.combo_slot("A")["attack_key"]))
@@ -2501,8 +2542,17 @@ class AutoPotionSettingsGui:
             COMBO_JUMP_INTERVAL_MAX_SECONDS,
         )
 
-        self.settings.hp_enabled = self.hp_enabled.get()
-        self.settings.mp_enabled = self.mp_enabled.get()
+        hp_enabled = self.hp_enabled.get()
+        mp_enabled = self.mp_enabled.get()
+        ui_only_snapshot = getattr(self, "potion_enabled_ui_only_snapshot", None)
+        if isinstance(ui_only_snapshot, tuple) and len(ui_only_snapshot) == 4:
+            saved_hp_enabled, saved_mp_enabled, ui_hp_enabled, ui_mp_enabled = ui_only_snapshot
+            if bool(hp_enabled) == ui_hp_enabled and bool(mp_enabled) == ui_mp_enabled:
+                hp_enabled, mp_enabled = saved_hp_enabled, saved_mp_enabled
+            else:
+                self.potion_enabled_ui_only_snapshot = None
+        self.settings.hp_enabled = hp_enabled
+        self.settings.mp_enabled = mp_enabled
         self.settings.rb_enabled = rb_enabled
         self.settings.lb_enabled = lb_enabled
         self.settings.hp_threshold_percent = self.hp_threshold.get()
@@ -2513,6 +2563,14 @@ class AutoPotionSettingsGui:
         self.settings.mp_cooldown_seconds = self._read_cooldown(self.mp_cooldown, self.settings.mp_cooldown_seconds)
         self.settings.hp_continuous_enabled = self.hp_continuous_enabled.get()
         self.settings.mp_continuous_enabled = self.mp_continuous_enabled.get()
+        self.settings.hp_continuous_stop_margin_percent = self._read_continuous_stop_margin(
+            self.hp_continuous_stop_margin,
+            self.settings.hp_continuous_stop_margin_percent,
+        )
+        self.settings.mp_continuous_stop_margin_percent = self._read_continuous_stop_margin(
+            self.mp_continuous_stop_margin,
+            self.settings.mp_continuous_stop_margin_percent,
+        )
         self.settings.rb_jump_key = rb_jump_key
         self.settings.rb_skill_key = rb_skill_key
         self.settings.rb_controller_button = rb_controller_button
@@ -2587,14 +2645,48 @@ class AutoPotionSettingsGui:
         self.exp_efficiency_enabled.set(enabled)
         self.settings.exp_efficiency_enabled = enabled
 
-    def set_potion_enabled(self, hp_enabled: bool, mp_enabled: bool) -> None:
+    def set_auto_drink_enabled(self, enabled: bool) -> None:
+        self.auto_drink_enabled.set(enabled)
+
+    def set_pickup_enabled(self, enabled: bool) -> None:
+        self.pickup_enabled.set(enabled)
+
+    def _toggle_auto_drink_enabled_from_checkbox(self) -> None:
+        desired = bool(self.auto_drink_enabled.get())
+        if self.auto_drink_toggle_handler is not None:
+            result = self.auto_drink_toggle_handler(desired)
+            if result is False:
+                self.auto_drink_enabled.set(not desired)
+
+    def _toggle_pickup_enabled_from_checkbox(self) -> None:
+        desired = bool(self.pickup_enabled.get())
+        if self.pickup_toggle_handler is not None:
+            result = self.pickup_toggle_handler(desired)
+            if result is False:
+                self.pickup_enabled.set(not desired)
+
+    def set_potion_enabled(self, hp_enabled: bool, mp_enabled: bool, *, update_settings: bool = True) -> None:
+        if update_settings:
+            self.potion_enabled_ui_only_snapshot = None
+        else:
+            self.potion_enabled_ui_only_snapshot = (
+                bool(self.settings.hp_enabled),
+                bool(self.settings.mp_enabled),
+                bool(hp_enabled),
+                bool(mp_enabled),
+            )
         self.hp_enabled.set(hp_enabled)
         self.mp_enabled.set(mp_enabled)
+        if not update_settings:
+            return
         self.settings.hp_enabled = hp_enabled
         self.settings.mp_enabled = mp_enabled
 
     def _read_cooldown(self, var: tk.StringVar, fallback: float) -> float:
         return self._read_seconds(var, fallback, POTION_MIN_COOLDOWN_SECONDS, 60.0)
+
+    def _read_continuous_stop_margin(self, var: tk.StringVar, fallback: float) -> float:
+        return self._read_seconds(var, fallback, 0.0, POTION_CONTINUOUS_STOP_MARGIN_MAX_PERCENT)
 
     def _read_seconds(self, var: tk.StringVar, fallback: float, minimum: float, maximum: float) -> float:
         try:

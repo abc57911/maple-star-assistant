@@ -42,6 +42,31 @@ class ToggleNoticePositionTests(unittest.TestCase):
         self.assertTrue(variable.get())
         gui.apply_to_settings.assert_called_once()
 
+    def test_runtime_toggle_checkbox_calls_handler_and_reverts_on_failure(self):
+        class FakeBooleanVar:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        gui = self.make_gui()
+        gui.auto_drink_enabled = FakeBooleanVar(False)
+        gui.pickup_enabled = FakeBooleanVar(True)
+        gui.auto_drink_toggle_handler = Mock(return_value=True)
+        gui.pickup_toggle_handler = Mock(return_value=False)
+
+        gui._toggle_auto_drink_enabled_from_checkbox()
+        gui._toggle_pickup_enabled_from_checkbox()
+
+        gui.auto_drink_toggle_handler.assert_called_once_with(False)
+        gui.pickup_toggle_handler.assert_called_once_with(True)
+        self.assertFalse(gui.auto_drink_enabled.get())
+        self.assertFalse(gui.pickup_enabled.get())
+
     def test_apply_to_settings_preserves_updated_combo_jump_intervals(self):
         class FakeVar:
             def __init__(self, value):
@@ -69,6 +94,8 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.mp_cooldown = FakeVar("0.5")
         gui.hp_continuous_enabled = FakeVar(False)
         gui.mp_continuous_enabled = FakeVar(False)
+        gui.hp_continuous_stop_margin = FakeVar("4")
+        gui.mp_continuous_stop_margin = FakeVar("6")
         gui.rb_jump_key = FakeVar("X")
         gui.rb_skill_key = FakeVar("C")
         gui.rb_attack_key = FakeVar("A")
@@ -111,6 +138,8 @@ class ToggleNoticePositionTests(unittest.TestCase):
         self.assertEqual(gui.settings.combo_slots["B"]["attack_key"], "B")
         self.assertEqual(gui.settings.combo_slots["B"]["attack_start_delay_seconds"], 0.65)
         self.assertEqual(gui.settings.combo_slots["B"]["attack_hold_seconds"], 0.75)
+        self.assertEqual(gui.settings.hp_continuous_stop_margin_percent, 4.0)
+        self.assertEqual(gui.settings.mp_continuous_stop_margin_percent, 6.0)
 
     def test_set_potion_enabled_syncs_checkbox_vars_and_settings(self):
         class FakeVar:
@@ -132,6 +161,87 @@ class ToggleNoticePositionTests(unittest.TestCase):
 
         self.assertFalse(gui.hp_enabled.get())
         self.assertTrue(gui.mp_enabled.get())
+        self.assertFalse(gui.settings.hp_enabled)
+        self.assertTrue(gui.settings.mp_enabled)
+
+        gui.set_potion_enabled(True, False, update_settings=False)
+
+        self.assertTrue(gui.hp_enabled.get())
+        self.assertFalse(gui.mp_enabled.get())
+        self.assertFalse(gui.settings.hp_enabled)
+        self.assertTrue(gui.settings.mp_enabled)
+        self.assertEqual(gui.potion_enabled_ui_only_snapshot, (False, True, True, False))
+
+    def test_apply_to_settings_preserves_ui_only_potion_toggle_state(self):
+        class FakeVar:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        gui = self.make_gui()
+        gui.settings = AutoPotionSettings(hp_enabled=True, mp_enabled=False)
+        gui.hp_threshold = FakeVar(75)
+        gui.mp_threshold = FakeVar(15)
+        gui.hp_threshold_text = FakeVar("75")
+        gui.mp_threshold_text = FakeVar("15")
+        gui.hp_enabled = FakeVar(True)
+        gui.mp_enabled = FakeVar(False)
+        gui.rb_enabled = FakeVar(False)
+        gui.lb_enabled = FakeVar(False)
+        gui.hp_key = FakeVar("9")
+        gui.mp_key = FakeVar("0")
+        gui.hp_cooldown = FakeVar("0.1")
+        gui.mp_cooldown = FakeVar("0.3")
+        gui.hp_continuous_enabled = FakeVar(False)
+        gui.mp_continuous_enabled = FakeVar(False)
+        gui.hp_continuous_stop_margin = FakeVar("5")
+        gui.mp_continuous_stop_margin = FakeVar("5")
+        gui.rb_jump_key = FakeVar("X")
+        gui.rb_skill_key = FakeVar("C")
+        gui.rb_attack_key = FakeVar("C")
+        gui.rb_attack_start_delay = FakeVar("0.02")
+        gui.rb_attack_hold = FakeVar("0.55")
+        gui.rb_controller_button = FakeVar("Y")
+        gui.rb_skill_delay = FakeVar("0.01")
+        gui.rb_jump_interval = FakeVar("0.9")
+        gui.lb_jump_key = FakeVar("X")
+        gui.lb_skill_key = FakeVar("C")
+        gui.lb_attack_key = FakeVar("C")
+        gui.lb_attack_start_delay = FakeVar("0")
+        gui.lb_attack_hold = FakeVar("1")
+        gui.lb_controller_button = FakeVar("LB")
+        gui.lb_skill_delay = FakeVar("0.12")
+        gui.lb_jump_interval = FakeVar("0.66")
+        gui.combo_a_script = FakeVar("按住跳攻")
+        gui.combo_b_script = FakeVar("單次跳躍技能")
+        gui.exp_efficiency_enabled = FakeVar(False)
+        gui.toggle_hotkey = FakeVar("F3")
+        gui.emergency_stop_hotkey = FakeVar("Pause")
+        gui.experience_toggle_hotkey = FakeVar("F1")
+        gui.experience_reset_hotkey = FakeVar("F2")
+        gui.character_stat_hotkey = FakeVar("J")
+        gui.pickup_toggle_hotkey = FakeVar("F4")
+        gui.pickup_key = FakeVar("Z")
+        gui.console_collapsed = False
+        gui.combo_group_collapsed = True
+        gui.compact_experience_mode = False
+        gui.window_topmost = False
+
+        gui.set_potion_enabled(False, False, update_settings=False)
+        gui.apply_to_settings()
+
+        self.assertTrue(gui.settings.hp_enabled)
+        self.assertFalse(gui.settings.mp_enabled)
+
+        gui.hp_enabled.set(False)
+        gui.mp_enabled.set(True)
+        gui.apply_to_settings()
+
         self.assertFalse(gui.settings.hp_enabled)
         self.assertTrue(gui.settings.mp_enabled)
 

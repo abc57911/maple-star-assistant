@@ -5,7 +5,11 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..constants import POTION_MIN_COOLDOWN_SECONDS
+from ..constants import (
+    POTION_CONTINUOUS_STOP_MARGIN_DEFAULT_PERCENT,
+    POTION_CONTINUOUS_STOP_MARGIN_MAX_PERCENT,
+    POTION_MIN_COOLDOWN_SECONDS,
+)
 
 def app_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -242,6 +246,8 @@ class AutoPotionSettings:
     mp_cooldown_seconds: float = 0.2
     hp_continuous_enabled: bool = False
     mp_continuous_enabled: bool = False
+    hp_continuous_stop_margin_percent: float = POTION_CONTINUOUS_STOP_MARGIN_DEFAULT_PERCENT
+    mp_continuous_stop_margin_percent: float = POTION_CONTINUOUS_STOP_MARGIN_DEFAULT_PERCENT
     rb_jump_key: str = "X"
     rb_skill_key: str = "C"
     rb_controller_button: str = "RB"
@@ -315,6 +321,8 @@ class AutoPotionSettings:
             self.mp_cooldown_seconds,
             self.hp_continuous_enabled,
             self.mp_continuous_enabled,
+            self.hp_continuous_stop_margin_percent,
+            self.mp_continuous_stop_margin_percent,
             self.rb_jump_key,
             self.rb_skill_key,
             self.rb_controller_button,
@@ -367,6 +375,8 @@ class AutoPotionSettings:
             "mp_cooldown_seconds": self.mp_cooldown_seconds,
             "hp_continuous_enabled": self.hp_continuous_enabled,
             "mp_continuous_enabled": self.mp_continuous_enabled,
+            "hp_continuous_stop_margin_percent": self.hp_continuous_stop_margin_percent,
+            "mp_continuous_stop_margin_percent": self.mp_continuous_stop_margin_percent,
             "rb_jump_key": self.rb_jump_key,
             "rb_skill_key": self.rb_skill_key,
             "rb_controller_button": self.rb_controller_button,
@@ -457,6 +467,8 @@ PROFILE_SETTING_KEYS = (
     "mp_cooldown_seconds",
     "hp_continuous_enabled",
     "mp_continuous_enabled",
+    "hp_continuous_stop_margin_percent",
+    "mp_continuous_stop_margin_percent",
     "rb_jump_key",
     "rb_skill_key",
     "rb_controller_button",
@@ -578,6 +590,20 @@ def _read_profile_payload(raw: object, fallback: AutoPotionSettings) -> dict[str
             "mp_continuous_enabled",
             fallback.mp_continuous_enabled,
         ),
+        "hp_continuous_stop_margin_percent": _read_float(
+            data,
+            "hp_continuous_stop_margin_percent",
+            fallback.hp_continuous_stop_margin_percent,
+            0.0,
+            POTION_CONTINUOUS_STOP_MARGIN_MAX_PERCENT,
+        ),
+        "mp_continuous_stop_margin_percent": _read_float(
+            data,
+            "mp_continuous_stop_margin_percent",
+            fallback.mp_continuous_stop_margin_percent,
+            0.0,
+            POTION_CONTINUOUS_STOP_MARGIN_MAX_PERCENT,
+        ),
         "rb_jump_key": _read_string(data, "rb_jump_key", fallback.rb_jump_key),
         "rb_skill_key": _read_string(data, "rb_skill_key", fallback.rb_skill_key),
         "rb_controller_button": normalize_controller_button_name(data.get("rb_controller_button"), fallback.rb_controller_button),
@@ -689,6 +715,20 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
         ),
         hp_continuous_enabled=_read_bool(raw, "hp_continuous_enabled", settings.hp_continuous_enabled),
         mp_continuous_enabled=_read_bool(raw, "mp_continuous_enabled", settings.mp_continuous_enabled),
+        hp_continuous_stop_margin_percent=_read_float(
+            raw,
+            "hp_continuous_stop_margin_percent",
+            settings.hp_continuous_stop_margin_percent,
+            0.0,
+            POTION_CONTINUOUS_STOP_MARGIN_MAX_PERCENT,
+        ),
+        mp_continuous_stop_margin_percent=_read_float(
+            raw,
+            "mp_continuous_stop_margin_percent",
+            settings.mp_continuous_stop_margin_percent,
+            0.0,
+            POTION_CONTINUOUS_STOP_MARGIN_MAX_PERCENT,
+        ),
         rb_jump_key=_read_string(raw, "rb_jump_key", settings.rb_jump_key),
         rb_skill_key=_read_string(raw, "rb_skill_key", settings.rb_skill_key),
         rb_controller_button=normalize_controller_button_name(raw.get("rb_controller_button"), settings.rb_controller_button),

@@ -4,7 +4,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from maple_star.constants import POTION_MIN_COOLDOWN_SECONDS
+from maple_star.constants import (
+    POTION_CONTINUOUS_STOP_MARGIN_DEFAULT_PERCENT,
+    POTION_CONTINUOUS_STOP_MARGIN_MAX_PERCENT,
+    POTION_MIN_COOLDOWN_SECONDS,
+)
 from maple_star.settings import AutoPotionSettings, load_settings
 
 
@@ -38,6 +42,8 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertFalse(settings.window_topmost)
         self.assertFalse(settings.hp_continuous_enabled)
         self.assertFalse(settings.mp_continuous_enabled)
+        self.assertEqual(settings.hp_continuous_stop_margin_percent, POTION_CONTINUOUS_STOP_MARGIN_DEFAULT_PERCENT)
+        self.assertEqual(settings.mp_continuous_stop_margin_percent, POTION_CONTINUOUS_STOP_MARGIN_DEFAULT_PERCENT)
         self.assertIsNone(settings.full_panel_window_x)
         self.assertIsNone(settings.full_panel_window_y)
         self.assertIsNone(settings.compact_experience_window_x)
@@ -47,6 +53,14 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertFalse(saved["profiles"]["Default"]["exp_efficiency_enabled"])
         self.assertFalse(saved["profiles"]["Default"]["hp_continuous_enabled"])
         self.assertFalse(saved["profiles"]["Default"]["mp_continuous_enabled"])
+        self.assertEqual(
+            saved["profiles"]["Default"]["hp_continuous_stop_margin_percent"],
+            POTION_CONTINUOUS_STOP_MARGIN_DEFAULT_PERCENT,
+        )
+        self.assertEqual(
+            saved["profiles"]["Default"]["mp_continuous_stop_margin_percent"],
+            POTION_CONTINUOUS_STOP_MARGIN_DEFAULT_PERCENT,
+        )
         self.assertEqual(saved["toggle_hotkey"], "F11")
         self.assertEqual(saved["emergency_stop_hotkey"], "Pause")
         self.assertEqual(saved["experience_toggle_hotkey"], "F10")
@@ -110,6 +124,31 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(saved["profiles"]["Default"]["hp_cooldown_seconds"], POTION_MIN_COOLDOWN_SECONDS)
         self.assertEqual(saved["profiles"]["Default"]["mp_cooldown_seconds"], POTION_MIN_COOLDOWN_SECONDS)
 
+    def test_load_settings_clamps_continuous_stop_margin(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "hp_continuous_stop_margin_percent": -3.0,
+                        "mp_continuous_stop_margin_percent": 75.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("builtins.print"):
+                settings = load_settings(settings_path)
+            saved = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(settings.hp_continuous_stop_margin_percent, 0.0)
+        self.assertEqual(settings.mp_continuous_stop_margin_percent, POTION_CONTINUOUS_STOP_MARGIN_MAX_PERCENT)
+        self.assertEqual(saved["profiles"]["Default"]["hp_continuous_stop_margin_percent"], 0.0)
+        self.assertEqual(
+            saved["profiles"]["Default"]["mp_continuous_stop_margin_percent"],
+            POTION_CONTINUOUS_STOP_MARGIN_MAX_PERCENT,
+        )
+
     def test_window_positions_are_global_settings(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_path = Path(temp_dir) / "settings.json"
@@ -144,6 +183,7 @@ class SettingsProfileTests(unittest.TestCase):
 
     def test_apply_profile_saves_current_profile_before_switching(self):
         settings = AutoPotionSettings(hp_key="9", hp_continuous_enabled=True, active_profile="Main")
+        settings.hp_continuous_stop_margin_percent = 3.0
         settings.save_current_profile()
         settings.profiles["Boss"] = {
             **settings.profiles["Main"],
@@ -151,10 +191,13 @@ class SettingsProfileTests(unittest.TestCase):
             "mp_threshold_percent": 20.0,
             "hp_continuous_enabled": False,
             "mp_continuous_enabled": True,
+            "hp_continuous_stop_margin_percent": 7.0,
+            "mp_continuous_stop_margin_percent": 9.0,
         }
 
         settings.hp_key = "7"
         settings.hp_continuous_enabled = True
+        settings.hp_continuous_stop_margin_percent = 4.0
         switched = settings.apply_profile("Boss")
 
         self.assertTrue(switched)
@@ -163,8 +206,11 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(settings.mp_threshold_percent, 20.0)
         self.assertFalse(settings.hp_continuous_enabled)
         self.assertTrue(settings.mp_continuous_enabled)
+        self.assertEqual(settings.hp_continuous_stop_margin_percent, 7.0)
+        self.assertEqual(settings.mp_continuous_stop_margin_percent, 9.0)
         self.assertEqual(settings.profiles["Main"]["hp_key"], "7")
         self.assertTrue(settings.profiles["Main"]["hp_continuous_enabled"])
+        self.assertEqual(settings.profiles["Main"]["hp_continuous_stop_margin_percent"], 4.0)
 
     def test_delete_active_profile_switches_to_remaining_profile(self):
         settings = AutoPotionSettings(active_profile="Main", hp_key="9")
@@ -184,6 +230,8 @@ class SettingsProfileTests(unittest.TestCase):
         settings = AutoPotionSettings(
             hp_continuous_enabled=True,
             mp_continuous_enabled=True,
+            hp_continuous_stop_margin_percent=6.0,
+            mp_continuous_stop_margin_percent=8.0,
             toggle_hotkey="F9",
             emergency_stop_hotkey="Pause",
             experience_toggle_hotkey="F10",
@@ -219,6 +267,8 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(payload["compact_experience_window_y"], 400)
         self.assertTrue(payload["profiles"]["Default"]["hp_continuous_enabled"])
         self.assertTrue(payload["profiles"]["Default"]["mp_continuous_enabled"])
+        self.assertEqual(payload["profiles"]["Default"]["hp_continuous_stop_margin_percent"], 6.0)
+        self.assertEqual(payload["profiles"]["Default"]["mp_continuous_stop_margin_percent"], 8.0)
         self.assertNotIn("toggle_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("emergency_stop_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("experience_toggle_hotkey", payload["profiles"]["Default"])

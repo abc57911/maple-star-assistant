@@ -146,10 +146,12 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.gui.set_exp_efficiency_enabled.side_effect = (
             lambda enabled: setattr(controller.settings, "exp_efficiency_enabled", enabled)
         )
-        controller.gui.set_potion_enabled.side_effect = lambda hp_enabled, mp_enabled: (
-            setattr(controller.settings, "hp_enabled", hp_enabled),
-            setattr(controller.settings, "mp_enabled", mp_enabled),
-        )
+        def set_potion_enabled(hp_enabled, mp_enabled, *, update_settings=True):
+            if update_settings:
+                controller.settings.hp_enabled = hp_enabled
+                controller.settings.mp_enabled = mp_enabled
+
+        controller.gui.set_potion_enabled.side_effect = set_potion_enabled
         controller.last_hp_drink_at = -999.0
         controller.last_mp_drink_at = -999.0
         controller.potion_send_prevalidated_at = -999.0
@@ -438,6 +440,20 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         self.assertIsNotNone(percent)
         self.assertAlmostEqual(percent, 61.0, delta=2.0)
+        self.assertEqual(reason, "OK:Direct")
+        self.assertIsNone(tail_clear)
+
+    def test_direct_gdi_hp_damage_flash_still_reads_percent(self):
+        controller = self.make_controller([])
+        image = np.full((9, 120, 4), (48, 48, 48, 255), dtype=np.uint8)
+        image[:, :66] = (170, 150, 245, 255)
+
+        self.assertFalse(controller._bar_color_mask(image, "hp").any())
+
+        percent, reason, tail_clear = controller._sample_direct_bar_percent_from_image(image, "hp")
+
+        self.assertIsNotNone(percent)
+        self.assertAlmostEqual(percent, 55.0, delta=2.0)
         self.assertEqual(reason, "OK:Direct")
         self.assertIsNone(tail_clear)
 
@@ -2604,6 +2620,18 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         tap_hotkey.assert_not_called()
         controller._refresh_gameplay_hud_state.assert_not_called()
 
+    def test_hp_tap_mode_still_drinks_at_threshold(self):
+        controller = self.make_controller([True] * 2)
+        controller.settings.hp_threshold_percent = 50.0
+
+        with (
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("builtins.print"),
+        ):
+            controller._maybe_drink_hp(100.0, 50.0)
+
+        tap_hotkey.assert_called_once_with("Delete")
+
     def test_hp_does_not_tap_if_target_loses_focus_before_send(self):
         controller = self.make_controller([True, False])
 
@@ -3277,7 +3305,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertAlmostEqual(disabled.next_capture_at, 100.0 + DEFAULT_CAPTURE_INTERVAL_SECONDS)
         self.assertAlmostEqual(held.next_capture_at, 100.0 + DEFAULT_CAPTURE_INTERVAL_SECONDS)
 
-    def test_hp_continuous_holds_once_until_above_threshold(self):
+    def test_hp_continuous_holds_once_until_reaching_threshold(self):
         controller = self.make_controller([True] * 4)
         controller.settings.hp_continuous_enabled = True
 
@@ -3289,13 +3317,74 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         ):
             controller._maybe_drink_hp(100.0, 25.0)
             controller._maybe_drink_hp(100.0 + POTION_CONTINUOUS_HOLD_REFRESH_SECONDS / 2, 25.0)
-            controller._maybe_drink_hp(100.3, 51.0)
+            controller._maybe_drink_hp(100.3, 50.0)
 
         key_down.assert_called_once_with(0x2E)
         key_up.assert_called_once_with(0x2E)
         tap_hotkey.assert_not_called()
         self.assertEqual(controller.hp_potion_held_vk, 0)
         self.assertEqual(controller.hp_potion_effect_attempts, [])
+
+    def test_hp_continuous_stop_margin_holds_below_effective_threshold(self):
+        controller = self.make_controller([True] * 2)
+        controller.settings.hp_continuous_enabled = True
+        controller.settings.hp_threshold_percent = 100.0
+        controller.settings.hp_continuous_stop_margin_percent = 5.0
+        controller._capture_confirmed_bar_percent = Mock(side_effect=lambda _bar_type, fallback: fallback)
+
+        with (
+            patch("maple_star.controller.key_down") as key_down,
+            patch("maple_star.controller.key_up") as key_up,
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("builtins.print"),
+        ):
+            controller._maybe_drink_hp(100.0, 94.0)
+
+        key_down.assert_called_once_with(0x2E)
+        key_up.assert_not_called()
+        tap_hotkey.assert_not_called()
+        self.assertEqual(controller.hp_potion_held_vk, 0x2E)
+
+    def test_hp_continuous_stop_margin_releases_at_effective_threshold(self):
+        controller = self.make_controller([True] * 2)
+        controller.settings.hp_continuous_enabled = True
+        controller.settings.hp_threshold_percent = 100.0
+        controller.settings.hp_continuous_stop_margin_percent = 5.0
+        controller.hp_potion_held_vk = 0x2E
+
+        with (
+            patch("maple_star.controller.key_down") as key_down,
+            patch("maple_star.controller.key_up") as key_up,
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("builtins.print"),
+        ):
+            controller._maybe_drink_hp(100.0, 95.0)
+
+        key_down.assert_not_called()
+        key_up.assert_called_once_with(0x2E)
+        tap_hotkey.assert_not_called()
+        self.assertEqual(controller.hp_potion_held_vk, 0)
+
+    def test_hp_continuous_zero_stop_margin_keeps_existing_threshold_behavior(self):
+        controller = self.make_controller([True] * 4)
+        controller.settings.hp_continuous_enabled = True
+        controller.settings.hp_threshold_percent = 50.0
+        controller.settings.hp_continuous_stop_margin_percent = 0.0
+        controller._capture_confirmed_bar_percent = Mock(side_effect=lambda _bar_type, fallback: fallback)
+
+        with (
+            patch("maple_star.controller.key_down") as key_down,
+            patch("maple_star.controller.key_up") as key_up,
+            patch("maple_star.controller.tap_hotkey") as tap_hotkey,
+            patch("builtins.print"),
+        ):
+            controller._maybe_drink_hp(100.0, 49.0)
+            controller._maybe_drink_hp(100.2, 50.0)
+
+        key_down.assert_called_once_with(0x2E)
+        key_up.assert_called_once_with(0x2E)
+        tap_hotkey.assert_not_called()
+        self.assertEqual(controller.hp_potion_held_vk, 0)
 
     def test_hp_continuous_refreshes_held_key_until_above_threshold(self):
         controller = self.make_controller([True] * 4)
@@ -3327,7 +3416,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             patch("builtins.print"),
         ):
             controller._maybe_drink_hp(100.0, 25.0)
-            controller._maybe_drink_hp(100.2, 51.0)
+            controller._maybe_drink_hp(100.2, 50.0)
 
         controller.potion_action_worker.hold.assert_called_once_with("hp", 0x2E)
         controller.potion_action_worker.release.assert_called_once_with("hp", 0x2E)
@@ -3367,7 +3456,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             patch("builtins.print"),
         ):
             controller._maybe_drink_mp(100.0, 25.0)
-            controller._maybe_drink_mp(100.2, 51.0)
+            controller._maybe_drink_mp(100.2, 50.0)
 
         key_down.assert_called_once_with(0x23)
         key_up.assert_called_once_with(0x23)
@@ -3495,6 +3584,30 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._defer_experience_for_potion_priority.assert_called_once_with(100.0)
         controller._update_experience_efficiency.assert_not_called()
 
+    def test_update_does_not_defer_experience_when_continuous_margin_stops_potion(self):
+        controller = self.make_controller([True])
+        controller.next_capture_at = 0.0
+        controller.next_experience_capture_at = 0.0
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller.settings.exp_efficiency_enabled = True
+        controller.settings.hp_continuous_enabled = True
+        controller.settings.hp_threshold_percent = 100.0
+        controller.settings.hp_continuous_stop_margin_percent = 5.0
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._transition_pause_reason = Mock(return_value=None)
+        controller._capture_bar_percents = Mock(return_value=(96.0, 80.0))
+        controller._maybe_drink_hp = Mock()
+        controller._maybe_drink_mp = Mock()
+        controller._update_potion_effect_watch_cycles = Mock()
+        controller._update_experience_efficiency = Mock()
+        controller._defer_experience_for_potion_priority = Mock()
+
+        controller.update(100.0)
+
+        controller._defer_experience_for_potion_priority.assert_not_called()
+        controller._update_experience_efficiency.assert_called_once_with(100.0)
+
     def test_update_reuses_prevalidated_hud_for_potion_send(self):
         controller = self.make_controller([True])
         controller.next_capture_at = 0.0
@@ -3559,6 +3672,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
     def test_continuous_potion_alerts_after_three_stable_no_effect_windows(self):
         controller = self.make_controller([True] * 6)
         controller.settings.hp_continuous_enabled = True
+        controller.settings.hp_continuous_stop_margin_percent = 0.0
         controller._capture_bar_percent = Mock(return_value=49.0)
 
         with (
@@ -4259,8 +4373,56 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertFalse(controller.settings.mp_enabled)
         self.assertEqual(
             controller.gui.set_potion_enabled.call_args_list,
-            [call(False, False), call(True, False)],
+            [
+                call(False, False, update_settings=False),
+                call(True, False, update_settings=True),
+            ],
         )
+
+    def test_toggle_auto_drink_pause_keeps_saved_potion_selection(self):
+        controller = self.make_controller([])
+        controller.settings.hp_enabled = True
+        controller.settings.mp_enabled = False
+
+        with (
+            patch.object(controller, "_play_media_file"),
+            patch("builtins.print"),
+        ):
+            controller.toggle_auto_drink_enabled()
+
+        self.assertFalse(controller.auto_drink_enabled)
+        self.assertTrue(controller.settings.hp_enabled)
+        self.assertFalse(controller.settings.mp_enabled)
+        self.assertEqual(controller.auto_drink_potion_option_snapshot, (True, False))
+        controller.gui.set_potion_enabled.assert_called_once_with(False, False, update_settings=False)
+
+    def test_set_auto_drink_enabled_from_gui_forces_disable_during_out_of_potion_hold(self):
+        controller = self.make_controller([])
+        controller.settings.hp_enabled = True
+        controller.settings.mp_enabled = False
+        controller.hp_out_of_potion_hold = OutOfPotionHold(100.0, 25.0)
+
+        with (
+            patch.object(controller, "_play_media_file"),
+            patch("builtins.print"),
+        ):
+            result = controller.set_auto_drink_enabled(False)
+
+        self.assertTrue(result)
+        self.assertFalse(controller.auto_drink_enabled)
+        controller.gui.set_auto_drink_enabled.assert_called_with(False)
+        controller.gui.set_potion_enabled.assert_called_once_with(False, False, update_settings=False)
+
+    def test_toggle_auto_drink_syncs_gui_runtime_checkbox(self):
+        controller = self.make_controller([])
+
+        with (
+            patch.object(controller, "_play_media_file"),
+            patch("builtins.print"),
+        ):
+            controller.toggle_auto_drink_enabled()
+
+        controller.gui.set_auto_drink_enabled.assert_called_with(False)
 
     def test_runtime_toggle_auto_drink_syncs_gui_potion_options(self):
         controller = self.make_controller([])
@@ -4274,7 +4436,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             controller.toggle_auto_drink_enabled()
 
         self.assertFalse(controller.auto_drink_enabled)
-        controller.gui.set_potion_enabled.assert_called_once_with(False, False)
+        controller.gui.set_potion_enabled.assert_called_once_with(False, False, update_settings=False)
 
     def test_auto_drink_hotkey_short_press_does_not_disable_when_enabled(self):
         controller = self.make_controller([])
@@ -4874,6 +5036,21 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(play_media.call_args_list[1].args, (AUTO_PICKUP_STOP_SOUND_PATH, "pickup_stop"))
         self.assertFalse(controller.pickup_enabled)
         self.assertEqual(controller.pickup_held_vk, 0)
+        controller.gui.set_pickup_enabled.assert_has_calls([call(True), call(False)])
+
+    def test_set_pickup_enabled_from_gui_reports_failed_enable(self):
+        controller = self.make_controller([])
+        controller.settings.pickup_key = None
+
+        with (
+            patch.object(controller, "_play_media_file"),
+            patch("builtins.print"),
+        ):
+            result = controller.set_pickup_enabled(True)
+
+        self.assertFalse(result)
+        self.assertFalse(controller.pickup_enabled)
+        controller.gui.set_pickup_enabled.assert_called_with(False)
 
     def test_pickup_toggle_enables_without_holding_key_when_hud_is_missing(self):
         controller = self.make_controller([])
