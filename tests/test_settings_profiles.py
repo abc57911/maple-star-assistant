@@ -36,6 +36,13 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(settings.character_stat_hotkey, "")
         self.assertIsNone(settings.pickup_toggle_hotkey)
         self.assertIsNone(settings.pickup_key)
+        self.assertIsNone(settings.minimap_cruise_toggle_hotkey)
+        self.assertEqual(settings.minimap_cruise_attack_key, "C")
+        self.assertIsNone(settings.minimap_cruise_left_x)
+        self.assertIsNone(settings.minimap_cruise_right_x)
+        self.assertIsNone(settings.minimap_cruise_detect_y)
+        self.assertEqual(settings.minimap_cruise_detect_band_height, 120)
+        self.assertEqual(settings.minimap_cruise_last_direction, "right")
         self.assertFalse(settings.console_collapsed)
         self.assertFalse(settings.combo_group_collapsed)
         self.assertFalse(settings.compact_experience_mode)
@@ -68,6 +75,13 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(saved["character_stat_hotkey"], "")
         self.assertIsNone(saved["pickup_toggle_hotkey"])
         self.assertIsNone(saved["pickup_key"])
+        self.assertIsNone(saved["minimap_cruise_toggle_hotkey"])
+        self.assertEqual(saved["minimap_cruise_attack_key"], "C")
+        self.assertIsNone(saved["minimap_cruise_left_x"])
+        self.assertIsNone(saved["minimap_cruise_right_x"])
+        self.assertIsNone(saved["minimap_cruise_detect_y"])
+        self.assertEqual(saved["minimap_cruise_detect_band_height"], 120)
+        self.assertEqual(saved["minimap_cruise_last_direction"], "right")
         self.assertFalse(saved["console_collapsed"])
         self.assertFalse(saved["combo_group_collapsed"])
         self.assertFalse(saved["compact_experience_mode"])
@@ -181,6 +195,46 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertNotIn("compact_experience_window_x", saved["profiles"]["Default"])
         self.assertNotIn("compact_experience_window_y", saved["profiles"]["Default"])
 
+    def test_minimap_cruise_settings_are_global_and_normalized(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "minimap_cruise_toggle_hotkey": "F6",
+                        "minimap_cruise_attack_key": "A",
+                        "minimap_cruise_left_x": "276",
+                        "minimap_cruise_right_x": "104",
+                        "minimap_cruise_detect_y": "205",
+                        "minimap_cruise_detect_band_height": 999,
+                        "minimap_cruise_last_direction": "bad",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("builtins.print"):
+                settings = load_settings(settings_path)
+            saved = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(settings.minimap_cruise_toggle_hotkey, "F6")
+        self.assertEqual(settings.minimap_cruise_attack_key, "A")
+        self.assertEqual(settings.minimap_cruise_left_x, 276)
+        self.assertEqual(settings.minimap_cruise_right_x, 104)
+        self.assertEqual(settings.minimap_cruise_detect_y, 205)
+        self.assertEqual(settings.minimap_cruise_detect_band_height, 180)
+        self.assertEqual(settings.minimap_cruise_last_direction, "right")
+        self.assertEqual(saved["minimap_cruise_toggle_hotkey"], "F6")
+        self.assertEqual(saved["minimap_cruise_attack_key"], "A")
+        self.assertEqual(saved["minimap_cruise_left_x"], 276)
+        self.assertEqual(saved["minimap_cruise_right_x"], 104)
+        self.assertEqual(saved["minimap_cruise_detect_y"], 205)
+        self.assertEqual(saved["minimap_cruise_detect_band_height"], 180)
+        self.assertEqual(saved["minimap_cruise_last_direction"], "right")
+        self.assertNotIn("minimap_cruise_toggle_hotkey", saved["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_attack_key", saved["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_left_x", saved["profiles"]["Default"])
+
     def test_apply_profile_saves_current_profile_before_switching(self):
         settings = AutoPotionSettings(hp_key="9", hp_continuous_enabled=True, active_profile="Main")
         settings.hp_continuous_stop_margin_percent = 3.0
@@ -239,6 +293,13 @@ class SettingsProfileTests(unittest.TestCase):
             character_stat_hotkey="V",
             pickup_toggle_hotkey="F7",
             pickup_key="Z",
+            minimap_cruise_toggle_hotkey="F6",
+            minimap_cruise_attack_key="A",
+            minimap_cruise_left_x=104,
+            minimap_cruise_right_x=276,
+            minimap_cruise_detect_y=205,
+            minimap_cruise_detect_band_height=16,
+            minimap_cruise_last_direction="left",
             console_collapsed=True,
             combo_group_collapsed=True,
             compact_experience_mode=True,
@@ -257,6 +318,13 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(payload["character_stat_hotkey"], "V")
         self.assertEqual(payload["pickup_toggle_hotkey"], "F7")
         self.assertEqual(payload["pickup_key"], "Z")
+        self.assertEqual(payload["minimap_cruise_toggle_hotkey"], "F6")
+        self.assertEqual(payload["minimap_cruise_attack_key"], "A")
+        self.assertEqual(payload["minimap_cruise_left_x"], 104)
+        self.assertEqual(payload["minimap_cruise_right_x"], 276)
+        self.assertEqual(payload["minimap_cruise_detect_y"], 205)
+        self.assertEqual(payload["minimap_cruise_detect_band_height"], 16)
+        self.assertEqual(payload["minimap_cruise_last_direction"], "left")
         self.assertTrue(payload["console_collapsed"])
         self.assertTrue(payload["combo_group_collapsed"])
         self.assertTrue(payload["compact_experience_mode"])
@@ -276,6 +344,13 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertNotIn("character_stat_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("pickup_toggle_hotkey", payload["profiles"]["Default"])
         self.assertNotIn("pickup_key", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_toggle_hotkey", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_attack_key", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_left_x", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_right_x", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_detect_y", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_detect_band_height", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_last_direction", payload["profiles"]["Default"])
         self.assertNotIn("console_collapsed", payload["profiles"]["Default"])
         self.assertNotIn("combo_group_collapsed", payload["profiles"]["Default"])
         self.assertNotIn("compact_experience_mode", payload["profiles"]["Default"])

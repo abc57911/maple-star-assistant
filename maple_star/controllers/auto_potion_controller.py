@@ -103,6 +103,7 @@ from ..services.control_hotkey_worker import (
     CONTROL_HOTKEY_EMERGENCY_STOP,
     CONTROL_HOTKEY_EXPERIENCE_RESET,
     CONTROL_HOTKEY_EXPERIENCE_TOGGLE,
+    CONTROL_HOTKEY_MINIMAP_CRUISE_TOGGLE,
     CONTROL_HOTKEY_PICKUP_TOGGLE,
     CONTROL_HOTKEY_TOGGLE,
     ControlHotkeyWorker,
@@ -440,16 +441,20 @@ class AutoPotionController:
         self.experience_toggle_hotkey_was_down = False
         self.experience_reset_hotkey_was_down = False
         self.pickup_toggle_hotkey_was_down = False
+        self.minimap_cruise_toggle_hotkey_was_down = False
         self.registered_toggle_hotkey_vk = 0
         self.registered_emergency_stop_hotkey_vk = 0
         self.registered_experience_toggle_hotkey_vk = 0
         self.registered_experience_reset_hotkey_vk = 0
         self.registered_pickup_toggle_hotkey_vk = 0
+        self.registered_minimap_cruise_toggle_hotkey_vk = 0
         self.control_hotkeys_suppressed_until_release = False
         self.last_toggle_hotkey_at = -999.0
         self.last_experience_toggle_hotkey_at = -999.0
         self.last_experience_reset_hotkey_at = -999.0
         self.last_pickup_toggle_hotkey_at = -999.0
+        self.last_minimap_cruise_toggle_hotkey_at = -999.0
+        self.minimap_cruise_toggle_handler: Callable[[], None] | None = None
         self.auto_drink_disable_hold_started_at = -999.0
         self.pickup_disable_hold_started_at = -999.0
         self.pickup_enabled = False
@@ -940,16 +945,25 @@ class AutoPotionController:
         experience_vk = self._control_hotkey_vk(self.settings.experience_toggle_hotkey, "F10")
         experience_reset_vk = self._control_hotkey_vk(self.settings.experience_reset_hotkey, "F9")
         pickup_toggle_vk = self._optional_control_hotkey_vk(self.settings.pickup_toggle_hotkey)
+        minimap_cruise_toggle_vk = self._optional_control_hotkey_vk(self.settings.minimap_cruise_toggle_hotkey)
         if (
             toggle_vk == self.registered_toggle_hotkey_vk
             and emergency_vk == self.registered_emergency_stop_hotkey_vk
             and experience_vk == self.registered_experience_toggle_hotkey_vk
             and experience_reset_vk == self.registered_experience_reset_hotkey_vk
             and pickup_toggle_vk == self.registered_pickup_toggle_hotkey_vk
+            and minimap_cruise_toggle_vk == self.registered_minimap_cruise_toggle_hotkey_vk
         ):
             return
         self._unregister_toggle_hotkey()
-        self._register_toggle_hotkey(toggle_vk, emergency_vk, experience_vk, experience_reset_vk, pickup_toggle_vk)
+        self._register_toggle_hotkey(
+            toggle_vk,
+            emergency_vk,
+            experience_vk,
+            experience_reset_vk,
+            pickup_toggle_vk,
+            minimap_cruise_toggle_vk,
+        )
 
     def _register_toggle_hotkey(
         self,
@@ -958,6 +972,7 @@ class AutoPotionController:
         experience_vk: int,
         experience_reset_vk: int = 0,
         pickup_toggle_vk: int = 0,
+        minimap_cruise_toggle_vk: int = 0,
     ) -> None:
         self.registered_toggle_hotkey_vk = toggle_vk
         self.hotkey_registered = bool(toggle_vk)
@@ -973,6 +988,8 @@ class AutoPotionController:
 
         self.registered_pickup_toggle_hotkey_vk = pickup_toggle_vk
         self.pickup_toggle_hotkey_registered = bool(pickup_toggle_vk)
+
+        self.registered_minimap_cruise_toggle_hotkey_vk = minimap_cruise_toggle_vk
         worker = getattr(self, "control_hotkey_worker", None)
         if worker is not None:
             worker.update_hotkeys(
@@ -982,6 +999,7 @@ class AutoPotionController:
                     CONTROL_HOTKEY_EXPERIENCE_TOGGLE: experience_vk,
                     CONTROL_HOTKEY_EXPERIENCE_RESET: experience_reset_vk,
                     CONTROL_HOTKEY_PICKUP_TOGGLE: pickup_toggle_vk,
+                    CONTROL_HOTKEY_MINIMAP_CRUISE_TOGGLE: minimap_cruise_toggle_vk,
                 }
             )
 
@@ -996,6 +1014,7 @@ class AutoPotionController:
         self.registered_experience_reset_hotkey_vk = 0
         self.pickup_toggle_hotkey_registered = False
         self.registered_pickup_toggle_hotkey_vk = 0
+        self.registered_minimap_cruise_toggle_hotkey_vk = 0
         worker = getattr(self, "control_hotkey_worker", None)
         if worker is not None:
             worker.update_hotkeys({})
@@ -1009,6 +1028,7 @@ class AutoPotionController:
             self.experience_toggle_hotkey_was_down = False
             self.experience_reset_hotkey_was_down = False
             self.pickup_toggle_hotkey_was_down = False
+            self.minimap_cruise_toggle_hotkey_was_down = False
             self.auto_drink_disable_hold_started_at = -999.0
             self.pickup_disable_hold_started_at = -999.0
             self._release_pickup_key()
@@ -1072,6 +1092,7 @@ class AutoPotionController:
         experience_toggle_triggered = False
         experience_reset_triggered = False
         pickup_toggle_triggered = False
+        minimap_cruise_toggle_triggered = False
         message = Msg()
         while user32.PeekMessageW(
             ctypes.byref(message),
@@ -1127,6 +1148,15 @@ class AutoPotionController:
             pickup_toggle_triggered = True
         self.pickup_toggle_hotkey_was_down = pickup_toggle_is_down
 
+        minimap_cruise_toggle_is_down = bool(
+            getattr(self, "registered_minimap_cruise_toggle_hotkey_vk", 0)
+            and user32.GetAsyncKeyState(getattr(self, "registered_minimap_cruise_toggle_hotkey_vk", 0))
+            & ASYNC_KEY_DOWN_MASK
+        )
+        if minimap_cruise_toggle_is_down and not getattr(self, "minimap_cruise_toggle_hotkey_was_down", False):
+            minimap_cruise_toggle_triggered = True
+        self.minimap_cruise_toggle_hotkey_was_down = minimap_cruise_toggle_is_down
+
         now = time.monotonic()
         if not (
             toggle_triggered
@@ -1134,6 +1164,7 @@ class AutoPotionController:
             or experience_toggle_triggered
             or experience_reset_triggered
             or pickup_toggle_triggered
+            or minimap_cruise_toggle_triggered
             or self._has_pending_control_hotkey_hold()
         ):
             return
@@ -1153,6 +1184,8 @@ class AutoPotionController:
             self._try_reset_experience_statistics(now)
         elif pickup_toggle_triggered:
             self._try_toggle_pickup(now)
+        elif minimap_cruise_toggle_triggered:
+            self._try_toggle_minimap_cruise(now)
 
     def _drain_control_hotkey_worker_events(self) -> list[str]:
         worker = getattr(self, "control_hotkey_worker", None)
@@ -1181,6 +1214,8 @@ class AutoPotionController:
             self._try_reset_experience_statistics(now)
         elif event == CONTROL_HOTKEY_PICKUP_TOGGLE:
             self._try_toggle_pickup(now)
+        elif event == CONTROL_HOTKEY_MINIMAP_CRUISE_TOGGLE:
+            self._try_toggle_minimap_cruise(now)
 
     def is_key_capture_blocking_actions(self) -> bool:
         return self.gui.is_detecting_key() or self.gui.is_key_detection_release_pending()
@@ -1210,6 +1245,11 @@ class AutoPotionController:
             self.registered_pickup_toggle_hotkey_vk
             and user32.GetAsyncKeyState(self.registered_pickup_toggle_hotkey_vk) & ASYNC_KEY_DOWN_MASK
         )
+        self.minimap_cruise_toggle_hotkey_was_down = bool(
+            getattr(self, "registered_minimap_cruise_toggle_hotkey_vk", 0)
+            and user32.GetAsyncKeyState(getattr(self, "registered_minimap_cruise_toggle_hotkey_vk", 0))
+            & ASYNC_KEY_DOWN_MASK
+        )
 
     def _apply_control_hotkey_down_states(self, down: dict[str, bool]) -> None:
         self.toggle_hotkey_was_down = down.get(CONTROL_HOTKEY_TOGGLE, False)
@@ -1217,6 +1257,7 @@ class AutoPotionController:
         self.experience_toggle_hotkey_was_down = down.get(CONTROL_HOTKEY_EXPERIENCE_TOGGLE, False)
         self.experience_reset_hotkey_was_down = down.get(CONTROL_HOTKEY_EXPERIENCE_RESET, False)
         self.pickup_toggle_hotkey_was_down = down.get(CONTROL_HOTKEY_PICKUP_TOGGLE, False)
+        self.minimap_cruise_toggle_hotkey_was_down = down.get(CONTROL_HOTKEY_MINIMAP_CRUISE_TOGGLE, False)
 
     def _any_control_hotkey_is_down(self) -> bool:
         return (
@@ -1225,6 +1266,7 @@ class AutoPotionController:
             or self.experience_toggle_hotkey_was_down
             or self.experience_reset_hotkey_was_down
             or self.pickup_toggle_hotkey_was_down
+            or getattr(self, "minimap_cruise_toggle_hotkey_was_down", False)
         )
 
     def _has_pending_control_hotkey_hold(self) -> bool:
@@ -1277,6 +1319,9 @@ class AutoPotionController:
             return False
         self.emergency_stop_requested = False
         return True
+
+    def set_minimap_cruise_toggle_handler(self, handler: Callable[[], None] | None) -> None:
+        self.minimap_cruise_toggle_handler = handler
 
     def _control_hotkey_has_allowed_foreground(self) -> bool:
         if self.is_target_window_active():
@@ -1359,6 +1404,18 @@ class AutoPotionController:
             f"toggle_down={self.pickup_toggle_hotkey_was_down}"
         )
         self.toggle_pickup_enabled()
+
+    def _try_toggle_minimap_cruise(self, now: float) -> None:
+        if now - self.last_minimap_cruise_toggle_hotkey_at < TOGGLE_HOTKEY_DEBOUNCE_SECONDS:
+            return
+        self.last_minimap_cruise_toggle_hotkey_at = now
+        if not self._control_hotkey_requires_allowed_foreground("切換小地圖巡航"):
+            return
+        handler = getattr(self, "minimap_cruise_toggle_handler", None)
+        if callable(handler):
+            handler()
+            return
+        self.gui.set_status("小地圖巡航尚未初始化")
 
     def _process_pending_auto_drink_disable(self, now: float) -> None:
         started_at = getattr(self, "auto_drink_disable_hold_started_at", -999.0)
@@ -1710,6 +1767,16 @@ class AutoPotionController:
 
     def toggle_scripts_enabled(self) -> None:
         self.toggle_auto_drink_enabled()
+
+    def notify_minimap_cruise_toggle(self, enabled: bool, changed: bool, message: str) -> None:
+        if changed:
+            if enabled:
+                self._play_media_file(AUTO_DRINK_START_SOUND_PATH, "auto_drink_start")
+            else:
+                self._play_media_file(AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop")
+        self.gui.set_status(message)
+        self.gui.show_toggle_notice(message)
+        self.last_action = message
 
     def toggle_experience_efficiency(self) -> None:
         now = time.monotonic()

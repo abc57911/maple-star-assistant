@@ -56,7 +56,11 @@ from maple_star.experience import (
     read_experience_tooltip_in_worker,
 )
 from maple_star.models.controller_state import BarDetectionDebug, HudSearchArea, OutOfPotionHold, PotionEffectAttempt
-from maple_star.services.control_hotkey_worker import CONTROL_HOTKEY_EXPERIENCE_TOGGLE, CONTROL_HOTKEY_PICKUP_TOGGLE
+from maple_star.services.control_hotkey_worker import (
+    CONTROL_HOTKEY_EXPERIENCE_TOGGLE,
+    CONTROL_HOTKEY_MINIMAP_CRUISE_TOGGLE,
+    CONTROL_HOTKEY_PICKUP_TOGGLE,
+)
 from maple_star.services.potion_action_worker import PotionAction, PotionActionWorker, _apply_potion_action
 from maple_star.services.runtime_processes import (
     ExperienceStatus,
@@ -4356,6 +4360,39 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(play_media.call_args_list[0].args, (AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop"))
         self.assertEqual(play_media.call_args_list[1].args, (AUTO_DRINK_START_SOUND_PATH, "auto_drink_start"))
 
+    def test_notify_minimap_cruise_toggle_plays_start_sound_and_notice(self):
+        controller = self.make_controller([])
+
+        with patch.object(controller, "_play_media_file") as play_media:
+            controller.notify_minimap_cruise_toggle(True, True, "小地圖巡航已啟用")
+
+        play_media.assert_called_once_with(AUTO_DRINK_START_SOUND_PATH, "auto_drink_start")
+        controller.gui.set_status.assert_called_with("小地圖巡航已啟用")
+        controller.gui.show_toggle_notice.assert_called_with("小地圖巡航已啟用")
+        self.assertEqual(controller.last_action, "小地圖巡航已啟用")
+
+    def test_notify_minimap_cruise_toggle_plays_stop_sound_and_notice(self):
+        controller = self.make_controller([])
+
+        with patch.object(controller, "_play_media_file") as play_media:
+            controller.notify_minimap_cruise_toggle(False, True, "小地圖巡航已停用")
+
+        play_media.assert_called_once_with(AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop")
+        controller.gui.set_status.assert_called_with("小地圖巡航已停用")
+        controller.gui.show_toggle_notice.assert_called_with("小地圖巡航已停用")
+        self.assertEqual(controller.last_action, "小地圖巡航已停用")
+
+    def test_notify_minimap_cruise_toggle_failure_only_shows_notice(self):
+        controller = self.make_controller([])
+
+        with patch.object(controller, "_play_media_file") as play_media:
+            controller.notify_minimap_cruise_toggle(False, False, "請先設定小地圖邊界")
+
+        play_media.assert_not_called()
+        controller.gui.set_status.assert_called_with("請先設定小地圖邊界")
+        controller.gui.show_toggle_notice.assert_called_with("請先設定小地圖邊界")
+        self.assertEqual(controller.last_action, "請先設定小地圖邊界")
+
     def test_toggle_auto_drink_syncs_gui_potion_options_and_restores_previous_selection(self):
         controller = self.make_controller([])
         controller.settings.hp_enabled = True
@@ -4858,6 +4895,18 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._try_toggle_pickup.assert_called_once()
         controller.emergency_stop.assert_called_once()
 
+    def test_control_hotkey_worker_dispatches_minimap_cruise_toggle(self):
+        controller = self.make_controller([])
+        controller.gui.is_detecting_key.return_value = False
+        controller.gui.consume_key_detection_finished.return_value = False
+        controller.control_hotkey_worker = Mock()
+        controller.control_hotkey_worker.drain_events.return_value = [CONTROL_HOTKEY_MINIMAP_CRUISE_TOGGLE]
+        controller._try_toggle_minimap_cruise = Mock()
+
+        controller.poll_control_hotkeys()
+
+        controller._try_toggle_minimap_cruise.assert_called_once()
+
     def test_control_hotkey_worker_event_does_not_fall_back_to_second_key_edge(self):
         class FakeWorker:
             def __init__(self):
@@ -4903,6 +4952,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
                 "experience_toggle": 0x79,
                 "experience_reset": 0x78,
                 "pickup_toggle": 0,
+                CONTROL_HOTKEY_MINIMAP_CRUISE_TOGGLE: 0,
             }
         )
 

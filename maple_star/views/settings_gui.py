@@ -75,6 +75,9 @@ ACCENT_GREEN = "#18b981"
 HP_RED = "#ff5b6e"
 MP_BLUE = "#45a3ff"
 WARNING_YELLOW = "#f6c44f"
+VK_LBUTTON = 0x01
+ASYNC_KEY_DOWN_MASK = 0x8000
+MINIMAP_BOUNDARY_POLL_MS = 20
 BUTTON_BG = "#2d81ff"
 BUTTON_HOVER = "#4d9aff"
 BUTTON_BORDER = "#6ba5df"
@@ -256,6 +259,7 @@ class AutoPotionSettingsGui:
         self.combo_group_section: ctk.CTkFrame | None = None
         self.combo_group_body: ctk.CTkFrame | None = None
         self.combo_group_title_label: ctk.CTkLabel | None = None
+        self.minimap_cruise_section: ctk.CTkFrame | None = None
         self.combo_group_collapsed = False
         self.full_panel_widgets: list[tk.Misc] = []
         self.panel_mode_button: ctk.CTkButton | None = None
@@ -342,6 +346,13 @@ class AutoPotionSettingsGui:
         self.character_stat_hotkey = tk.StringVar(value=settings.character_stat_hotkey)
         self.pickup_toggle_hotkey = tk.StringVar(value=settings.pickup_toggle_hotkey or "")
         self.pickup_key = tk.StringVar(value=settings.pickup_key or "")
+        self.minimap_cruise_toggle_hotkey = tk.StringVar(value=settings.minimap_cruise_toggle_hotkey or "")
+        self.minimap_cruise_attack_key = tk.StringVar(value=settings.minimap_cruise_attack_key)
+        self.minimap_cruise_boundary_status = tk.StringVar(value=self._minimap_cruise_boundary_status_text())
+        self.minimap_cruise_boundary_step = ""
+        self.minimap_cruise_first_point: tuple[int, int] | None = None
+        self.minimap_cruise_boundary_after_id: str | None = None
+        self.minimap_cruise_mouse_was_down = False
         self.hp_current = tk.StringVar(value="HP: --%")
         self.mp_current = tk.StringVar(value="MP: --%")
         self.status = tk.StringVar(value="控制熱鍵可在楓星或本程式前景觸發")
@@ -553,10 +564,61 @@ class AutoPotionSettingsGui:
         self.bar_preview_labels["mp"] = self._label(detection_frame, "尚未刷新預覽", color=MUTED_TEXT)
         self.bar_preview_labels["mp"].grid(row=3, column=0, sticky="w", pady=(0, 6))
 
-        combo_group_section, combo_group_header, combo_group_body = self._build_section(
+        minimap_section, minimap_header, minimap_frame = self._build_section(
             controls_frame,
             "",
             row=4,
+            sticky="ew",
+            pady=(8, 0),
+        )
+        self.minimap_cruise_section = minimap_section
+        self._title_label(minimap_header, "小地圖巡航").grid(row=0, column=0, sticky="w", padx=8, pady=4)
+        minimap_frame.columnconfigure(7, weight=1)
+        self._label(minimap_frame, "啟停").grid(row=0, column=0, sticky="w", padx=(0, 4), pady=6)
+        minimap_toggle_entry = self._entry(
+            minimap_frame,
+            self.minimap_cruise_toggle_hotkey,
+            width=HOTKEY_ENTRY_WIDTH,
+            justify="center",
+            placeholder_text="自訂",
+        )
+        minimap_toggle_entry.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=6)
+        minimap_toggle_entry.bind(
+            "<Button-1>",
+            lambda event: self._start_key_detection_from_entry(event, self.minimap_cruise_toggle_hotkey, "巡航啟停熱鍵"),
+        )
+        self._label(minimap_frame, "攻擊鍵").grid(row=0, column=2, sticky="w", padx=(8, 4), pady=6)
+        minimap_attack_entry = self._entry(
+            minimap_frame,
+            self.minimap_cruise_attack_key,
+            width=HOTKEY_ENTRY_WIDTH,
+            justify="center",
+        )
+        minimap_attack_entry.grid(row=0, column=3, sticky="w", padx=(0, 8), pady=6)
+        minimap_attack_entry.bind(
+            "<Button-1>",
+            lambda event: self._start_key_detection_from_entry(event, self.minimap_cruise_attack_key, "巡航攻擊鍵"),
+        )
+        self._button(minimap_frame, "設定邊界", self.start_minimap_cruise_boundary_setup, width=88).grid(
+            row=0,
+            column=4,
+            sticky="w",
+            padx=(8, 8),
+            pady=6,
+        )
+        self._label(minimap_frame, textvariable=self.minimap_cruise_boundary_status, color=MUTED_TEXT).grid(
+            row=0,
+            column=5,
+            columnspan=3,
+            sticky="w",
+            padx=(0, 8),
+            pady=6,
+        )
+
+        combo_group_section, combo_group_header, combo_group_body = self._build_section(
+            controls_frame,
+            "",
+            row=5,
             sticky="ew",
             pady=(8, 0),
         )
@@ -606,7 +668,7 @@ class AutoPotionSettingsGui:
         self._refresh_combo_script_visibility()
 
         runtime_frame = ctk.CTkFrame(controls_frame, fg_color=PANEL_BG_ALT, corner_radius=SECTION_RADIUS, border_width=1, border_color=PANEL_BORDER)
-        runtime_frame.grid(row=5, column=0, sticky="ew", pady=(8, 6))
+        runtime_frame.grid(row=6, column=0, sticky="ew", pady=(8, 6))
         for column in range(3):
             runtime_frame.columnconfigure(column, weight=1)
         self._label(runtime_frame, textvariable=self.runtime_script_status, color=ACCENT_GREEN).grid(row=0, column=0, sticky="w", padx=(10, 12), pady=8)
@@ -620,6 +682,7 @@ class AutoPotionSettingsGui:
             profile_section,
             potion_section,
             detection_section,
+            minimap_section,
             combo_group_section,
             runtime_frame,
         ]
@@ -715,6 +778,8 @@ class AutoPotionSettingsGui:
         self._schedule_window_interaction_finish()
 
     def is_window_interaction_active(self) -> bool:
+        if getattr(self, "minimap_cruise_boundary_step", ""):
+            return True
         if self._root_is_minimized():
             return False
         now = time.monotonic()
@@ -2008,6 +2073,7 @@ class AutoPotionSettingsGui:
         text_var.set(f"{value:.0f}")
 
     def close(self) -> None:
+        self.cancel_minimap_cruise_boundary_setup()
         self.cancel_key_detection()
         self._remember_current_mode_window_position()
         self.apply_to_settings()
@@ -2215,6 +2281,9 @@ class AutoPotionSettingsGui:
         self.character_stat_hotkey.set(self.settings.character_stat_hotkey)
         self.pickup_toggle_hotkey.set(self.settings.pickup_toggle_hotkey or "")
         self.pickup_key.set(self.settings.pickup_key or "")
+        self.minimap_cruise_toggle_hotkey.set(self.settings.minimap_cruise_toggle_hotkey or "")
+        self.minimap_cruise_attack_key.set(self.settings.minimap_cruise_attack_key)
+        self.minimap_cruise_boundary_status.set(self._minimap_cruise_boundary_status_text())
         self.set_window_topmost(self.settings.window_topmost)
         self.set_console_collapsed(self.settings.console_collapsed)
         self.set_compact_experience_mode(self.settings.compact_experience_mode)
@@ -2300,6 +2369,91 @@ class AutoPotionSettingsGui:
 
         self._sync_vars_from_settings()
         self.set_status(f"已匯入設定：{path}")
+
+    def _minimap_cruise_boundary_status_text(self) -> str:
+        left_x = self.settings.minimap_cruise_left_x
+        right_x = self.settings.minimap_cruise_right_x
+        detect_y = self.settings.minimap_cruise_detect_y
+        if left_x is None or right_x is None or detect_y is None:
+            return "邊界：未設定"
+        left_x, right_x = sorted((int(left_x), int(right_x)))
+        return f"邊界：X {left_x}-{right_x} / Y {int(detect_y)}"
+
+    def start_minimap_cruise_boundary_setup(self) -> None:
+        self.cancel_key_detection()
+        self.cancel_minimap_cruise_boundary_setup(keep_status=True)
+        self.minimap_cruise_boundary_step = "left"
+        self.minimap_cruise_first_point = None
+        self.minimap_cruise_mouse_was_down = self._left_mouse_button_is_down()
+        self.minimap_cruise_boundary_status.set("邊界：請點左界")
+        self.set_status("請點擊小地圖左邊界")
+        self._schedule_minimap_cruise_boundary_poll()
+
+    def cancel_minimap_cruise_boundary_setup(self, keep_status: bool = False) -> None:
+        after_id = getattr(self, "minimap_cruise_boundary_after_id", None)
+        if after_id is not None:
+            try:
+                self.root.after_cancel(after_id)
+            except tk.TclError:
+                pass
+            self.minimap_cruise_boundary_after_id = None
+        self.minimap_cruise_boundary_step = ""
+        self.minimap_cruise_first_point = None
+        self.minimap_cruise_mouse_was_down = False
+        if not keep_status and not self.closed:
+            self.minimap_cruise_boundary_status.set(self._minimap_cruise_boundary_status_text())
+
+    def _schedule_minimap_cruise_boundary_poll(self) -> None:
+        if not getattr(self, "minimap_cruise_boundary_step", "") or self.closed:
+            return
+        self.minimap_cruise_boundary_after_id = self.root.after(
+            MINIMAP_BOUNDARY_POLL_MS,
+            self._poll_minimap_cruise_boundary_click,
+        )
+
+    def _poll_minimap_cruise_boundary_click(self) -> None:
+        if not getattr(self, "minimap_cruise_boundary_step", ""):
+            return
+        is_down = self._left_mouse_button_is_down()
+        if is_down and not self.minimap_cruise_mouse_was_down:
+            point = self._current_foreground_client_point()
+            if point is None:
+                self.set_status("請在小地圖所在的遊戲視窗內點擊")
+            elif self.minimap_cruise_boundary_step == "left":
+                self.minimap_cruise_first_point = point
+                self.minimap_cruise_boundary_step = "right"
+                self.minimap_cruise_boundary_status.set(f"左界：X {point[0]} / 請點右界")
+                self.set_status("請點擊小地圖右邊界")
+            else:
+                first = self.minimap_cruise_first_point
+                if first is not None:
+                    left_x, right_x = sorted((first[0], point[0]))
+                    detect_y = round((first[1] + point[1]) / 2)
+                    self.settings.minimap_cruise_left_x = left_x
+                    self.settings.minimap_cruise_right_x = right_x
+                    self.settings.minimap_cruise_detect_y = detect_y
+                    self.minimap_cruise_boundary_status.set(self._minimap_cruise_boundary_status_text())
+                    self.set_status("小地圖巡航邊界已設定")
+                    self.cancel_minimap_cruise_boundary_setup(keep_status=True)
+                    self.apply_to_settings()
+                    return
+        self.minimap_cruise_mouse_was_down = is_down
+        self._schedule_minimap_cruise_boundary_poll()
+
+    def _left_mouse_button_is_down(self) -> bool:
+        return bool(user32.GetAsyncKeyState(VK_LBUTTON) & ASYNC_KEY_DOWN_MASK)
+
+    def _current_foreground_client_point(self) -> tuple[int, int] | None:
+        cursor = Point()
+        if not user32.GetCursorPos(ctypes.byref(cursor)):
+            return None
+        rect = self._foreground_client_rect()
+        if rect is None:
+            return None
+        left, top, right, bottom = rect
+        if not (left <= cursor.x < right and top <= cursor.y < bottom):
+            return None
+        return cursor.x - left, cursor.y - top
 
     def _start_key_detection_from_entry(self, event: tk.Event, target: tk.StringVar, label: str) -> str:
         source_widget = getattr(event, "widget", None)
@@ -2636,6 +2790,12 @@ class AutoPotionSettingsGui:
         self.settings.character_stat_hotkey = self.character_stat_hotkey.get().strip()
         self.settings.pickup_toggle_hotkey = self.pickup_toggle_hotkey.get().strip() or None
         self.settings.pickup_key = self.pickup_key.get().strip() or None
+        minimap_toggle_var = getattr(self, "minimap_cruise_toggle_hotkey", None)
+        if minimap_toggle_var is not None:
+            self.settings.minimap_cruise_toggle_hotkey = minimap_toggle_var.get().strip() or None
+        minimap_attack_var = getattr(self, "minimap_cruise_attack_key", None)
+        if minimap_attack_var is not None:
+            self.settings.minimap_cruise_attack_key = minimap_attack_var.get().strip() or "C"
         self.settings.console_collapsed = self.console_collapsed
         self.settings.combo_group_collapsed = self.combo_group_collapsed
         self.settings.compact_experience_mode = self.compact_experience_mode

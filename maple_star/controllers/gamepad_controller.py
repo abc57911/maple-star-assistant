@@ -5,6 +5,8 @@ import sys
 import time
 from typing import Callable
 
+import numpy as np
+
 from .auto_potion_controller import AutoPotionController
 from ..adapters.win_input import (
     key_display_name,
@@ -26,6 +28,7 @@ from ..services.gamepad_bindings import (
     first_enabled_controller_binding,
     is_controller_binding_enabled,
 )
+from ..services.minimap_cruise import MinimapCruiseRuntime
 
 from ..adapters.controller_worker import (
     EVENT_BUTTON_DOWN,
@@ -604,6 +607,24 @@ def main() -> None:
     current_controller_button_settings: tuple[tuple[str, object], ...] | None = None
     key_capture_actions_were_blocked = False
     controller_worker_dead_reported = False
+    minimap_cruise = MinimapCruiseRuntime(
+        settings=auto_potion.settings,
+        is_target_window_active=is_target_window_active,
+        can_run_actions=auto_potion.can_run_actions,
+        is_action_blocked=lambda: auto_potion.is_key_capture_blocking_actions()
+        or auto_potion.gui.is_window_interaction_active(),
+        target_client_bounds_provider=auto_potion._target_client_bounds,
+        capture_provider=lambda monitor: np.asarray(auto_potion.sct.grab(monitor)).copy(),
+        set_status=auto_potion.gui.set_status,
+    )
+
+    def toggle_minimap_cruise() -> None:
+        was_enabled = minimap_cruise.enabled
+        enabled = minimap_cruise.toggle(time.monotonic())
+        message = minimap_cruise.last_message or ("小地圖巡航已啟用" if enabled else "小地圖巡航已停用")
+        auto_potion.notify_minimap_cruise_toggle(enabled, was_enabled != minimap_cruise.enabled, message)
+
+    auto_potion.set_minimap_cruise_toggle_handler(toggle_minimap_cruise)
 
     print("只在 MapleStory Worlds 為前景視窗且偵測到遊戲 HUD 時生效。")
     print(
@@ -647,6 +668,7 @@ def main() -> None:
         print(reason)
         for binding in all_button_bindings:
             binding.stop()
+        minimap_cruise.stop(reason)
         release_tracked_keys()
 
     def any_combo_enabled() -> bool:
@@ -671,6 +693,9 @@ def main() -> None:
             status_text = getattr(binding, "status_text", lambda: "")()
             if status_text:
                 statuses.append(status_text)
+        cruise_status = minimap_cruise.status_text()
+        if cruise_status != "--":
+            statuses.append(cruise_status)
         return " / ".join(statuses) if statuses else "--"
 
     last_runtime_info_refreshed_at = 0.0
@@ -779,6 +804,7 @@ def main() -> None:
     def poll_control_hotkeys_safely() -> None:
         auto_potion.poll_control_hotkeys()
         if auto_potion.consume_emergency_stop_requested():
+            minimap_cruise.stop(f"{auto_potion.settings.emergency_stop_hotkey}：停止小地圖巡航")
             stop_all_bindings(f"{auto_potion.settings.emergency_stop_hotkey}：停止所有手把巨集並釋放按鍵")
 
     def next_loop_delay_ms() -> int:
@@ -808,8 +834,10 @@ def main() -> None:
                 stop_all_bindings("快捷鍵設定中，停止所有手把巨集並釋放按鍵")
             key_capture_actions_were_blocked = key_capture_actions_blocked
             if window_interaction_active:
+                minimap_cruise.update(time.monotonic())
                 return
             update_active_bindings()
+            minimap_cruise.update(time.monotonic())
 
             now = time.monotonic()
             next_deadline = next_binding_deadline_at()
@@ -842,6 +870,7 @@ def main() -> None:
         auto_potion.gui.root.mainloop()
     finally:
         auto_potion.cleanup()
+        minimap_cruise.stop("小地圖巡航已停止")
         for binding in all_button_bindings:
             binding.cleanup()
         release_tracked_keys()

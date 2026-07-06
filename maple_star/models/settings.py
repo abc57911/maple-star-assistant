@@ -67,6 +67,11 @@ COMBO_ATTACK_START_DELAY_MIN_SECONDS = 0.0
 COMBO_ATTACK_START_DELAY_MAX_SECONDS = 10.0
 COMBO_ATTACK_HOLD_MIN_SECONDS = 0.01
 COMBO_ATTACK_HOLD_MAX_SECONDS = 10.0
+MINIMAP_CRUISE_DEFAULT_ATTACK_KEY = "C"
+MINIMAP_CRUISE_DEFAULT_DETECT_BAND_HEIGHT = 120
+MINIMAP_CRUISE_MIN_DETECT_BAND_HEIGHT = 12
+MINIMAP_CRUISE_MAX_DETECT_BAND_HEIGHT = 180
+MINIMAP_CRUISE_DIRECTIONS = ("left", "right")
 
 
 def normalize_controller_button_name(value: object, fallback: str) -> str:
@@ -233,6 +238,15 @@ def normalize_profile_name(value: object, fallback: str = DEFAULT_PROFILE_NAME) 
     normalized = value.strip()
     return normalized or fallback
 
+
+def normalize_minimap_cruise_direction(value: object, fallback: str = "right") -> str:
+    if not isinstance(value, str):
+        return fallback
+    normalized = value.strip().lower()
+    if normalized in MINIMAP_CRUISE_DIRECTIONS:
+        return normalized
+    return fallback
+
 @dataclass
 class AutoPotionSettings:
     hp_enabled: bool = True
@@ -267,6 +281,13 @@ class AutoPotionSettings:
     character_stat_hotkey: str = DEFAULT_CHARACTER_STAT_HOTKEY
     pickup_toggle_hotkey: str | None = None
     pickup_key: str | None = None
+    minimap_cruise_toggle_hotkey: str | None = None
+    minimap_cruise_attack_key: str = MINIMAP_CRUISE_DEFAULT_ATTACK_KEY
+    minimap_cruise_left_x: int | None = None
+    minimap_cruise_right_x: int | None = None
+    minimap_cruise_detect_y: int | None = None
+    minimap_cruise_detect_band_height: int = MINIMAP_CRUISE_DEFAULT_DETECT_BAND_HEIGHT
+    minimap_cruise_last_direction: str = "right"
     console_collapsed: bool = False
     combo_group_collapsed: bool = False
     compact_experience_mode: bool = False
@@ -342,6 +363,13 @@ class AutoPotionSettings:
             self.character_stat_hotkey,
             self.pickup_toggle_hotkey,
             self.pickup_key,
+            self.minimap_cruise_toggle_hotkey,
+            self.minimap_cruise_attack_key,
+            self.minimap_cruise_left_x,
+            self.minimap_cruise_right_x,
+            self.minimap_cruise_detect_y,
+            self.minimap_cruise_detect_band_height,
+            self.minimap_cruise_last_direction,
             self.console_collapsed,
             self.combo_group_collapsed,
             self.compact_experience_mode,
@@ -396,6 +424,13 @@ class AutoPotionSettings:
             "character_stat_hotkey": self.character_stat_hotkey,
             "pickup_toggle_hotkey": self.pickup_toggle_hotkey,
             "pickup_key": self.pickup_key,
+            "minimap_cruise_toggle_hotkey": self.minimap_cruise_toggle_hotkey,
+            "minimap_cruise_attack_key": self.minimap_cruise_attack_key,
+            "minimap_cruise_left_x": self.minimap_cruise_left_x,
+            "minimap_cruise_right_x": self.minimap_cruise_right_x,
+            "minimap_cruise_detect_y": self.minimap_cruise_detect_y,
+            "minimap_cruise_detect_band_height": self.minimap_cruise_detect_band_height,
+            "minimap_cruise_last_direction": self.minimap_cruise_last_direction,
             "console_collapsed": self.console_collapsed,
             "combo_group_collapsed": self.combo_group_collapsed,
             "compact_experience_mode": self.compact_experience_mode,
@@ -490,6 +525,13 @@ GLOBAL_SETTING_KEYS = (
     "character_stat_hotkey",
     "pickup_toggle_hotkey",
     "pickup_key",
+    "minimap_cruise_toggle_hotkey",
+    "minimap_cruise_attack_key",
+    "minimap_cruise_left_x",
+    "minimap_cruise_right_x",
+    "minimap_cruise_detect_y",
+    "minimap_cruise_detect_band_height",
+    "minimap_cruise_last_direction",
     "console_collapsed",
     "combo_group_collapsed",
     "compact_experience_mode",
@@ -552,6 +594,16 @@ def _read_optional_int(data: dict[str, object], key: str, fallback: int | None) 
         return fallback
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _read_int(data: dict[str, object], key: str, fallback: int, minimum: int, maximum: int) -> int:
+    value = data.get(key, fallback)
+    if isinstance(value, bool):
+        return fallback
+    try:
+        return max(minimum, min(maximum, int(value)))
     except (TypeError, ValueError):
         return fallback
 
@@ -656,6 +708,13 @@ def settings_from_profile_payload(
         character_stat_hotkey=fallback.character_stat_hotkey,
         pickup_toggle_hotkey=fallback.pickup_toggle_hotkey,
         pickup_key=fallback.pickup_key,
+        minimap_cruise_toggle_hotkey=fallback.minimap_cruise_toggle_hotkey,
+        minimap_cruise_attack_key=fallback.minimap_cruise_attack_key,
+        minimap_cruise_left_x=fallback.minimap_cruise_left_x,
+        minimap_cruise_right_x=fallback.minimap_cruise_right_x,
+        minimap_cruise_detect_y=fallback.minimap_cruise_detect_y,
+        minimap_cruise_detect_band_height=fallback.minimap_cruise_detect_band_height,
+        minimap_cruise_last_direction=fallback.minimap_cruise_last_direction,
         console_collapsed=fallback.console_collapsed,
         combo_group_collapsed=fallback.combo_group_collapsed,
         compact_experience_mode=fallback.compact_experience_mode,
@@ -762,6 +821,30 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
         character_stat_hotkey=_read_string(raw, "character_stat_hotkey", settings.character_stat_hotkey),
         pickup_toggle_hotkey=_read_optional_string(raw, "pickup_toggle_hotkey", settings.pickup_toggle_hotkey),
         pickup_key=_read_optional_string(raw, "pickup_key", settings.pickup_key),
+        minimap_cruise_toggle_hotkey=_read_optional_string(
+            raw,
+            "minimap_cruise_toggle_hotkey",
+            settings.minimap_cruise_toggle_hotkey,
+        ),
+        minimap_cruise_attack_key=_read_string(
+            raw,
+            "minimap_cruise_attack_key",
+            settings.minimap_cruise_attack_key,
+        ),
+        minimap_cruise_left_x=_read_optional_int(raw, "minimap_cruise_left_x", settings.minimap_cruise_left_x),
+        minimap_cruise_right_x=_read_optional_int(raw, "minimap_cruise_right_x", settings.minimap_cruise_right_x),
+        minimap_cruise_detect_y=_read_optional_int(raw, "minimap_cruise_detect_y", settings.minimap_cruise_detect_y),
+        minimap_cruise_detect_band_height=_read_int(
+            raw,
+            "minimap_cruise_detect_band_height",
+            settings.minimap_cruise_detect_band_height,
+            MINIMAP_CRUISE_MIN_DETECT_BAND_HEIGHT,
+            MINIMAP_CRUISE_MAX_DETECT_BAND_HEIGHT,
+        ),
+        minimap_cruise_last_direction=normalize_minimap_cruise_direction(
+            raw.get("minimap_cruise_last_direction"),
+            settings.minimap_cruise_last_direction,
+        ),
         console_collapsed=_read_bool(raw, "console_collapsed", settings.console_collapsed),
         combo_group_collapsed=_read_bool(raw, "combo_group_collapsed", settings.combo_group_collapsed),
         compact_experience_mode=_read_bool(raw, "compact_experience_mode", settings.compact_experience_mode),
