@@ -13,10 +13,16 @@ python tools/verify.py
 
 - entrypoint `py_compile`
 - `maple_star` compileall
-- 預設單元測試
+- 精簡 smoke tests
 - `git diff --check`
 
-預設單元測試會跳過慢速 OCR fixture 準確率測試；這些測試需明確啟用，避免日常驗證被單一 OCR fixture suite 拉長。
+精簡 smoke tests 只跑日常最常碰到的低成本模組：
+
+```powershell
+python -m unittest tests.test_control_hotkey_worker tests.test_gamepad_macro tests.test_minimap_cruise tests.test_settings_profiles tests.test_win_input
+```
+
+此 profile 不會跑完整 controller、EXP OCR、GUI notice 或 HUD 偵測回歸；需要完整回歸時改跑 `python tools/verify.py full`。
 
 只改 `docs/` 時，至少執行：
 
@@ -34,7 +40,7 @@ python -m unittest tests.test_gamepad_macro
 python -m unittest tests.test_settings_profiles
 ```
 
-若修改 MVC 目錄結構、相容 facade、入口檔、import path，或準備 commit/release，需至少跑 `python tools/verify.py`。
+若修改 MVC 目錄結構、相容 facade、入口檔或 import path，需至少跑 `python tools/verify.py`，並依影響範圍補跑指定測試。
 
 需要包含慢速 OCR fixture 時執行：
 
@@ -68,11 +74,13 @@ python tools/verify.py ocr-slow
 ```
 
 ## 發行、ignore 或 commit 前
-若修改發行、ignore 或 commit 前狀態，需補跑：
+若修改發行、ignore 或準備 release，需補跑：
 
 ```powershell
 python tools/verify.py full
 git status --short
 ```
+
+一般 commit 前可先跑 `python tools/verify.py`；若該 commit 影響 controller 主流程、EXP OCR、HUD 偵測、GUI pump 或發行流程，再升級為 `python tools/verify.py full`。
 
 注意：`git diff --check` 不會檢查 untracked files。新增檔案準備 commit 前，先確認檔案會被納入 diff 或改用精確路徑檢查。
