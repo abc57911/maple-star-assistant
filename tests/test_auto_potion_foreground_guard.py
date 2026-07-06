@@ -4360,24 +4360,32 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(play_media.call_args_list[0].args, (AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop"))
         self.assertEqual(play_media.call_args_list[1].args, (AUTO_DRINK_START_SOUND_PATH, "auto_drink_start"))
 
-    def test_notify_minimap_cruise_toggle_plays_start_sound_and_notice(self):
+    def test_notify_minimap_cruise_toggle_plays_start_system_sound_and_notice(self):
         controller = self.make_controller([])
 
-        with patch.object(controller, "_play_media_file") as play_media:
+        with (
+            patch.object(controller, "_play_media_file") as play_media,
+            patch("maple_star.controller.winsound.MessageBeep") as message_beep,
+        ):
             controller.notify_minimap_cruise_toggle(True, True, "小地圖巡航已啟用")
 
-        play_media.assert_called_once_with(AUTO_DRINK_START_SOUND_PATH, "auto_drink_start")
+        play_media.assert_not_called()
+        message_beep.assert_called_once()
         controller.gui.set_status.assert_called_with("小地圖巡航已啟用")
         controller.gui.show_toggle_notice.assert_called_with("小地圖巡航已啟用")
         self.assertEqual(controller.last_action, "小地圖巡航已啟用")
 
-    def test_notify_minimap_cruise_toggle_plays_stop_sound_and_notice(self):
+    def test_notify_minimap_cruise_toggle_plays_stop_system_sound_and_notice(self):
         controller = self.make_controller([])
 
-        with patch.object(controller, "_play_media_file") as play_media:
+        with (
+            patch.object(controller, "_play_media_file") as play_media,
+            patch("maple_star.controller.winsound.MessageBeep") as message_beep,
+        ):
             controller.notify_minimap_cruise_toggle(False, True, "小地圖巡航已停用")
 
-        play_media.assert_called_once_with(AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop")
+        play_media.assert_not_called()
+        message_beep.assert_called_once()
         controller.gui.set_status.assert_called_with("小地圖巡航已停用")
         controller.gui.show_toggle_notice.assert_called_with("小地圖巡航已停用")
         self.assertEqual(controller.last_action, "小地圖巡航已停用")
@@ -4385,10 +4393,14 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
     def test_notify_minimap_cruise_toggle_failure_only_shows_notice(self):
         controller = self.make_controller([])
 
-        with patch.object(controller, "_play_media_file") as play_media:
+        with (
+            patch.object(controller, "_play_media_file") as play_media,
+            patch("maple_star.controller.winsound.MessageBeep") as message_beep,
+        ):
             controller.notify_minimap_cruise_toggle(False, False, "請先設定小地圖邊界")
 
         play_media.assert_not_called()
+        message_beep.assert_not_called()
         controller.gui.set_status.assert_called_with("請先設定小地圖邊界")
         controller.gui.show_toggle_notice.assert_called_with("請先設定小地圖邊界")
         self.assertEqual(controller.last_action, "請先設定小地圖邊界")

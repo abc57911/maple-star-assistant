@@ -1770,10 +1770,7 @@ class AutoPotionController:
 
     def notify_minimap_cruise_toggle(self, enabled: bool, changed: bool, message: str) -> None:
         if changed:
-            if enabled:
-                self._play_media_file(AUTO_DRINK_START_SOUND_PATH, "auto_drink_start")
-            else:
-                self._play_media_file(AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop")
+            self._play_system_notification_sound()
         self.gui.set_status(message)
         self.gui.show_toggle_notice(message)
         self.last_action = message
@@ -1901,6 +1898,15 @@ class AutoPotionController:
             for frequency, duration_ms in pattern:
                 winsound.Beep(frequency, duration_ms)
         except RuntimeError:
+            try:
+                winsound.MessageBeep()
+            except RuntimeError:
+                pass
+
+    def _play_system_notification_sound(self) -> None:
+        try:
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except (AttributeError, RuntimeError):
             try:
                 winsound.MessageBeep()
             except RuntimeError:

@@ -71,6 +71,9 @@ MINIMAP_CRUISE_DEFAULT_ATTACK_KEY = "C"
 MINIMAP_CRUISE_DEFAULT_DETECT_BAND_HEIGHT = 120
 MINIMAP_CRUISE_MIN_DETECT_BAND_HEIGHT = 12
 MINIMAP_CRUISE_MAX_DETECT_BAND_HEIGHT = 180
+MINIMAP_CRUISE_DEFAULT_PRE_BOUNDARY_SKILL_DISTANCE = 20
+MINIMAP_CRUISE_MIN_PRE_BOUNDARY_SKILL_DISTANCE = 0
+MINIMAP_CRUISE_MAX_PRE_BOUNDARY_SKILL_DISTANCE = 500
 MINIMAP_CRUISE_DIRECTIONS = ("left", "right")
 
 
@@ -288,6 +291,9 @@ class AutoPotionSettings:
     minimap_cruise_detect_y: int | None = None
     minimap_cruise_detect_band_height: int = MINIMAP_CRUISE_DEFAULT_DETECT_BAND_HEIGHT
     minimap_cruise_last_direction: str = "right"
+    minimap_cruise_pre_boundary_skill_enabled: bool = False
+    minimap_cruise_pre_boundary_skill_key: str = ""
+    minimap_cruise_pre_boundary_distance: int = MINIMAP_CRUISE_DEFAULT_PRE_BOUNDARY_SKILL_DISTANCE
     console_collapsed: bool = False
     combo_group_collapsed: bool = False
     compact_experience_mode: bool = False
@@ -370,6 +376,9 @@ class AutoPotionSettings:
             self.minimap_cruise_detect_y,
             self.minimap_cruise_detect_band_height,
             self.minimap_cruise_last_direction,
+            self.minimap_cruise_pre_boundary_skill_enabled,
+            self.minimap_cruise_pre_boundary_skill_key,
+            self.minimap_cruise_pre_boundary_distance,
             self.console_collapsed,
             self.combo_group_collapsed,
             self.compact_experience_mode,
@@ -431,6 +440,9 @@ class AutoPotionSettings:
             "minimap_cruise_detect_y": self.minimap_cruise_detect_y,
             "minimap_cruise_detect_band_height": self.minimap_cruise_detect_band_height,
             "minimap_cruise_last_direction": self.minimap_cruise_last_direction,
+            "minimap_cruise_pre_boundary_skill_enabled": self.minimap_cruise_pre_boundary_skill_enabled,
+            "minimap_cruise_pre_boundary_skill_key": self.minimap_cruise_pre_boundary_skill_key,
+            "minimap_cruise_pre_boundary_distance": self.minimap_cruise_pre_boundary_distance,
             "console_collapsed": self.console_collapsed,
             "combo_group_collapsed": self.combo_group_collapsed,
             "compact_experience_mode": self.compact_experience_mode,
@@ -532,6 +544,9 @@ GLOBAL_SETTING_KEYS = (
     "minimap_cruise_detect_y",
     "minimap_cruise_detect_band_height",
     "minimap_cruise_last_direction",
+    "minimap_cruise_pre_boundary_skill_enabled",
+    "minimap_cruise_pre_boundary_skill_key",
+    "minimap_cruise_pre_boundary_distance",
     "console_collapsed",
     "combo_group_collapsed",
     "compact_experience_mode",
@@ -715,6 +730,9 @@ def settings_from_profile_payload(
         minimap_cruise_detect_y=fallback.minimap_cruise_detect_y,
         minimap_cruise_detect_band_height=fallback.minimap_cruise_detect_band_height,
         minimap_cruise_last_direction=fallback.minimap_cruise_last_direction,
+        minimap_cruise_pre_boundary_skill_enabled=fallback.minimap_cruise_pre_boundary_skill_enabled,
+        minimap_cruise_pre_boundary_skill_key=fallback.minimap_cruise_pre_boundary_skill_key,
+        minimap_cruise_pre_boundary_distance=fallback.minimap_cruise_pre_boundary_distance,
         console_collapsed=fallback.console_collapsed,
         combo_group_collapsed=fallback.combo_group_collapsed,
         compact_experience_mode=fallback.compact_experience_mode,
@@ -844,6 +862,23 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
         minimap_cruise_last_direction=normalize_minimap_cruise_direction(
             raw.get("minimap_cruise_last_direction"),
             settings.minimap_cruise_last_direction,
+        ),
+        minimap_cruise_pre_boundary_skill_enabled=_read_bool(
+            raw,
+            "minimap_cruise_pre_boundary_skill_enabled",
+            settings.minimap_cruise_pre_boundary_skill_enabled,
+        ),
+        minimap_cruise_pre_boundary_skill_key=_read_string(
+            raw,
+            "minimap_cruise_pre_boundary_skill_key",
+            settings.minimap_cruise_pre_boundary_skill_key,
+        ),
+        minimap_cruise_pre_boundary_distance=_read_int(
+            raw,
+            "minimap_cruise_pre_boundary_distance",
+            settings.minimap_cruise_pre_boundary_distance,
+            MINIMAP_CRUISE_MIN_PRE_BOUNDARY_SKILL_DISTANCE,
+            MINIMAP_CRUISE_MAX_PRE_BOUNDARY_SKILL_DISTANCE,
         ),
         console_collapsed=_read_bool(raw, "console_collapsed", settings.console_collapsed),
         combo_group_collapsed=_read_bool(raw, "combo_group_collapsed", settings.combo_group_collapsed),

@@ -46,6 +46,8 @@ from ..models.settings import (
     COMBO_SCRIPT_LABELS,
     COMBO_SCRIPT_REPEATING_JUMP_SKILL,
     COMBO_SCRIPT_SINGLE_JUMP_SKILL,
+    MINIMAP_CRUISE_MAX_PRE_BOUNDARY_SKILL_DISTANCE,
+    MINIMAP_CRUISE_MIN_PRE_BOUNDARY_SKILL_DISTANCE,
     copy_setting_values,
     normalize_controller_button_name,
     normalize_combo_script_id,
@@ -348,6 +350,15 @@ class AutoPotionSettingsGui:
         self.pickup_key = tk.StringVar(value=settings.pickup_key or "")
         self.minimap_cruise_toggle_hotkey = tk.StringVar(value=settings.minimap_cruise_toggle_hotkey or "")
         self.minimap_cruise_attack_key = tk.StringVar(value=settings.minimap_cruise_attack_key)
+        self.minimap_cruise_pre_boundary_skill_enabled = tk.BooleanVar(
+            value=settings.minimap_cruise_pre_boundary_skill_enabled
+        )
+        self.minimap_cruise_pre_boundary_skill_key = tk.StringVar(
+            value=settings.minimap_cruise_pre_boundary_skill_key
+        )
+        self.minimap_cruise_pre_boundary_distance = tk.StringVar(
+            value=f"{settings.minimap_cruise_pre_boundary_distance:g}"
+        )
         self.minimap_cruise_boundary_status = tk.StringVar(value=self._minimap_cruise_boundary_status_text())
         self.minimap_cruise_boundary_step = ""
         self.minimap_cruise_first_point: tuple[int, int] | None = None
@@ -614,6 +625,37 @@ class AutoPotionSettingsGui:
             padx=(0, 8),
             pady=6,
         )
+        self._checkbox(
+            minimap_frame,
+            "邊界前技能",
+            self.minimap_cruise_pre_boundary_skill_enabled,
+            width=104,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=(0, 8), pady=(0, 6))
+        self._label(minimap_frame, "技能鍵").grid(row=1, column=2, sticky="w", padx=(8, 4), pady=(0, 6))
+        minimap_pre_boundary_skill_entry = self._entry(
+            minimap_frame,
+            self.minimap_cruise_pre_boundary_skill_key,
+            width=HOTKEY_ENTRY_WIDTH,
+            justify="center",
+            placeholder_text="自訂",
+        )
+        minimap_pre_boundary_skill_entry.grid(row=1, column=3, sticky="w", padx=(0, 8), pady=(0, 6))
+        minimap_pre_boundary_skill_entry.bind(
+            "<Button-1>",
+            lambda event: self._start_key_detection_from_entry(
+                event,
+                self.minimap_cruise_pre_boundary_skill_key,
+                "巡航邊界前技能鍵",
+            ),
+        )
+        self._label(minimap_frame, "距離").grid(row=1, column=4, sticky="w", padx=(8, 4), pady=(0, 6))
+        self._entry(
+            minimap_frame,
+            self.minimap_cruise_pre_boundary_distance,
+            width=56,
+            justify="center",
+        ).grid(row=1, column=5, sticky="w", padx=(0, 4), pady=(0, 6))
+        self._label(minimap_frame, "px").grid(row=1, column=6, sticky="w", padx=(0, 8), pady=(0, 6))
 
         combo_group_section, combo_group_header, combo_group_body = self._build_section(
             controls_frame,
@@ -2283,6 +2325,11 @@ class AutoPotionSettingsGui:
         self.pickup_key.set(self.settings.pickup_key or "")
         self.minimap_cruise_toggle_hotkey.set(self.settings.minimap_cruise_toggle_hotkey or "")
         self.minimap_cruise_attack_key.set(self.settings.minimap_cruise_attack_key)
+        self.minimap_cruise_pre_boundary_skill_enabled.set(
+            self.settings.minimap_cruise_pre_boundary_skill_enabled
+        )
+        self.minimap_cruise_pre_boundary_skill_key.set(self.settings.minimap_cruise_pre_boundary_skill_key)
+        self.minimap_cruise_pre_boundary_distance.set(f"{self.settings.minimap_cruise_pre_boundary_distance:g}")
         self.minimap_cruise_boundary_status.set(self._minimap_cruise_boundary_status_text())
         self.set_window_topmost(self.settings.window_topmost)
         self.set_console_collapsed(self.settings.console_collapsed)
@@ -2796,6 +2843,22 @@ class AutoPotionSettingsGui:
         minimap_attack_var = getattr(self, "minimap_cruise_attack_key", None)
         if minimap_attack_var is not None:
             self.settings.minimap_cruise_attack_key = minimap_attack_var.get().strip() or "C"
+        minimap_pre_skill_enabled = getattr(self, "minimap_cruise_pre_boundary_skill_enabled", None)
+        if minimap_pre_skill_enabled is not None:
+            self.settings.minimap_cruise_pre_boundary_skill_enabled = minimap_pre_skill_enabled.get()
+        minimap_pre_skill_key = getattr(self, "minimap_cruise_pre_boundary_skill_key", None)
+        if minimap_pre_skill_key is not None:
+            self.settings.minimap_cruise_pre_boundary_skill_key = minimap_pre_skill_key.get().strip()
+        minimap_pre_skill_distance = getattr(self, "minimap_cruise_pre_boundary_distance", None)
+        if minimap_pre_skill_distance is not None:
+            distance = self._read_int_text(
+                minimap_pre_skill_distance,
+                self.settings.minimap_cruise_pre_boundary_distance,
+                MINIMAP_CRUISE_MIN_PRE_BOUNDARY_SKILL_DISTANCE,
+                MINIMAP_CRUISE_MAX_PRE_BOUNDARY_SKILL_DISTANCE,
+            )
+            self.settings.minimap_cruise_pre_boundary_distance = distance
+            minimap_pre_skill_distance.set(str(distance))
         self.settings.console_collapsed = self.console_collapsed
         self.settings.combo_group_collapsed = self.combo_group_collapsed
         self.settings.compact_experience_mode = self.compact_experience_mode
@@ -2854,6 +2917,13 @@ class AutoPotionSettingsGui:
         except ValueError:
             value = fallback
         return value
+
+    def _read_int_text(self, var: tk.StringVar, fallback: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(var.get())
+        except ValueError:
+            value = fallback
+        return max(minimum, min(maximum, value))
 
     def _read_percent(self, value_var: tk.DoubleVar, text_var: tk.StringVar) -> None:
         text = text_var.get().strip()

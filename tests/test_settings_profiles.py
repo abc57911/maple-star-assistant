@@ -43,6 +43,9 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertIsNone(settings.minimap_cruise_detect_y)
         self.assertEqual(settings.minimap_cruise_detect_band_height, 120)
         self.assertEqual(settings.minimap_cruise_last_direction, "right")
+        self.assertFalse(settings.minimap_cruise_pre_boundary_skill_enabled)
+        self.assertEqual(settings.minimap_cruise_pre_boundary_skill_key, "")
+        self.assertEqual(settings.minimap_cruise_pre_boundary_distance, 20)
         self.assertFalse(settings.console_collapsed)
         self.assertFalse(settings.combo_group_collapsed)
         self.assertFalse(settings.compact_experience_mode)
@@ -82,6 +85,9 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertIsNone(saved["minimap_cruise_detect_y"])
         self.assertEqual(saved["minimap_cruise_detect_band_height"], 120)
         self.assertEqual(saved["minimap_cruise_last_direction"], "right")
+        self.assertFalse(saved["minimap_cruise_pre_boundary_skill_enabled"])
+        self.assertEqual(saved["minimap_cruise_pre_boundary_skill_key"], "")
+        self.assertEqual(saved["minimap_cruise_pre_boundary_distance"], 20)
         self.assertFalse(saved["console_collapsed"])
         self.assertFalse(saved["combo_group_collapsed"])
         self.assertFalse(saved["compact_experience_mode"])
@@ -208,6 +214,9 @@ class SettingsProfileTests(unittest.TestCase):
                         "minimap_cruise_detect_y": "205",
                         "minimap_cruise_detect_band_height": 999,
                         "minimap_cruise_last_direction": "bad",
+                        "minimap_cruise_pre_boundary_skill_enabled": True,
+                        "minimap_cruise_pre_boundary_skill_key": "V",
+                        "minimap_cruise_pre_boundary_distance": 999,
                     }
                 ),
                 encoding="utf-8",
@@ -224,6 +233,9 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(settings.minimap_cruise_detect_y, 205)
         self.assertEqual(settings.minimap_cruise_detect_band_height, 180)
         self.assertEqual(settings.minimap_cruise_last_direction, "right")
+        self.assertTrue(settings.minimap_cruise_pre_boundary_skill_enabled)
+        self.assertEqual(settings.minimap_cruise_pre_boundary_skill_key, "V")
+        self.assertEqual(settings.minimap_cruise_pre_boundary_distance, 500)
         self.assertEqual(saved["minimap_cruise_toggle_hotkey"], "F6")
         self.assertEqual(saved["minimap_cruise_attack_key"], "A")
         self.assertEqual(saved["minimap_cruise_left_x"], 276)
@@ -231,9 +243,15 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(saved["minimap_cruise_detect_y"], 205)
         self.assertEqual(saved["minimap_cruise_detect_band_height"], 180)
         self.assertEqual(saved["minimap_cruise_last_direction"], "right")
+        self.assertTrue(saved["minimap_cruise_pre_boundary_skill_enabled"])
+        self.assertEqual(saved["minimap_cruise_pre_boundary_skill_key"], "V")
+        self.assertEqual(saved["minimap_cruise_pre_boundary_distance"], 500)
         self.assertNotIn("minimap_cruise_toggle_hotkey", saved["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_attack_key", saved["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_left_x", saved["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_pre_boundary_skill_enabled", saved["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_pre_boundary_skill_key", saved["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_pre_boundary_distance", saved["profiles"]["Default"])
 
     def test_apply_profile_saves_current_profile_before_switching(self):
         settings = AutoPotionSettings(hp_key="9", hp_continuous_enabled=True, active_profile="Main")
@@ -300,6 +318,9 @@ class SettingsProfileTests(unittest.TestCase):
             minimap_cruise_detect_y=205,
             minimap_cruise_detect_band_height=16,
             minimap_cruise_last_direction="left",
+            minimap_cruise_pre_boundary_skill_enabled=True,
+            minimap_cruise_pre_boundary_skill_key="V",
+            minimap_cruise_pre_boundary_distance=24,
             console_collapsed=True,
             combo_group_collapsed=True,
             compact_experience_mode=True,
@@ -325,6 +346,9 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(payload["minimap_cruise_detect_y"], 205)
         self.assertEqual(payload["minimap_cruise_detect_band_height"], 16)
         self.assertEqual(payload["minimap_cruise_last_direction"], "left")
+        self.assertTrue(payload["minimap_cruise_pre_boundary_skill_enabled"])
+        self.assertEqual(payload["minimap_cruise_pre_boundary_skill_key"], "V")
+        self.assertEqual(payload["minimap_cruise_pre_boundary_distance"], 24)
         self.assertTrue(payload["console_collapsed"])
         self.assertTrue(payload["combo_group_collapsed"])
         self.assertTrue(payload["compact_experience_mode"])
@@ -351,6 +375,9 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertNotIn("minimap_cruise_detect_y", payload["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_detect_band_height", payload["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_last_direction", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_pre_boundary_skill_enabled", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_pre_boundary_skill_key", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_pre_boundary_distance", payload["profiles"]["Default"])
         self.assertNotIn("console_collapsed", payload["profiles"]["Default"])
         self.assertNotIn("combo_group_collapsed", payload["profiles"]["Default"])
         self.assertNotIn("compact_experience_mode", payload["profiles"]["Default"])
