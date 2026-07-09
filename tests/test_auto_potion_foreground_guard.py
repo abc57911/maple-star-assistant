@@ -17,6 +17,7 @@ from maple_star.controller import (
     AUTO_PICKUP_STOP_SOUND_PATH,
     AutoPotionController,
     ExperienceOcrJob,
+    LIE_DETECTOR_ALERT_SOUND_PATH,
 )
 from maple_star.constants import (
     ASYNC_KEY_DOWN_MASK,
@@ -4710,6 +4711,36 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(replay_commands, ["stop test_sound", "play test_sound from 0"])
         controller._play_toggle_beep.assert_not_called()
 
+    def test_lie_detector_alert_uses_bundled_mp3_with_configured_volume(self):
+        controller = AutoPotionController.__new__(AutoPotionController)
+        controller.settings = AutoPotionSettings(minimap_cruise_lie_detector_alert_volume_percent=35)
+        controller._play_toggle_beep = Mock()
+        controller._media_alias_paths = {}
+        winmm = SimpleNamespace(mciSendStringW=Mock(return_value=0))
+
+        with patch("maple_star.controller.ctypes.windll", SimpleNamespace(winmm=winmm), create=True):
+            controller._play_lie_detector_alert_sound()
+
+        commands = [call.args[0] for call in winmm.mciSendStringW.call_args_list]
+        self.assertIn(
+            f'open "{LIE_DETECTOR_ALERT_SOUND_PATH}" type mpegvideo alias minimap_lie_detector_alert',
+            commands,
+        )
+        self.assertIn("setaudio minimap_lie_detector_alert volume to 350", commands)
+        self.assertIn("play minimap_lie_detector_alert from 0", commands)
+        controller._play_toggle_beep.assert_not_called()
+
+    def test_lie_detector_alert_volume_zero_is_silent(self):
+        controller = AutoPotionController.__new__(AutoPotionController)
+        controller.settings = AutoPotionSettings(minimap_cruise_lie_detector_alert_volume_percent=0)
+        controller._play_toggle_beep = Mock()
+
+        with patch.object(controller, "_play_media_file_with_volume") as play_media:
+            controller._play_lie_detector_alert_sound()
+
+        play_media.assert_not_called()
+        controller._play_toggle_beep.assert_not_called()
+
     def test_play_toggle_beep_uses_tone_sequence(self):
         controller = AutoPotionController.__new__(AutoPotionController)
 
@@ -6150,6 +6181,26 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         assert layout is not None
         self.assertGreater(layout.hp_track_region[2], 100)
         self.assertGreater(layout.mp_track_region[2], 100)
+
+    def test_bottom_hud_layout_accepts_hp_mp_when_exp_track_is_empty(self):
+        controller = self.make_controller([])
+        image, search_area, _text_right = self.build_synthetic_bottom_hud(controller)
+        exp_mask = np.zeros(image.shape[:2], dtype=bool)
+
+        layout = controller._bottom_hud_layout_from_labels(
+            image,
+            hp_mask=controller._bar_color_mask(image, "hp"),
+            mp_mask=controller._bar_color_mask(image, "mp"),
+            exp_mask=exp_mask,
+            search_area=search_area,
+        )
+
+        self.assertIsNotNone(layout)
+        assert layout is not None
+        self.assertGreater(layout.hp_track_region[2], 100)
+        self.assertGreater(layout.mp_track_region[2], 100)
+        self.assertLess(layout.hp_region[0], layout.mp_region[0])
+        self.assertIsNotNone(layout.exp_text_region)
 
     def test_bottom_hud_layout_uses_actual_hp_mp_track_width_for_percent(self):
         controller = self.make_controller([])

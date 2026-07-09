@@ -8,7 +8,7 @@ from typing import Callable
 import numpy as np
 
 from .auto_potion_controller import AutoPotionController
-from ..constants import LIE_DETECTOR_ALERT_BEEP_PATTERN, MINIMAP_PLAYER_ALERT_BEEP_PATTERN
+from ..constants import MINIMAP_PLAYER_ALERT_BEEP_PATTERN
 from ..adapters.win_input import (
     key_display_name,
     key_down as send_key_down,
@@ -617,7 +617,7 @@ def main() -> None:
         target_client_bounds_provider=auto_potion._target_client_bounds,
         capture_provider=lambda monitor: np.asarray(auto_potion.sct.grab(monitor)).copy(),
         set_status=auto_potion.gui.set_status,
-        lie_detector_alert_func=lambda _now: auto_potion._play_toggle_beep(LIE_DETECTOR_ALERT_BEEP_PATTERN),
+        lie_detector_alert_func=lambda _now: auto_potion._play_lie_detector_alert_sound(),
         red_player_alert_func=lambda _now: auto_potion._play_toggle_beep(MINIMAP_PLAYER_ALERT_BEEP_PATTERN),
     )
 

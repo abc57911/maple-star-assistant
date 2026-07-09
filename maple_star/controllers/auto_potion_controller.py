@@ -89,6 +89,7 @@ from ..constants import (
     POTION_MIN_COOLDOWN_SECONDS,
     POTION_NEAR_THRESHOLD_FAST_MARGIN_PERCENT,
     EMERGENCY_STOP_BEEP_PATTERN,
+    LIE_DETECTOR_ALERT_BEEP_PATTERN,
     PAUSE_BEEP_PATTERN,
     RESUME_BEEP_PATTERN,
     SCRIPT_EMERGENCY_STOP_HOTKEY_ID,
@@ -239,6 +240,7 @@ AUTO_DRINK_STOP_SOUND_PATH = PROJECT_ROOT / "media" / "auto-drink-stop.mp3"
 AUTO_DRINK_POTION_CHECK_SOUND_PATH = PROJECT_ROOT / "media" / "auto-drink-postion-check.mp3"
 AUTO_PICKUP_START_SOUND_PATH = PROJECT_ROOT / "media" / "auto-pickup-start.mp3"
 AUTO_PICKUP_STOP_SOUND_PATH = PROJECT_ROOT / "media" / "auto-pickup-stop.mp3"
+LIE_DETECTOR_ALERT_SOUND_PATH = PROJECT_ROOT / "media" / "captcha.mp3"
 MEDIA_SOUND_ALIASES = (
     (AUTO_DRINK_START_SOUND_PATH, "auto_drink_start"),
     (AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop"),
@@ -1913,13 +1915,23 @@ class AutoPotionController:
                 pass
 
     def _play_media_file(self, path: Path, alias: str) -> None:
+        self._play_media_file_with_volume(path, alias, MCI_MEDIA_VOLUME, media_type="mpegvideo")
+
+    def _play_media_file_with_volume(
+        self,
+        path: Path,
+        alias: str,
+        volume: int,
+        *,
+        media_type: str,
+    ) -> None:
         if not path.exists():
             self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
             return
         try:
             winmm = ctypes.windll.winmm
             buffer = ctypes.create_unicode_buffer(256)
-            if not self._ensure_media_alias_opened(winmm, buffer, path, alias):
+            if not self._ensure_media_alias_opened(winmm, buffer, path, alias, volume, media_type):
                 return
             winmm.mciSendStringW(f"stop {alias}", buffer, len(buffer), None)
             if winmm.mciSendStringW(f"play {alias} from {MCI_MEDIA_START_MS}", buffer, len(buffer), None) != 0:
@@ -1940,30 +1952,63 @@ class AutoPotionController:
         self.last_potion_check_sound_at = now
         self._play_media_file(AUTO_DRINK_POTION_CHECK_SOUND_PATH, "auto_drink_potion_check")
 
+    def _play_lie_detector_alert_sound(self) -> None:
+        volume = self._mci_volume_from_percent(
+            getattr(self.settings, "minimap_cruise_lie_detector_alert_volume_percent", 80)
+        )
+        if volume <= 0:
+            return
+        if not LIE_DETECTOR_ALERT_SOUND_PATH.exists():
+            self._play_toggle_beep(LIE_DETECTOR_ALERT_BEEP_PATTERN)
+            return
+        self._play_media_file_with_volume(
+            LIE_DETECTOR_ALERT_SOUND_PATH,
+            "minimap_lie_detector_alert",
+            volume,
+            media_type="mpegvideo",
+        )
+
+    def _mci_volume_from_percent(self, percent: object) -> int:
+        try:
+            value = int(float(percent))
+        except (TypeError, ValueError):
+            value = 80
+        value = max(0, min(100, value))
+        return round(MCI_MAX_VOLUME * value / 100)
+
     def _preload_media_files(self) -> None:
         try:
             winmm = ctypes.windll.winmm
             buffer = ctypes.create_unicode_buffer(256)
             for path, alias in MEDIA_SOUND_ALIASES:
                 if path.exists():
-                    self._ensure_media_alias_opened(winmm, buffer, path, alias)
+                    self._ensure_media_alias_opened(winmm, buffer, path, alias, MCI_MEDIA_VOLUME, "mpegvideo")
         except Exception:
             pass
 
-    def _ensure_media_alias_opened(self, winmm: object, buffer: object, path: Path, alias: str) -> bool:
+    def _ensure_media_alias_opened(
+        self,
+        winmm: object,
+        buffer: object,
+        path: Path,
+        alias: str,
+        volume: int,
+        media_type: str,
+    ) -> bool:
         alias_paths = getattr(self, "_media_alias_paths", None)
         if alias_paths is None:
             alias_paths = {}
             self._media_alias_paths = alias_paths
-        if alias_paths.get(alias) == path:
+        alias_state = (path, media_type, volume)
+        if alias_paths.get(alias) == alias_state:
             return True
 
         self._close_media_alias(winmm, buffer, alias)
-        open_command = f'open "{path}" type mpegvideo alias {alias}'
+        open_command = f'open "{path}" type {media_type} alias {alias}'
         if winmm.mciSendStringW(open_command, buffer, len(buffer), None) != 0:
             self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
             return False
-        if winmm.mciSendStringW(f"setaudio {alias} volume to {MCI_MEDIA_VOLUME}", buffer, len(buffer), None) != 0:
+        if winmm.mciSendStringW(f"setaudio {alias} volume to {volume}", buffer, len(buffer), None) != 0:
             self._close_media_alias(winmm, buffer, alias)
             self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
             return False
@@ -1971,7 +2016,7 @@ class AutoPotionController:
             self._close_media_alias(winmm, buffer, alias)
             self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
             return False
-        alias_paths[alias] = path
+        alias_paths[alias] = alias_state
         return True
 
     def _close_media_alias(self, winmm: object, buffer: object, alias: str) -> None:
@@ -5872,13 +5917,12 @@ class AutoPotionController:
             search_area.reference_height,
             "exp",
         )
-        if hp_track is None or mp_track is None or exp_track is None:
+        if hp_track is None or mp_track is None:
             return None
 
         hp_left, hp_top, hp_width, hp_height = hp_track
         mp_left, mp_top, mp_width, mp_height = mp_track
-        exp_left, exp_top, exp_width, exp_height = exp_track
-        if mp_left <= hp_left or exp_left < hp_left - max(8, round(hp_rect[3] * 0.5)):
+        if mp_left <= hp_left:
             return None
 
         min_width = max(48, round(search_area.reference_width * 0.07))
@@ -5894,6 +5938,17 @@ class AutoPotionController:
             elif mp_width > hp_width * 1.08:
                 mp_width = hp_width
         combined_right = max(hp_left + hp_width, mp_left + mp_width)
+
+        if exp_track is None:
+            exp_left = hp_left
+            exp_height = max(8, min(max_hp_mp_height, max(hp_height, mp_height)))
+            exp_top = exp_rect[1] + max(1, round((exp_rect[3] - exp_height) / 2))
+            exp_top = max(0, min(search_area.height - exp_height, exp_top))
+            exp_width = combined_right - exp_left
+        else:
+            exp_left, exp_top, exp_width, exp_height = exp_track
+            if exp_left < hp_left - max(8, round(hp_rect[3] * 0.5)):
+                return None
         exp_width = max(exp_width, combined_right - exp_left)
         exp_width = min(search_area.width - exp_left, exp_width)
         if hp_width < min_width or mp_width < min_width or exp_width < min_width:

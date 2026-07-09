@@ -91,7 +91,7 @@ class MinimapCruiseTests(unittest.TestCase):
             key_down_func=lambda vk: events.append(("down", vk)),
             key_up_func=lambda vk: events.append(("up", vk)),
             tap_key_func=lambda vk: events.append(("tap", vk)),
-            parse_vk_key_func=lambda key: {"C": 0x43, "V": 0x56}[key],
+            parse_vk_key_func=lambda key: {"A": 0x41, "B": 0x42, "C": 0x43, "V": 0x56}[key],
         )
         return runtime, events, statuses, alerts
 
@@ -198,6 +198,52 @@ class MinimapCruiseTests(unittest.TestCase):
         self.assertEqual(runtime.last_detected_x, 130)
         self.assertAlmostEqual(runtime.next_detect_at, 101.0 + MINIMAP_CRUISE_DETECT_INTERVAL_SECONDS)
         self.assertEqual(events, [("down", 0x43)])
+
+    def test_periodic_keys_fire_independently_after_configured_intervals(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([120, 124, 128, 132])
+        runtime.settings.minimap_cruise_periodic_key_1_enabled = True
+        runtime.settings.minimap_cruise_periodic_key_1 = "V"
+        runtime.settings.minimap_cruise_periodic_key_1_interval_seconds = 1.0
+        runtime.settings.minimap_cruise_periodic_key_2_enabled = True
+        runtime.settings.minimap_cruise_periodic_key_2 = "A"
+        runtime.settings.minimap_cruise_periodic_key_2_interval_seconds = 2.0
+        runtime.settings.minimap_cruise_periodic_key_3_enabled = True
+        runtime.settings.minimap_cruise_periodic_key_3 = "B"
+        runtime.settings.minimap_cruise_periodic_key_3_interval_seconds = 3.0
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        runtime.update(101.0)
+        runtime.update(102.0)
+        runtime.update(103.0)
+
+        self.assertEqual(
+            events,
+            [
+                ("down", 0x43),
+                ("tap", 0x56),
+                ("tap", 0x56),
+                ("tap", 0x41),
+                ("tap", 0x56),
+                ("tap", 0x42),
+            ],
+        )
+
+    def test_periodic_keys_resume_without_backlog_after_suspend(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([120, 121, 122])
+        runtime.settings.minimap_cruise_periodic_key_1_enabled = True
+        runtime.settings.minimap_cruise_periodic_key_1 = "V"
+        runtime.settings.minimap_cruise_periodic_key_1_interval_seconds = 1.0
+
+        runtime.toggle(100.0)
+        runtime.can_run_actions = lambda: False
+        runtime.update(101.0)
+
+        runtime.can_run_actions = lambda: True
+        runtime.update(102.0)
+        runtime.update(103.0)
+
+        self.assertEqual(events, [("down", 0x43), ("tap", 0x56)])
 
     def test_stationary_character_turns_after_two_seconds_without_boundary_hit(self):
         runtime, events, _statuses, _alerts = self.make_runtime([150, 150])

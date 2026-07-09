@@ -74,6 +74,12 @@ MINIMAP_CRUISE_MAX_DETECT_BAND_HEIGHT = 180
 MINIMAP_CRUISE_DEFAULT_PRE_BOUNDARY_SKILL_DISTANCE = 20
 MINIMAP_CRUISE_MIN_PRE_BOUNDARY_SKILL_DISTANCE = 0
 MINIMAP_CRUISE_MAX_PRE_BOUNDARY_SKILL_DISTANCE = 500
+MINIMAP_CRUISE_DEFAULT_LIE_DETECTOR_ALERT_VOLUME_PERCENT = 80
+MINIMAP_CRUISE_MIN_ALERT_VOLUME_PERCENT = 0
+MINIMAP_CRUISE_MAX_ALERT_VOLUME_PERCENT = 100
+MINIMAP_CRUISE_DEFAULT_PERIODIC_KEY_INTERVAL_SECONDS = 60.0
+MINIMAP_CRUISE_MIN_PERIODIC_KEY_INTERVAL_SECONDS = 0.1
+MINIMAP_CRUISE_MAX_PERIODIC_KEY_INTERVAL_SECONDS = 3600.0
 MINIMAP_CRUISE_DIRECTIONS = ("left", "right")
 
 
@@ -294,6 +300,16 @@ class AutoPotionSettings:
     minimap_cruise_pre_boundary_skill_enabled: bool = False
     minimap_cruise_pre_boundary_skill_key: str = ""
     minimap_cruise_pre_boundary_distance: int = MINIMAP_CRUISE_DEFAULT_PRE_BOUNDARY_SKILL_DISTANCE
+    minimap_cruise_lie_detector_alert_volume_percent: int = MINIMAP_CRUISE_DEFAULT_LIE_DETECTOR_ALERT_VOLUME_PERCENT
+    minimap_cruise_periodic_key_1_enabled: bool = False
+    minimap_cruise_periodic_key_1: str = ""
+    minimap_cruise_periodic_key_1_interval_seconds: float = MINIMAP_CRUISE_DEFAULT_PERIODIC_KEY_INTERVAL_SECONDS
+    minimap_cruise_periodic_key_2_enabled: bool = False
+    minimap_cruise_periodic_key_2: str = ""
+    minimap_cruise_periodic_key_2_interval_seconds: float = MINIMAP_CRUISE_DEFAULT_PERIODIC_KEY_INTERVAL_SECONDS
+    minimap_cruise_periodic_key_3_enabled: bool = False
+    minimap_cruise_periodic_key_3: str = ""
+    minimap_cruise_periodic_key_3_interval_seconds: float = MINIMAP_CRUISE_DEFAULT_PERIODIC_KEY_INTERVAL_SECONDS
     console_collapsed: bool = False
     combo_group_collapsed: bool = False
     compact_experience_mode: bool = False
@@ -379,6 +395,16 @@ class AutoPotionSettings:
             self.minimap_cruise_pre_boundary_skill_enabled,
             self.minimap_cruise_pre_boundary_skill_key,
             self.minimap_cruise_pre_boundary_distance,
+            self.minimap_cruise_lie_detector_alert_volume_percent,
+            self.minimap_cruise_periodic_key_1_enabled,
+            self.minimap_cruise_periodic_key_1,
+            self.minimap_cruise_periodic_key_1_interval_seconds,
+            self.minimap_cruise_periodic_key_2_enabled,
+            self.minimap_cruise_periodic_key_2,
+            self.minimap_cruise_periodic_key_2_interval_seconds,
+            self.minimap_cruise_periodic_key_3_enabled,
+            self.minimap_cruise_periodic_key_3,
+            self.minimap_cruise_periodic_key_3_interval_seconds,
             self.console_collapsed,
             self.combo_group_collapsed,
             self.compact_experience_mode,
@@ -443,6 +469,16 @@ class AutoPotionSettings:
             "minimap_cruise_pre_boundary_skill_enabled": self.minimap_cruise_pre_boundary_skill_enabled,
             "minimap_cruise_pre_boundary_skill_key": self.minimap_cruise_pre_boundary_skill_key,
             "minimap_cruise_pre_boundary_distance": self.minimap_cruise_pre_boundary_distance,
+            "minimap_cruise_lie_detector_alert_volume_percent": self.minimap_cruise_lie_detector_alert_volume_percent,
+            "minimap_cruise_periodic_key_1_enabled": self.minimap_cruise_periodic_key_1_enabled,
+            "minimap_cruise_periodic_key_1": self.minimap_cruise_periodic_key_1,
+            "minimap_cruise_periodic_key_1_interval_seconds": self.minimap_cruise_periodic_key_1_interval_seconds,
+            "minimap_cruise_periodic_key_2_enabled": self.minimap_cruise_periodic_key_2_enabled,
+            "minimap_cruise_periodic_key_2": self.minimap_cruise_periodic_key_2,
+            "minimap_cruise_periodic_key_2_interval_seconds": self.minimap_cruise_periodic_key_2_interval_seconds,
+            "minimap_cruise_periodic_key_3_enabled": self.minimap_cruise_periodic_key_3_enabled,
+            "minimap_cruise_periodic_key_3": self.minimap_cruise_periodic_key_3,
+            "minimap_cruise_periodic_key_3_interval_seconds": self.minimap_cruise_periodic_key_3_interval_seconds,
             "console_collapsed": self.console_collapsed,
             "combo_group_collapsed": self.combo_group_collapsed,
             "compact_experience_mode": self.compact_experience_mode,
@@ -547,6 +583,16 @@ GLOBAL_SETTING_KEYS = (
     "minimap_cruise_pre_boundary_skill_enabled",
     "minimap_cruise_pre_boundary_skill_key",
     "minimap_cruise_pre_boundary_distance",
+    "minimap_cruise_lie_detector_alert_volume_percent",
+    "minimap_cruise_periodic_key_1_enabled",
+    "minimap_cruise_periodic_key_1",
+    "minimap_cruise_periodic_key_1_interval_seconds",
+    "minimap_cruise_periodic_key_2_enabled",
+    "minimap_cruise_periodic_key_2",
+    "minimap_cruise_periodic_key_2_interval_seconds",
+    "minimap_cruise_periodic_key_3_enabled",
+    "minimap_cruise_periodic_key_3",
+    "minimap_cruise_periodic_key_3_interval_seconds",
     "console_collapsed",
     "combo_group_collapsed",
     "compact_experience_mode",
@@ -733,6 +779,16 @@ def settings_from_profile_payload(
         minimap_cruise_pre_boundary_skill_enabled=fallback.minimap_cruise_pre_boundary_skill_enabled,
         minimap_cruise_pre_boundary_skill_key=fallback.minimap_cruise_pre_boundary_skill_key,
         minimap_cruise_pre_boundary_distance=fallback.minimap_cruise_pre_boundary_distance,
+        minimap_cruise_lie_detector_alert_volume_percent=fallback.minimap_cruise_lie_detector_alert_volume_percent,
+        minimap_cruise_periodic_key_1_enabled=fallback.minimap_cruise_periodic_key_1_enabled,
+        minimap_cruise_periodic_key_1=fallback.minimap_cruise_periodic_key_1,
+        minimap_cruise_periodic_key_1_interval_seconds=fallback.minimap_cruise_periodic_key_1_interval_seconds,
+        minimap_cruise_periodic_key_2_enabled=fallback.minimap_cruise_periodic_key_2_enabled,
+        minimap_cruise_periodic_key_2=fallback.minimap_cruise_periodic_key_2,
+        minimap_cruise_periodic_key_2_interval_seconds=fallback.minimap_cruise_periodic_key_2_interval_seconds,
+        minimap_cruise_periodic_key_3_enabled=fallback.minimap_cruise_periodic_key_3_enabled,
+        minimap_cruise_periodic_key_3=fallback.minimap_cruise_periodic_key_3,
+        minimap_cruise_periodic_key_3_interval_seconds=fallback.minimap_cruise_periodic_key_3_interval_seconds,
         console_collapsed=fallback.console_collapsed,
         combo_group_collapsed=fallback.combo_group_collapsed,
         compact_experience_mode=fallback.compact_experience_mode,
@@ -879,6 +935,64 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
             settings.minimap_cruise_pre_boundary_distance,
             MINIMAP_CRUISE_MIN_PRE_BOUNDARY_SKILL_DISTANCE,
             MINIMAP_CRUISE_MAX_PRE_BOUNDARY_SKILL_DISTANCE,
+        ),
+        minimap_cruise_lie_detector_alert_volume_percent=_read_int(
+            raw,
+            "minimap_cruise_lie_detector_alert_volume_percent",
+            settings.minimap_cruise_lie_detector_alert_volume_percent,
+            MINIMAP_CRUISE_MIN_ALERT_VOLUME_PERCENT,
+            MINIMAP_CRUISE_MAX_ALERT_VOLUME_PERCENT,
+        ),
+        minimap_cruise_periodic_key_1_enabled=_read_bool(
+            raw,
+            "minimap_cruise_periodic_key_1_enabled",
+            settings.minimap_cruise_periodic_key_1_enabled,
+        ),
+        minimap_cruise_periodic_key_1=_read_string(
+            raw,
+            "minimap_cruise_periodic_key_1",
+            settings.minimap_cruise_periodic_key_1,
+        ),
+        minimap_cruise_periodic_key_1_interval_seconds=_read_float(
+            raw,
+            "minimap_cruise_periodic_key_1_interval_seconds",
+            settings.minimap_cruise_periodic_key_1_interval_seconds,
+            MINIMAP_CRUISE_MIN_PERIODIC_KEY_INTERVAL_SECONDS,
+            MINIMAP_CRUISE_MAX_PERIODIC_KEY_INTERVAL_SECONDS,
+        ),
+        minimap_cruise_periodic_key_2_enabled=_read_bool(
+            raw,
+            "minimap_cruise_periodic_key_2_enabled",
+            settings.minimap_cruise_periodic_key_2_enabled,
+        ),
+        minimap_cruise_periodic_key_2=_read_string(
+            raw,
+            "minimap_cruise_periodic_key_2",
+            settings.minimap_cruise_periodic_key_2,
+        ),
+        minimap_cruise_periodic_key_2_interval_seconds=_read_float(
+            raw,
+            "minimap_cruise_periodic_key_2_interval_seconds",
+            settings.minimap_cruise_periodic_key_2_interval_seconds,
+            MINIMAP_CRUISE_MIN_PERIODIC_KEY_INTERVAL_SECONDS,
+            MINIMAP_CRUISE_MAX_PERIODIC_KEY_INTERVAL_SECONDS,
+        ),
+        minimap_cruise_periodic_key_3_enabled=_read_bool(
+            raw,
+            "minimap_cruise_periodic_key_3_enabled",
+            settings.minimap_cruise_periodic_key_3_enabled,
+        ),
+        minimap_cruise_periodic_key_3=_read_string(
+            raw,
+            "minimap_cruise_periodic_key_3",
+            settings.minimap_cruise_periodic_key_3,
+        ),
+        minimap_cruise_periodic_key_3_interval_seconds=_read_float(
+            raw,
+            "minimap_cruise_periodic_key_3_interval_seconds",
+            settings.minimap_cruise_periodic_key_3_interval_seconds,
+            MINIMAP_CRUISE_MIN_PERIODIC_KEY_INTERVAL_SECONDS,
+            MINIMAP_CRUISE_MAX_PERIODIC_KEY_INTERVAL_SECONDS,
         ),
         console_collapsed=_read_bool(raw, "console_collapsed", settings.console_collapsed),
         combo_group_collapsed=_read_bool(raw, "combo_group_collapsed", settings.combo_group_collapsed),

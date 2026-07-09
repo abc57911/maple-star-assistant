@@ -47,7 +47,11 @@ from ..models.settings import (
     COMBO_SCRIPT_REPEATING_JUMP_SKILL,
     COMBO_SCRIPT_SINGLE_JUMP_SKILL,
     MINIMAP_CRUISE_MAX_PRE_BOUNDARY_SKILL_DISTANCE,
+    MINIMAP_CRUISE_MAX_ALERT_VOLUME_PERCENT,
+    MINIMAP_CRUISE_MAX_PERIODIC_KEY_INTERVAL_SECONDS,
     MINIMAP_CRUISE_MIN_PRE_BOUNDARY_SKILL_DISTANCE,
+    MINIMAP_CRUISE_MIN_ALERT_VOLUME_PERCENT,
+    MINIMAP_CRUISE_MIN_PERIODIC_KEY_INTERVAL_SECONDS,
     copy_setting_values,
     normalize_controller_button_name,
     normalize_combo_script_id,
@@ -359,6 +363,24 @@ class AutoPotionSettingsGui:
         self.minimap_cruise_pre_boundary_distance = tk.StringVar(
             value=f"{settings.minimap_cruise_pre_boundary_distance:g}"
         )
+        self.minimap_cruise_lie_detector_alert_volume = tk.StringVar(
+            value=f"{settings.minimap_cruise_lie_detector_alert_volume_percent:g}"
+        )
+        self.minimap_cruise_periodic_key_enabled_vars = [
+            tk.BooleanVar(value=settings.minimap_cruise_periodic_key_1_enabled),
+            tk.BooleanVar(value=settings.minimap_cruise_periodic_key_2_enabled),
+            tk.BooleanVar(value=settings.minimap_cruise_periodic_key_3_enabled),
+        ]
+        self.minimap_cruise_periodic_key_vars = [
+            tk.StringVar(value=settings.minimap_cruise_periodic_key_1),
+            tk.StringVar(value=settings.minimap_cruise_periodic_key_2),
+            tk.StringVar(value=settings.minimap_cruise_periodic_key_3),
+        ]
+        self.minimap_cruise_periodic_key_interval_vars = [
+            tk.StringVar(value=f"{settings.minimap_cruise_periodic_key_1_interval_seconds:g}"),
+            tk.StringVar(value=f"{settings.minimap_cruise_periodic_key_2_interval_seconds:g}"),
+            tk.StringVar(value=f"{settings.minimap_cruise_periodic_key_3_interval_seconds:g}"),
+        ]
         self.minimap_cruise_boundary_status = tk.StringVar(value=self._minimap_cruise_boundary_status_text())
         self.minimap_cruise_boundary_step = ""
         self.minimap_cruise_first_point: tuple[int, int] | None = None
@@ -656,6 +678,54 @@ class AutoPotionSettingsGui:
             justify="center",
         ).grid(row=1, column=5, sticky="w", padx=(0, 4), pady=(0, 6))
         self._label(minimap_frame, "px").grid(row=1, column=6, sticky="w", padx=(0, 8), pady=(0, 6))
+        self._label(minimap_frame, "測謊音量").grid(row=1, column=7, sticky="w", padx=(8, 4), pady=(0, 6))
+        self._entry(
+            minimap_frame,
+            self.minimap_cruise_lie_detector_alert_volume,
+            width=48,
+            justify="center",
+        ).grid(row=1, column=8, sticky="w", padx=(0, 4), pady=(0, 6))
+        self._label(minimap_frame, "%").grid(row=1, column=9, sticky="w", padx=(0, 8), pady=(0, 6))
+        for index, (enabled_var, key_var, interval_var) in enumerate(
+            zip(
+                self.minimap_cruise_periodic_key_enabled_vars,
+                self.minimap_cruise_periodic_key_vars,
+                self.minimap_cruise_periodic_key_interval_vars,
+            ),
+            start=1,
+        ):
+            row = index + 1
+            self._checkbox(
+                minimap_frame,
+                f"定期按鍵{index}",
+                enabled_var,
+                width=104,
+            ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(0, 8), pady=(0, 6))
+            self._label(minimap_frame, "熱鍵").grid(row=row, column=2, sticky="w", padx=(8, 4), pady=(0, 6))
+            periodic_key_entry = self._entry(
+                minimap_frame,
+                key_var,
+                width=HOTKEY_ENTRY_WIDTH,
+                justify="center",
+                placeholder_text="自訂",
+            )
+            periodic_key_entry.grid(row=row, column=3, sticky="w", padx=(0, 8), pady=(0, 6))
+            periodic_key_entry.bind(
+                "<Button-1>",
+                lambda event, var=key_var, slot=index: self._start_key_detection_from_entry(
+                    event,
+                    var,
+                    f"巡航定期按鍵{slot}",
+                ),
+            )
+            self._label(minimap_frame, "間隔").grid(row=row, column=4, sticky="w", padx=(8, 4), pady=(0, 6))
+            self._entry(
+                minimap_frame,
+                interval_var,
+                width=56,
+                justify="center",
+            ).grid(row=row, column=5, sticky="w", padx=(0, 4), pady=(0, 6))
+            self._label(minimap_frame, "秒").grid(row=row, column=6, sticky="w", padx=(0, 8), pady=(0, 6))
 
         combo_group_section, combo_group_header, combo_group_body = self._build_section(
             controls_frame,
@@ -2330,6 +2400,25 @@ class AutoPotionSettingsGui:
         )
         self.minimap_cruise_pre_boundary_skill_key.set(self.settings.minimap_cruise_pre_boundary_skill_key)
         self.minimap_cruise_pre_boundary_distance.set(f"{self.settings.minimap_cruise_pre_boundary_distance:g}")
+        periodic_enabled = (
+            self.settings.minimap_cruise_periodic_key_1_enabled,
+            self.settings.minimap_cruise_periodic_key_2_enabled,
+            self.settings.minimap_cruise_periodic_key_3_enabled,
+        )
+        periodic_keys = (
+            self.settings.minimap_cruise_periodic_key_1,
+            self.settings.minimap_cruise_periodic_key_2,
+            self.settings.minimap_cruise_periodic_key_3,
+        )
+        periodic_intervals = (
+            self.settings.minimap_cruise_periodic_key_1_interval_seconds,
+            self.settings.minimap_cruise_periodic_key_2_interval_seconds,
+            self.settings.minimap_cruise_periodic_key_3_interval_seconds,
+        )
+        for index in range(3):
+            self.minimap_cruise_periodic_key_enabled_vars[index].set(periodic_enabled[index])
+            self.minimap_cruise_periodic_key_vars[index].set(periodic_keys[index])
+            self.minimap_cruise_periodic_key_interval_vars[index].set(f"{periodic_intervals[index]:g}")
         self.minimap_cruise_boundary_status.set(self._minimap_cruise_boundary_status_text())
         self.set_window_topmost(self.settings.window_topmost)
         self.set_console_collapsed(self.settings.console_collapsed)
@@ -2859,6 +2948,34 @@ class AutoPotionSettingsGui:
             )
             self.settings.minimap_cruise_pre_boundary_distance = distance
             minimap_pre_skill_distance.set(str(distance))
+        minimap_lie_detector_alert_volume = getattr(self, "minimap_cruise_lie_detector_alert_volume", None)
+        if minimap_lie_detector_alert_volume is not None:
+            volume = self._read_int_text(
+                minimap_lie_detector_alert_volume,
+                self.settings.minimap_cruise_lie_detector_alert_volume_percent,
+                MINIMAP_CRUISE_MIN_ALERT_VOLUME_PERCENT,
+                MINIMAP_CRUISE_MAX_ALERT_VOLUME_PERCENT,
+            )
+            self.settings.minimap_cruise_lie_detector_alert_volume_percent = volume
+            minimap_lie_detector_alert_volume.set(str(volume))
+        periodic_enabled_vars = getattr(self, "minimap_cruise_periodic_key_enabled_vars", ())
+        periodic_key_vars = getattr(self, "minimap_cruise_periodic_key_vars", ())
+        periodic_interval_vars = getattr(self, "minimap_cruise_periodic_key_interval_vars", ())
+        for index in range(min(len(periodic_enabled_vars), len(periodic_key_vars), len(periodic_interval_vars), 3)):
+            slot = index + 1
+            enabled = periodic_enabled_vars[index].get()
+            key = periodic_key_vars[index].get().strip()
+            interval_attr = f"minimap_cruise_periodic_key_{slot}_interval_seconds"
+            interval = self._read_seconds(
+                periodic_interval_vars[index],
+                getattr(self.settings, interval_attr),
+                MINIMAP_CRUISE_MIN_PERIODIC_KEY_INTERVAL_SECONDS,
+                MINIMAP_CRUISE_MAX_PERIODIC_KEY_INTERVAL_SECONDS,
+            )
+            setattr(self.settings, f"minimap_cruise_periodic_key_{slot}_enabled", enabled)
+            setattr(self.settings, f"minimap_cruise_periodic_key_{slot}", key)
+            setattr(self.settings, interval_attr, interval)
+            periodic_interval_vars[index].set(f"{interval:g}")
         self.settings.console_collapsed = self.console_collapsed
         self.settings.combo_group_collapsed = self.combo_group_collapsed
         self.settings.compact_experience_mode = self.compact_experience_mode

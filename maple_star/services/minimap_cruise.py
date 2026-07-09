@@ -100,6 +100,7 @@ class MinimapCruiseRuntime:
     recovery_direction_vk: int = 0
     recovery_held_vk: int = 0
     recovery_stuck_confirmations: int = 0
+    periodic_key_next_at: dict[int, float] = field(default_factory=dict)
     _last_status_report: str = field(default="", init=False)
 
     def toggle(self, now: float) -> bool:
@@ -124,6 +125,7 @@ class MinimapCruiseRuntime:
         self.red_player_present_since = None
         self.red_player_alert_active = False
         self.pre_boundary_skill_triggered_boundary = None
+        self._reset_periodic_key_schedule(now)
         self._reset_stationary_tracking()
         self.consecutive_detection_failures = 0
         self.last_message = "小地圖巡航已啟用"
@@ -140,6 +142,7 @@ class MinimapCruiseRuntime:
         self._reset_stationary_tracking()
         self.next_lie_detector_alert_at = 0.0
         self.pre_boundary_skill_triggered_boundary = None
+        self.periodic_key_next_at.clear()
         self._reset_red_player_alert()
         self.last_message = message
         self._report_status(message)
@@ -161,6 +164,8 @@ class MinimapCruiseRuntime:
         if self._lie_detector_challenge_visible(now):
             self._block_for_lie_detector(now)
             return
+
+        self._update_periodic_keys(now)
 
         if self.status == MINIMAP_CRUISE_STATUS_PRE_BOUNDARY_SKILL:
             self._update_pre_boundary_skill(now)
@@ -265,6 +270,7 @@ class MinimapCruiseRuntime:
         self._cancel_pre_boundary_skill()
         self._cancel_recovery()
         self._release_attack_key()
+        self.periodic_key_next_at.clear()
         self._reset_stationary_tracking()
         self.status = MINIMAP_CRUISE_STATUS_SUSPENDED
         self.last_message = message
@@ -354,6 +360,66 @@ class MinimapCruiseRuntime:
             return self.parse_vk_key_func(key)
         except ValueError:
             return None
+
+    def _periodic_key_slots(self) -> tuple[tuple[int, bool, str, float], ...]:
+        return (
+            (
+                1,
+                self.settings.minimap_cruise_periodic_key_1_enabled,
+                self.settings.minimap_cruise_periodic_key_1,
+                float(self.settings.minimap_cruise_periodic_key_1_interval_seconds),
+            ),
+            (
+                2,
+                self.settings.minimap_cruise_periodic_key_2_enabled,
+                self.settings.minimap_cruise_periodic_key_2,
+                float(self.settings.minimap_cruise_periodic_key_2_interval_seconds),
+            ),
+            (
+                3,
+                self.settings.minimap_cruise_periodic_key_3_enabled,
+                self.settings.minimap_cruise_periodic_key_3,
+                float(self.settings.minimap_cruise_periodic_key_3_interval_seconds),
+            ),
+        )
+
+    def _configured_periodic_key_vk(self, key: str) -> int | None:
+        normalized = key.strip()
+        if not normalized:
+            return None
+        try:
+            return self.parse_vk_key_func(normalized)
+        except ValueError:
+            return None
+
+    def _reset_periodic_key_schedule(self, now: float) -> None:
+        self.periodic_key_next_at.clear()
+        for index, enabled, key, interval in self._periodic_key_slots():
+            if enabled and self._configured_periodic_key_vk(key) is not None and interval > 0.0:
+                self.periodic_key_next_at[index] = now + interval
+
+    def _update_periodic_keys(self, now: float) -> None:
+        active_indexes: set[int] = set()
+        for index, enabled, key, interval in self._periodic_key_slots():
+            active_indexes.add(index)
+            vk = self._configured_periodic_key_vk(key)
+            if not enabled or vk is None or interval <= 0.0:
+                self.periodic_key_next_at.pop(index, None)
+                continue
+
+            next_at = self.periodic_key_next_at.get(index)
+            if next_at is None:
+                self.periodic_key_next_at[index] = now + interval
+                continue
+            if now + 1e-9 < next_at:
+                continue
+
+            self.tap_key_func(vk)
+            self.periodic_key_next_at[index] = now + interval
+
+        for index in tuple(self.periodic_key_next_at):
+            if index not in active_indexes:
+                self.periodic_key_next_at.pop(index, None)
 
     def _initial_or_current_direction(self, character_x: int) -> str:
         if self.status not in {MINIMAP_CRUISE_STATUS_STARTING, MINIMAP_CRUISE_STATUS_SUSPENDED}:
