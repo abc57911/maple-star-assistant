@@ -12,11 +12,13 @@ if __name__ == "__main__":
         from maple_star.debug_logging import (
             configure_debug_logging,
             configure_experience_debug_logging,
+            configure_telegram_reply_logging,
             log_exception,
         )
 
         configure_debug_logging(reset=True)
         configure_experience_debug_logging(reset=True)
+        configure_telegram_reply_logging(reset=True)
         from main import main
 
         raise SystemExit(main())

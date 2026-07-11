@@ -16,15 +16,20 @@ from ..models.settings import app_base_dir
 
 DEBUG_LOG_PATH = app_base_dir() / "debug.log"
 EXPERIENCE_DEBUG_LOG_PATH = app_base_dir() / "experience_debug.log"
+TELEGRAM_REPLY_LOG_PATH = app_base_dir() / "telegram_reply.log"
 DEBUG_LOG_MAX_BYTES = 1 * 1024 * 1024
 DEBUG_LOG_BACKUP_COUNT = 3
 EXPERIENCE_DEBUG_LOG_MAX_BYTES = 5 * 1024 * 1024
 EXPERIENCE_DEBUG_LOG_BACKUP_COUNT = 5
+TELEGRAM_REPLY_LOG_MAX_BYTES = 1 * 1024 * 1024
+TELEGRAM_REPLY_LOG_BACKUP_COUNT = 3
 
 _LOGGER_NAME = "maple_star.debug"
 _EXPERIENCE_LOGGER_NAME = "maple_star.experience_debug"
+_TELEGRAM_REPLY_LOGGER_NAME = "maple_star.telegram_reply"
 _configured_path: Path | None = None
 _experience_configured_path: Path | None = None
+_telegram_reply_configured_path: Path | None = None
 _original_excepthook = sys.excepthook
 _original_threading_excepthook = getattr(threading, "excepthook", None)
 
@@ -68,6 +73,24 @@ def configure_experience_debug_logging(
     return log_path
 
 
+def configure_telegram_reply_logging(
+    path: Path | None = None,
+    *,
+    reset: bool = False,
+    max_bytes: int = TELEGRAM_REPLY_LOG_MAX_BYTES,
+    backup_count: int = TELEGRAM_REPLY_LOG_BACKUP_COUNT,
+) -> Path:
+    log_path = path or TELEGRAM_REPLY_LOG_PATH
+    _configure_logger(
+        _TELEGRAM_REPLY_LOGGER_NAME,
+        log_path,
+        reset=reset,
+        max_bytes=max_bytes,
+        backup_count=backup_count,
+    )
+    return log_path
+
+
 def close_debug_logging() -> None:
     global _configured_path
     _close_logger(_LOGGER_NAME)
@@ -78,6 +101,12 @@ def close_experience_debug_logging() -> None:
     global _experience_configured_path
     _close_logger(_EXPERIENCE_LOGGER_NAME)
     _experience_configured_path = None
+
+
+def close_telegram_reply_logging() -> None:
+    global _telegram_reply_configured_path
+    _close_logger(_TELEGRAM_REPLY_LOGGER_NAME)
+    _telegram_reply_configured_path = None
 
 
 def install_tk_exception_logging(root: object) -> None:
@@ -110,6 +139,14 @@ def log_experience_debug(event: dict[str, object]) -> None:
     payload_event = {"logged_at": datetime.now().isoformat(timespec="seconds"), **event}
     payload = json.dumps(payload_event, ensure_ascii=False, separators=(",", ":"), default=str)
     logging.getLogger(_EXPERIENCE_LOGGER_NAME).info(payload)
+
+
+def log_telegram_reply(event: dict[str, object]) -> None:
+    if _telegram_reply_configured_path is None:
+        configure_telegram_reply_logging()
+    payload_event = {"logged_at": datetime.now().isoformat(timespec="seconds"), **event}
+    payload = json.dumps(payload_event, ensure_ascii=False, separators=(",", ":"), default=str)
+    logging.getLogger(_TELEGRAM_REPLY_LOGGER_NAME).info(payload)
 
 
 def write_debug_text(text: str) -> None:
@@ -148,7 +185,7 @@ def _configure_logger(
     max_bytes: int,
     backup_count: int,
 ) -> None:
-    global _configured_path, _experience_configured_path
+    global _configured_path, _experience_configured_path, _telegram_reply_configured_path
     resolved = log_path.resolve()
     configured_path = _logger_configured_path(logger_name)
     logger = logging.getLogger(logger_name)
@@ -172,7 +209,7 @@ def _configure_logger(
         encoding="utf-8",
     )
     handler.setLevel(logging.DEBUG)
-    if logger_name == _EXPERIENCE_LOGGER_NAME:
+    if logger_name in {_EXPERIENCE_LOGGER_NAME, _TELEGRAM_REPLY_LOGGER_NAME}:
         formatter = logging.Formatter("%(message)s")
     else:
         formatter = logging.Formatter(
@@ -183,6 +220,8 @@ def _configure_logger(
     logger.addHandler(handler)
     if logger_name == _EXPERIENCE_LOGGER_NAME:
         _experience_configured_path = resolved
+    elif logger_name == _TELEGRAM_REPLY_LOGGER_NAME:
+        _telegram_reply_configured_path = resolved
     else:
         _configured_path = resolved
 
@@ -212,6 +251,8 @@ def _rotating_log_files(log_path: Path) -> list[Path]:
 def _logger_configured_path(logger_name: str) -> Path | None:
     if logger_name == _EXPERIENCE_LOGGER_NAME:
         return _experience_configured_path
+    if logger_name == _TELEGRAM_REPLY_LOGGER_NAME:
+        return _telegram_reply_configured_path
     return _configured_path
 
 

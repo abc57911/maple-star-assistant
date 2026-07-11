@@ -8,11 +8,16 @@ from ctypes import wintypes
 from pathlib import Path
 from tempfile import gettempdir
 
-from maple_star.debug_logging import configure_debug_logging, configure_experience_debug_logging
+from maple_star.debug_logging import (
+    configure_debug_logging,
+    configure_experience_debug_logging,
+    configure_telegram_reply_logging,
+)
 
 
 configure_debug_logging()
 configure_experience_debug_logging()
+configure_telegram_reply_logging()
 
 MB_ICONINFORMATION = 0x00000040
 ERROR_ALREADY_EXISTS = 183
@@ -103,6 +108,7 @@ def show_already_running_message() -> None:
 def main() -> int:
     configure_debug_logging(reset=True)
     configure_experience_debug_logging(reset=True)
+    configure_telegram_reply_logging(reset=True)
     if not acquire_single_instance():
         show_already_running_message()
         return 0

@@ -9,6 +9,7 @@ import numpy as np
 
 from .auto_potion_controller import AutoPotionController
 from ..constants import MINIMAP_PLAYER_ALERT_BEEP_PATTERN
+from ..adapters.debug_logging import log_telegram_reply
 from ..adapters.win_input import (
     key_display_name,
     key_down as send_key_down,
@@ -30,6 +31,11 @@ from ..services.gamepad_bindings import (
     is_controller_binding_enabled,
 )
 from ..services.minimap_cruise import MinimapCruiseRuntime
+from ..services.telegram_bot import (
+    TelegramConfigError,
+    TelegramReplyListener,
+    load_telegram_bot_config,
+)
 
 from ..adapters.controller_worker import (
     EVENT_BUTTON_DOWN,
@@ -57,6 +63,7 @@ POLL_INTERVAL_SECONDS = 0.01
 MACRO_TIMING_GUARD_SECONDS = 0.12
 WINDOW_INTERACTION_LOOP_DELAY_MS = 120
 RUNTIME_INFO_REFRESH_INTERVAL_SECONDS = 0.25
+TELEGRAM_LIE_DETECTOR_NOTICE_INTERVAL_SECONDS = 30.0
 
 TRACKED_HELD_KEYS: set[int] = set()
 
@@ -608,6 +615,28 @@ def main() -> None:
     current_controller_button_settings: tuple[tuple[str, object], ...] | None = None
     key_capture_actions_were_blocked = False
     controller_worker_dead_reported = False
+    telegram_reply_listener: TelegramReplyListener | None = None
+    telegram_reply_config_error_reported = False
+    last_telegram_lie_detector_notice_at = -999.0
+
+    def send_telegram_message(text: str) -> bool:
+        if telegram_reply_listener is None:
+            return False
+        try:
+            telegram_reply_listener.send_message(text)
+        except Exception as exc:
+            print(f"Telegram 通知發送失敗：{type(exc).__name__}")
+            return False
+        return True
+
+    def play_lie_detector_alert(now: float) -> None:
+        nonlocal last_telegram_lie_detector_notice_at
+        auto_potion._play_lie_detector_alert_sound()
+        if now - last_telegram_lie_detector_notice_at < TELEGRAM_LIE_DETECTOR_NOTICE_INTERVAL_SECONDS:
+            return
+        last_telegram_lie_detector_notice_at = now
+        send_telegram_message("maple-star：偵測到測謊/挑戰視窗，巡航已暫停，請回到電腦處理。")
+
     minimap_cruise = MinimapCruiseRuntime(
         settings=auto_potion.settings,
         is_target_window_active=is_target_window_active,
@@ -616,18 +645,67 @@ def main() -> None:
         or auto_potion.gui.is_window_interaction_active(),
         target_client_bounds_provider=auto_potion._target_client_bounds,
         capture_provider=lambda monitor: np.asarray(auto_potion.sct.grab(monitor)).copy(),
+        should_defer_periodic_keys=auto_potion.should_defer_periodic_item_for_potion,
         set_status=auto_potion.gui.set_status,
-        lie_detector_alert_func=lambda _now: auto_potion._play_lie_detector_alert_sound(),
+        lie_detector_alert_func=play_lie_detector_alert,
         red_player_alert_func=lambda _now: auto_potion._play_toggle_beep(MINIMAP_PLAYER_ALERT_BEEP_PATTERN),
     )
 
     def toggle_minimap_cruise() -> None:
+        nonlocal telegram_reply_config_error_reported
         was_enabled = minimap_cruise.enabled
         enabled = minimap_cruise.toggle(time.monotonic())
         message = minimap_cruise.last_message or ("小地圖巡航已啟用" if enabled else "小地圖巡航已停用")
         auto_potion.notify_minimap_cruise_toggle(enabled, was_enabled != minimap_cruise.enabled, message)
+        if enabled:
+            telegram_reply_config_error_reported = start_telegram_reply_listener(
+                report_missing=not telegram_reply_config_error_reported,
+            )
+        else:
+            stop_telegram_reply_listener()
 
     auto_potion.set_minimap_cruise_toggle_handler(toggle_minimap_cruise)
+
+    def start_telegram_reply_listener(*, report_missing: bool = True) -> bool:
+        nonlocal telegram_reply_listener
+        if telegram_reply_listener is not None and telegram_reply_listener.is_running():
+            return True
+        try:
+            config = load_telegram_bot_config()
+        except TelegramConfigError as exc:
+            if report_missing:
+                print(f"Telegram 回覆監聽未啟用：{exc}")
+            telegram_reply_listener = None
+            return True
+        telegram_reply_listener = TelegramReplyListener(config)
+        telegram_reply_listener.start()
+        print("Telegram 回覆監聽已啟用")
+        send_telegram_message("maple-star：Telegram 回覆監聽已啟用")
+        return False
+
+    def stop_telegram_reply_listener() -> None:
+        nonlocal telegram_reply_listener
+        if telegram_reply_listener is None:
+            return
+        telegram_reply_listener.stop()
+        telegram_reply_listener = None
+        print("Telegram 回覆監聽已停止")
+
+    def process_telegram_replies() -> None:
+        if telegram_reply_listener is None:
+            return
+        for reply in telegram_reply_listener.drain_replies():
+            log_telegram_reply(
+                {
+                    "chat_id": reply.chat_id,
+                    "message_id": reply.message_id,
+                    "text": reply.text,
+                }
+            )
+            message = f"Telegram 回覆：{reply.text}"
+            auto_potion.last_action = message
+            auto_potion.gui.set_status(message)
+            print(message)
 
     print("只在 MapleStory Worlds 為前景視窗且偵測到遊戲 HUD 時生效。")
     print(
@@ -672,6 +750,7 @@ def main() -> None:
         for binding in all_button_bindings:
             binding.stop()
         minimap_cruise.stop(reason)
+        stop_telegram_reply_listener()
         release_tracked_keys()
 
     def any_combo_enabled() -> bool:
@@ -838,9 +917,11 @@ def main() -> None:
             key_capture_actions_were_blocked = key_capture_actions_blocked
             if window_interaction_active:
                 minimap_cruise.update(time.monotonic())
+                process_telegram_replies()
                 return
             update_active_bindings()
             minimap_cruise.update(time.monotonic())
+            process_telegram_replies()
 
             now = time.monotonic()
             next_deadline = next_binding_deadline_at()
@@ -873,6 +954,7 @@ def main() -> None:
         auto_potion.gui.root.mainloop()
     finally:
         auto_potion.cleanup()
+        stop_telegram_reply_listener()
         minimap_cruise.stop("小地圖巡航已停止")
         for binding in all_button_bindings:
             binding.cleanup()

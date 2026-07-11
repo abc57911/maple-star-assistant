@@ -310,8 +310,15 @@ class AutoPotionSettings:
     minimap_cruise_periodic_key_3_enabled: bool = False
     minimap_cruise_periodic_key_3: str = ""
     minimap_cruise_periodic_key_3_interval_seconds: float = MINIMAP_CRUISE_DEFAULT_PERIODIC_KEY_INTERVAL_SECONDS
+    minimap_cruise_periodic_key_4_enabled: bool = False
+    minimap_cruise_periodic_key_4: str = ""
+    minimap_cruise_periodic_key_4_interval_seconds: float = MINIMAP_CRUISE_DEFAULT_PERIODIC_KEY_INTERVAL_SECONDS
+    minimap_cruise_periodic_key_5_enabled: bool = False
+    minimap_cruise_periodic_key_5: str = ""
+    minimap_cruise_periodic_key_5_interval_seconds: float = MINIMAP_CRUISE_DEFAULT_PERIODIC_KEY_INTERVAL_SECONDS
     console_collapsed: bool = False
     combo_group_collapsed: bool = False
+    minimap_cruise_group_collapsed: bool = False
     compact_experience_mode: bool = False
     window_topmost: bool = False
     full_panel_window_x: int | None = None
@@ -405,8 +412,15 @@ class AutoPotionSettings:
             self.minimap_cruise_periodic_key_3_enabled,
             self.minimap_cruise_periodic_key_3,
             self.minimap_cruise_periodic_key_3_interval_seconds,
+            self.minimap_cruise_periodic_key_4_enabled,
+            self.minimap_cruise_periodic_key_4,
+            self.minimap_cruise_periodic_key_4_interval_seconds,
+            self.minimap_cruise_periodic_key_5_enabled,
+            self.minimap_cruise_periodic_key_5,
+            self.minimap_cruise_periodic_key_5_interval_seconds,
             self.console_collapsed,
             self.combo_group_collapsed,
+            self.minimap_cruise_group_collapsed,
             self.compact_experience_mode,
             self.window_topmost,
             self.full_panel_window_x,
@@ -479,8 +493,15 @@ class AutoPotionSettings:
             "minimap_cruise_periodic_key_3_enabled": self.minimap_cruise_periodic_key_3_enabled,
             "minimap_cruise_periodic_key_3": self.minimap_cruise_periodic_key_3,
             "minimap_cruise_periodic_key_3_interval_seconds": self.minimap_cruise_periodic_key_3_interval_seconds,
+            "minimap_cruise_periodic_key_4_enabled": self.minimap_cruise_periodic_key_4_enabled,
+            "minimap_cruise_periodic_key_4": self.minimap_cruise_periodic_key_4,
+            "minimap_cruise_periodic_key_4_interval_seconds": self.minimap_cruise_periodic_key_4_interval_seconds,
+            "minimap_cruise_periodic_key_5_enabled": self.minimap_cruise_periodic_key_5_enabled,
+            "minimap_cruise_periodic_key_5": self.minimap_cruise_periodic_key_5,
+            "minimap_cruise_periodic_key_5_interval_seconds": self.minimap_cruise_periodic_key_5_interval_seconds,
             "console_collapsed": self.console_collapsed,
             "combo_group_collapsed": self.combo_group_collapsed,
+            "minimap_cruise_group_collapsed": self.minimap_cruise_group_collapsed,
             "compact_experience_mode": self.compact_experience_mode,
             "window_topmost": self.window_topmost,
             "full_panel_window_x": self.full_panel_window_x,
@@ -593,8 +614,15 @@ GLOBAL_SETTING_KEYS = (
     "minimap_cruise_periodic_key_3_enabled",
     "minimap_cruise_periodic_key_3",
     "minimap_cruise_periodic_key_3_interval_seconds",
+    "minimap_cruise_periodic_key_4_enabled",
+    "minimap_cruise_periodic_key_4",
+    "minimap_cruise_periodic_key_4_interval_seconds",
+    "minimap_cruise_periodic_key_5_enabled",
+    "minimap_cruise_periodic_key_5",
+    "minimap_cruise_periodic_key_5_interval_seconds",
     "console_collapsed",
     "combo_group_collapsed",
+    "minimap_cruise_group_collapsed",
     "compact_experience_mode",
     "window_topmost",
     "full_panel_window_x",
@@ -789,8 +817,15 @@ def settings_from_profile_payload(
         minimap_cruise_periodic_key_3_enabled=fallback.minimap_cruise_periodic_key_3_enabled,
         minimap_cruise_periodic_key_3=fallback.minimap_cruise_periodic_key_3,
         minimap_cruise_periodic_key_3_interval_seconds=fallback.minimap_cruise_periodic_key_3_interval_seconds,
+        minimap_cruise_periodic_key_4_enabled=fallback.minimap_cruise_periodic_key_4_enabled,
+        minimap_cruise_periodic_key_4=fallback.minimap_cruise_periodic_key_4,
+        minimap_cruise_periodic_key_4_interval_seconds=fallback.minimap_cruise_periodic_key_4_interval_seconds,
+        minimap_cruise_periodic_key_5_enabled=fallback.minimap_cruise_periodic_key_5_enabled,
+        minimap_cruise_periodic_key_5=fallback.minimap_cruise_periodic_key_5,
+        minimap_cruise_periodic_key_5_interval_seconds=fallback.minimap_cruise_periodic_key_5_interval_seconds,
         console_collapsed=fallback.console_collapsed,
         combo_group_collapsed=fallback.combo_group_collapsed,
+        minimap_cruise_group_collapsed=fallback.minimap_cruise_group_collapsed,
         compact_experience_mode=fallback.compact_experience_mode,
         window_topmost=fallback.window_topmost,
         full_panel_window_x=fallback.full_panel_window_x,
@@ -994,8 +1029,47 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
             MINIMAP_CRUISE_MIN_PERIODIC_KEY_INTERVAL_SECONDS,
             MINIMAP_CRUISE_MAX_PERIODIC_KEY_INTERVAL_SECONDS,
         ),
+        minimap_cruise_periodic_key_4_enabled=_read_bool(
+            raw,
+            "minimap_cruise_periodic_key_4_enabled",
+            settings.minimap_cruise_periodic_key_4_enabled,
+        ),
+        minimap_cruise_periodic_key_4=_read_string(
+            raw,
+            "minimap_cruise_periodic_key_4",
+            settings.minimap_cruise_periodic_key_4,
+        ),
+        minimap_cruise_periodic_key_4_interval_seconds=_read_float(
+            raw,
+            "minimap_cruise_periodic_key_4_interval_seconds",
+            settings.minimap_cruise_periodic_key_4_interval_seconds,
+            MINIMAP_CRUISE_MIN_PERIODIC_KEY_INTERVAL_SECONDS,
+            MINIMAP_CRUISE_MAX_PERIODIC_KEY_INTERVAL_SECONDS,
+        ),
+        minimap_cruise_periodic_key_5_enabled=_read_bool(
+            raw,
+            "minimap_cruise_periodic_key_5_enabled",
+            settings.minimap_cruise_periodic_key_5_enabled,
+        ),
+        minimap_cruise_periodic_key_5=_read_string(
+            raw,
+            "minimap_cruise_periodic_key_5",
+            settings.minimap_cruise_periodic_key_5,
+        ),
+        minimap_cruise_periodic_key_5_interval_seconds=_read_float(
+            raw,
+            "minimap_cruise_periodic_key_5_interval_seconds",
+            settings.minimap_cruise_periodic_key_5_interval_seconds,
+            MINIMAP_CRUISE_MIN_PERIODIC_KEY_INTERVAL_SECONDS,
+            MINIMAP_CRUISE_MAX_PERIODIC_KEY_INTERVAL_SECONDS,
+        ),
         console_collapsed=_read_bool(raw, "console_collapsed", settings.console_collapsed),
         combo_group_collapsed=_read_bool(raw, "combo_group_collapsed", settings.combo_group_collapsed),
+        minimap_cruise_group_collapsed=_read_bool(
+            raw,
+            "minimap_cruise_group_collapsed",
+            settings.minimap_cruise_group_collapsed,
+        ),
         compact_experience_mode=_read_bool(raw, "compact_experience_mode", settings.compact_experience_mode),
         window_topmost=_read_bool(raw, "window_topmost", settings.window_topmost),
         full_panel_window_x=_read_optional_int(raw, "full_panel_window_x", settings.full_panel_window_x),

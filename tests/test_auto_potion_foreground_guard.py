@@ -18,6 +18,8 @@ from maple_star.controller import (
     AutoPotionController,
     ExperienceOcrJob,
     LIE_DETECTOR_ALERT_SOUND_PATH,
+    MINIMAP_CRUISE_START_WAV_PATH,
+    MINIMAP_CRUISE_STOP_WAV_PATH,
 )
 from maple_star.constants import (
     ASYNC_KEY_DOWN_MASK,
@@ -697,6 +699,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         exp_yellow_green_top=False,
         neutral_hp_mp_gap=False,
         exp_bright_dividers=False,
+        omit_exp_label=False,
     ):
         image = np.zeros((180, 980, 4), dtype=np.uint8)
         image[:, :, 3] = 255
@@ -723,7 +726,8 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         paste_label(hp_template, label_x, hp_y)
         paste_label(mp_template, mp_label_x, hp_y)
-        paste_label(exp_template, label_x, exp_y)
+        if not omit_exp_label:
+            paste_label(exp_template, label_x, exp_y)
 
         hp_bar_top = hp_y + max(2, round((hp_template.shape[0] - bar_height) / 2))
         mp_bar_top = hp_bar_top
@@ -737,17 +741,19 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
                 hp_bar_left + hp_bar_width : mp_label_x,
                 :3,
             ] = (72, 72, 72)
-        hp_fill_width = max(4, round(hp_bar_width * hp_fill))
-        mp_fill_width = max(4, round(hp_bar_width * mp_fill))
+        hp_fill_width = max(0, round(hp_bar_width * hp_fill))
+        mp_fill_width = max(0, round(hp_bar_width * mp_fill))
         exp_fill_width = max(4, round(exp_bar_width * exp_fill))
         body_inset = max(0, min(bar_height // 2 - 1, round(bar_body_vertical_inset * scale)))
         body_top = hp_bar_top + body_inset
         body_bottom = hp_bar_top + bar_height - body_inset
         exp_body_top = exp_bar_top + body_inset
         exp_body_bottom = exp_bar_top + bar_height - body_inset
-        image[body_top:body_bottom, hp_bar_left : hp_bar_left + hp_fill_width, :3] = (40, 60, 220)
+        if hp_fill_width > 0:
+            image[body_top:body_bottom, hp_bar_left : hp_bar_left + hp_fill_width, :3] = (40, 60, 220)
         mp_color = (40, 60, 220) if wrong_mp_color else (220, 110, 40)
-        image[body_top:body_bottom, mp_bar_left : mp_bar_left + mp_fill_width, :3] = mp_color
+        if mp_fill_width > 0:
+            image[body_top:body_bottom, mp_bar_left : mp_bar_left + mp_fill_width, :3] = mp_color
         image[exp_body_top:exp_body_bottom, exp_bar_left : exp_bar_left + exp_fill_width, :3] = (45, 210, 95)
         if exp_yellow_green_top:
             exp_mid = exp_body_top + max(1, (exp_body_bottom - exp_body_top) // 2)
@@ -2612,6 +2618,52 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         )
         self.assertEqual(controller._bar_percent_from_region_snapshot.call_count, 2)
 
+    def test_gameplay_hud_gate_keeps_stale_regions_when_boss_empties_both_bars(self):
+        controller = self.make_controller([])
+        old_regions = {
+            "hp": (100, 900, 200, 16),
+            "mp": (360, 900, 200, 16),
+        }
+        old_track_regions = {
+            "hp": (102, 902, 190, 12),
+            "mp": (362, 902, 190, 12),
+        }
+        controller.bottom_bar_regions = dict(old_regions)
+        controller.bottom_bar_track_regions = dict(old_track_regions)
+        controller.bottom_bar_client_bounds = (0, 0, 1000, 1000)
+        controller.bottom_bar_regions_at = 0.0
+        controller._foreground_client_bounds = Mock(return_value=(0, 0, 1000, 1000))
+        controller._bar_percent_from_region_snapshot = Mock(return_value=(0.0, "OK:EmptyTrack", None))
+
+        self.assertTrue(
+            controller._can_reuse_stale_bottom_bar_regions(
+                old_regions,
+                old_track_regions,
+                (0, 0, 1000, 1000),
+            )
+        )
+        self.assertEqual(controller._bar_percent_from_region_snapshot.call_count, 2)
+
+    def test_gameplay_hud_gate_reuses_cached_regions_when_boss_empties_both_bars(self):
+        controller = self.make_controller([])
+        regions = {
+            "hp": (100, 900, 200, 16),
+            "mp": (360, 900, 200, 16),
+        }
+        track_regions = {
+            "hp": (102, 902, 190, 12),
+            "mp": (362, 902, 190, 12),
+        }
+        controller._cached_bottom_bar_screen_regions_for_current_client = Mock(
+            return_value=(regions, track_regions, (0, 0, 1000, 1000))
+        )
+        controller._sample_direct_bar_percent_from_region = Mock(return_value=(0.0, "OK:EmptyTrack", None))
+
+        self.assertTrue(controller._reuse_cached_bottom_bar_regions_with_direct_sample(10.0))
+        self.assertEqual(controller.bottom_bar_regions, regions)
+        self.assertEqual(controller.bottom_bar_track_regions, track_regions)
+        self.assertEqual(controller._sample_direct_bar_percent_from_region.call_count, 2)
+
     def test_hp_threshold_100_does_not_tap_when_bar_is_full(self):
         controller = self.make_controller([])
         controller.settings.hp_threshold_percent = 100.0
@@ -3568,6 +3620,35 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         self.assertEqual(order, ["hp", "mp", "watch", "exp"])
 
+    def test_update_ignores_transition_false_positive_when_hp_mp_hud_is_readable(self):
+        controller = self.make_controller([True])
+        controller.next_capture_at = 0.0
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller.settings.exp_efficiency_enabled = False
+        controller.fade_guard_hits = 2
+        controller.fade_guard_until = 200.0
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._save_settings_when_idle = Mock()
+        controller._transition_pause_reason = Mock(return_value="偵測到地圖過場暗幕，暫停自動操作")
+        controller._refresh_gameplay_hud_state = Mock(return_value=True)
+        controller._capture_bar_percents = Mock(return_value=(0.0, 0.0))
+        controller._maybe_drink_hp = Mock()
+        controller._maybe_drink_mp = Mock()
+        controller._update_potion_effect_watch_cycles = Mock()
+        controller._stop_experience_ocr_job = Mock()
+        controller.experience_tracker = Mock()
+        controller.experience_tracker.snapshot.return_value = ExperienceSnapshot()
+
+        controller.update(100.0)
+
+        controller._refresh_gameplay_hud_state.assert_called_once_with(100.0)
+        controller._capture_bar_percents.assert_called_once()
+        controller.gui.set_current_percentages.assert_called_with(0.0, 0.0)
+        controller.gui.set_status.assert_called_with("自動喝水監控中")
+        self.assertEqual(controller.fade_guard_hits, 0)
+        self.assertEqual(controller.fade_guard_until, 0.0)
+
     def test_update_defers_experience_when_potion_needs_action(self):
         controller = self.make_controller([True])
         controller.next_capture_at = 0.0
@@ -3588,6 +3669,21 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         controller._defer_experience_for_potion_priority.assert_called_once_with(100.0)
         controller._update_experience_efficiency.assert_not_called()
+
+    def test_periodic_item_defers_after_recent_potion_tap(self):
+        controller = self.make_controller([True])
+        controller.last_hp_drink_at = 100.0
+
+        self.assertTrue(controller.should_defer_periodic_item_for_potion(100.5))
+        self.assertFalse(controller.should_defer_periodic_item_for_potion(101.1))
+
+    def test_periodic_item_defers_when_pending_potion_send_is_due(self):
+        controller = self.make_controller([True])
+        controller.hp_pending_potion_send_at = 100.0
+        controller.hp_pending_potion_send_percent = 25.0
+
+        self.assertFalse(controller.should_defer_periodic_item_for_potion(99.9))
+        self.assertTrue(controller.should_defer_periodic_item_for_potion(100.0))
 
     def test_update_does_not_defer_experience_when_continuous_margin_stops_potion(self):
         controller = self.make_controller([True])
@@ -4361,32 +4457,38 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertEqual(play_media.call_args_list[0].args, (AUTO_DRINK_STOP_SOUND_PATH, "auto_drink_stop"))
         self.assertEqual(play_media.call_args_list[1].args, (AUTO_DRINK_START_SOUND_PATH, "auto_drink_start"))
 
-    def test_notify_minimap_cruise_toggle_plays_start_system_sound_and_notice(self):
+    def test_notify_minimap_cruise_toggle_plays_start_windows_wav_and_notice(self):
         controller = self.make_controller([])
 
         with (
             patch.object(controller, "_play_media_file") as play_media,
             patch("maple_star.controller.winsound.MessageBeep") as message_beep,
+            patch("maple_star.controller.winsound.PlaySound") as play_sound,
         ):
             controller.notify_minimap_cruise_toggle(True, True, "小地圖巡航已啟用")
 
         play_media.assert_not_called()
-        message_beep.assert_called_once()
+        play_sound.assert_called_once()
+        self.assertEqual(play_sound.call_args.args[0], str(MINIMAP_CRUISE_START_WAV_PATH))
+        message_beep.assert_not_called()
         controller.gui.set_status.assert_called_with("小地圖巡航已啟用")
         controller.gui.show_toggle_notice.assert_called_with("小地圖巡航已啟用")
         self.assertEqual(controller.last_action, "小地圖巡航已啟用")
 
-    def test_notify_minimap_cruise_toggle_plays_stop_system_sound_and_notice(self):
+    def test_notify_minimap_cruise_toggle_plays_stop_windows_wav_and_notice(self):
         controller = self.make_controller([])
 
         with (
             patch.object(controller, "_play_media_file") as play_media,
             patch("maple_star.controller.winsound.MessageBeep") as message_beep,
+            patch("maple_star.controller.winsound.PlaySound") as play_sound,
         ):
             controller.notify_minimap_cruise_toggle(False, True, "小地圖巡航已停用")
 
         play_media.assert_not_called()
-        message_beep.assert_called_once()
+        play_sound.assert_called_once()
+        self.assertEqual(play_sound.call_args.args[0], str(MINIMAP_CRUISE_STOP_WAV_PATH))
+        message_beep.assert_not_called()
         controller.gui.set_status.assert_called_with("小地圖巡航已停用")
         controller.gui.show_toggle_notice.assert_called_with("小地圖巡航已停用")
         self.assertEqual(controller.last_action, "小地圖巡航已停用")
@@ -4405,6 +4507,20 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.gui.set_status.assert_called_with("請先設定小地圖邊界")
         controller.gui.show_toggle_notice.assert_called_with("請先設定小地圖邊界")
         self.assertEqual(controller.last_action, "請先設定小地圖邊界")
+
+    def test_notify_minimap_cruise_toggle_keeps_notice_when_sound_fails(self):
+        controller = self.make_controller([])
+
+        with patch.object(
+            controller,
+            "_play_minimap_cruise_toggle_sound",
+            side_effect=RuntimeError("sound failed"),
+        ):
+            controller.notify_minimap_cruise_toggle(True, True, "小地圖巡航已啟用")
+
+        controller.gui.set_status.assert_called_with("小地圖巡航已啟用")
+        controller.gui.show_toggle_notice.assert_called_with("小地圖巡航已啟用")
+        self.assertEqual(controller.last_action, "小地圖巡航已啟用")
 
     def test_toggle_auto_drink_syncs_gui_potion_options_and_restores_previous_selection(self):
         controller = self.make_controller([])
@@ -4708,10 +4824,90 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             controller._play_media_file(sound_path, "test_sound")
 
         replay_commands = [call.args[0] for call in winmm.mciSendStringW.call_args_list]
-        self.assertEqual(replay_commands, ["stop test_sound", "play test_sound from 0"])
+        self.assertEqual(replay_commands, ["stop test_sound", "setaudio test_sound volume to 200", "play test_sound from 0"])
         controller._play_toggle_beep.assert_not_called()
 
-    def test_lie_detector_alert_uses_bundled_mp3_with_configured_volume(self):
+    def test_play_media_file_reopens_cached_alias_after_play_failure(self):
+        controller = AutoPotionController.__new__(AutoPotionController)
+        controller._play_toggle_beep = Mock()
+        sound_path = AUTO_DRINK_STOP_SOUND_PATH
+        controller._media_alias_paths = {"test_sound": (sound_path, "mpegvideo", 200)}
+        responses = iter(
+            [
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]
+        )
+        winmm = SimpleNamespace(mciSendStringW=Mock(side_effect=lambda *_args: next(responses)))
+
+        with patch("maple_star.controller.ctypes.windll", SimpleNamespace(winmm=winmm), create=True):
+            controller._play_media_file(sound_path, "test_sound")
+
+        commands = [call.args[0] for call in winmm.mciSendStringW.call_args_list]
+        self.assertEqual(
+            commands,
+            [
+                "stop test_sound",
+                "close test_sound",
+                "close test_sound",
+                f'open "{sound_path}" type mpegvideo alias test_sound',
+                "setaudio test_sound volume to 200",
+                "set test_sound time format milliseconds",
+                "stop test_sound",
+                "setaudio test_sound volume to 200",
+                "play test_sound from 0",
+            ],
+        )
+        controller._play_toggle_beep.assert_not_called()
+
+    def test_lie_detector_alert_starts_background_playback(self):
+        controller = AutoPotionController.__new__(AutoPotionController)
+        controller._play_lie_detector_alert_sound_blocking = Mock()
+        created_threads = []
+
+        class FakeThread:
+            def __init__(self, *, target, name, daemon):
+                self.target = target
+                self.name = name
+                self.daemon = daemon
+                self.started = False
+                created_threads.append(self)
+
+            def is_alive(self):
+                return False
+
+            def start(self):
+                self.started = True
+
+        with patch("maple_star.controller.threading.Thread", side_effect=FakeThread) as thread_class:
+            controller._play_lie_detector_alert_sound()
+
+        thread_class.assert_called_once()
+        self.assertEqual(len(created_threads), 1)
+        self.assertIs(created_threads[0].target, controller._play_lie_detector_alert_sound_blocking)
+        self.assertEqual(created_threads[0].name, "maple-star-lie-detector-alert")
+        self.assertTrue(created_threads[0].daemon)
+        self.assertTrue(created_threads[0].started)
+        controller._play_lie_detector_alert_sound_blocking.assert_not_called()
+
+    def test_lie_detector_alert_does_not_start_second_thread_while_in_flight(self):
+        controller = AutoPotionController.__new__(AutoPotionController)
+        controller._lie_detector_alert_thread = Mock()
+        controller._lie_detector_alert_thread.is_alive.return_value = True
+
+        with patch("maple_star.controller.threading.Thread") as thread_class:
+            controller._play_lie_detector_alert_sound()
+
+        thread_class.assert_not_called()
+
+    def test_lie_detector_alert_blocking_playback_uses_bundled_mp3_with_configured_volume(self):
         controller = AutoPotionController.__new__(AutoPotionController)
         controller.settings = AutoPotionSettings(minimap_cruise_lie_detector_alert_volume_percent=35)
         controller._play_toggle_beep = Mock()
@@ -4719,7 +4915,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         winmm = SimpleNamespace(mciSendStringW=Mock(return_value=0))
 
         with patch("maple_star.controller.ctypes.windll", SimpleNamespace(winmm=winmm), create=True):
-            controller._play_lie_detector_alert_sound()
+            controller._play_lie_detector_alert_sound_blocking()
 
         commands = [call.args[0] for call in winmm.mciSendStringW.call_args_list]
         self.assertIn(
@@ -4730,13 +4926,13 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertIn("play minimap_lie_detector_alert from 0", commands)
         controller._play_toggle_beep.assert_not_called()
 
-    def test_lie_detector_alert_volume_zero_is_silent(self):
+    def test_lie_detector_alert_blocking_playback_volume_zero_is_silent(self):
         controller = AutoPotionController.__new__(AutoPotionController)
         controller.settings = AutoPotionSettings(minimap_cruise_lie_detector_alert_volume_percent=0)
         controller._play_toggle_beep = Mock()
 
         with patch.object(controller, "_play_media_file_with_volume") as play_media:
-            controller._play_lie_detector_alert_sound()
+            controller._play_lie_detector_alert_sound_blocking()
 
         play_media.assert_not_called()
         controller._play_toggle_beep.assert_not_called()
@@ -6147,7 +6343,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
                 self.assertLess(layout.exp_label_rect[1], layout.exp_bar_region[1] + layout.exp_bar_region[3])
                 self.assertGreaterEqual(layout.exp_text_region[0] + layout.exp_text_region[2], text_right)
 
-    def test_bottom_hud_layout_rejects_label_match_when_bar_color_guard_fails(self):
+    def test_bottom_hud_layout_uses_hp_mp_labels_when_bar_color_guard_fails(self):
         controller = self.make_controller([])
         image, search_area, _text_right = self.build_synthetic_bottom_hud(controller, wrong_mp_color=True)
 
@@ -6159,7 +6355,69 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             search_area=search_area,
         )
 
-        self.assertIsNone(layout)
+        self.assertIsNotNone(layout)
+        assert layout is not None
+        self.assertLess(layout.hp_region[0], layout.mp_region[0])
+        self.assertGreater(layout.hp_track_region[2], 100)
+        self.assertGreater(layout.mp_track_region[2], 100)
+
+    def test_bottom_hud_layout_uses_hp_mp_labels_without_exp_label(self):
+        controller = self.make_controller([])
+        image, search_area, _text_right = self.build_synthetic_bottom_hud(controller, omit_exp_label=True)
+
+        layout = controller._bottom_hud_layout_from_labels(
+            image,
+            hp_mask=controller._bar_color_mask(image, "hp"),
+            mp_mask=controller._bar_color_mask(image, "mp"),
+            exp_mask=controller._bar_color_mask(image, "exp"),
+            search_area=search_area,
+        )
+
+        self.assertIsNotNone(layout)
+        assert layout is not None
+        self.assertLess(layout.hp_region[0], layout.mp_region[0])
+        self.assertGreater(layout.hp_track_region[2], 100)
+        self.assertGreater(layout.mp_track_region[2], 100)
+
+    def test_bottom_hud_layout_infers_tracks_from_hp_mp_labels_without_color_runs(self):
+        controller = self.make_controller([])
+        image, search_area, _text_right = self.build_synthetic_bottom_hud(controller, omit_exp_label=True)
+        empty_mask = np.zeros(image.shape[:2], dtype=bool)
+
+        layout = controller._bottom_hud_layout_from_labels(
+            image,
+            hp_mask=empty_mask,
+            mp_mask=empty_mask,
+            exp_mask=empty_mask,
+            search_area=search_area,
+        )
+
+        self.assertIsNotNone(layout)
+        assert layout is not None
+        self.assertLess(layout.hp_track_region[0] + layout.hp_track_region[2], layout.mp_label_rect[0])
+        self.assertEqual(layout.hp_track_region[2], layout.mp_track_region[2])
+
+    def test_bottom_hud_layout_uses_hp_mp_labels_when_boss_empties_both_bars(self):
+        controller = self.make_controller([])
+        image, search_area, _text_right = self.build_synthetic_bottom_hud(
+            controller,
+            hp_fill=0.0,
+            mp_fill=0.0,
+            omit_exp_label=True,
+        )
+
+        layout = controller._bottom_hud_layout_from_labels(
+            image,
+            hp_mask=controller._bar_color_mask(image, "hp"),
+            mp_mask=controller._bar_color_mask(image, "mp"),
+            exp_mask=controller._bar_color_mask(image, "exp"),
+            search_area=search_area,
+        )
+
+        self.assertIsNotNone(layout)
+        assert layout is not None
+        self.assertLess(layout.hp_track_region[0] + layout.hp_track_region[2], layout.mp_label_rect[0])
+        self.assertEqual(layout.hp_track_region[2], layout.mp_track_region[2])
 
     def test_bottom_hud_layout_handles_low_hp_mp_fill_using_label_anchor(self):
         controller = self.make_controller([])
@@ -6440,7 +6698,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         self.assertLessEqual(regions["mp"][0], 820)
         self.assertIn("mp", controller.bottom_bar_track_regions)
 
-    def test_find_bottom_bar_pair_regions_detects_full_height_non_16_9_bottom_hud(self):
+    def test_find_bottom_bar_pair_regions_ignores_color_only_hud_without_hp_mp_labels(self):
         controller = self.make_controller([])
         controller.bottom_bar_regions = {}
         controller.bottom_bar_track_regions = {}
@@ -6455,11 +6713,8 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         regions = controller._find_bottom_bar_pair_regions(use_cache=False)
 
-        self.assertEqual(set(regions), {"hp", "mp"})
-        self.assertLess(regions["hp"][0], regions["mp"][0])
-        self.assertGreaterEqual(regions["hp"][1], 1015)
-        self.assertGreaterEqual(regions["mp"][1], 1015)
-        controller.sct.grab.assert_called_once()
+        self.assertEqual(regions, {})
+        self.assertEqual(controller.sct.grab.call_count, 2)
 
     def test_bottom_bar_pair_rejects_right_side_shortcut_colors(self):
         controller = self.make_controller([])

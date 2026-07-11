@@ -14,7 +14,7 @@ from ..models.settings import (
     normalize_minimap_cruise_direction,
 )
 
-MINIMAP_CRUISE_DETECT_INTERVAL_SECONDS = 1.0
+MINIMAP_CRUISE_DETECT_INTERVAL_SECONDS = 0.2
 MINIMAP_CRUISE_STATIONARY_TURN_SECONDS = 1.5
 MINIMAP_CRUISE_STATIONARY_X_TOLERANCE_PIXELS = 2
 MINIMAP_CRUISE_CONFIRM_TURN_INTERVAL_SECONDS = 0.35
@@ -33,6 +33,7 @@ MINIMAP_CRUISE_RED_PLAYER_ALERT_INTERVAL_SECONDS = 1.0
 MINIMAP_CRUISE_PRE_BOUNDARY_SKILL_HOLD_SECONDS = 2.0
 MINIMAP_CRUISE_OUT_OF_BOUNDS_RECOVERY_INTERVAL_SECONDS = 0.5
 MINIMAP_CRUISE_RECOVERY_STUCK_CONFIRMATIONS = 2
+MINIMAP_CRUISE_PERIODIC_KEY_TAP_SPACING_SECONDS = 1.0
 
 MINIMAP_CRUISE_STATUS_STOPPED = "stopped"
 MINIMAP_CRUISE_STATUS_STARTING = "starting"
@@ -63,6 +64,7 @@ class MinimapCruiseRuntime:
     is_action_blocked: Callable[[], bool]
     target_client_bounds_provider: Callable[[], tuple[int, int, int, int] | None]
     capture_provider: CaptureProvider
+    should_defer_periodic_keys: Callable[[float], bool] = lambda _now: False
     set_status: Callable[[str], None] | None = None
     lie_detector_alert_func: Callable[[float], None] | None = None
     red_player_alert_func: Callable[[float], None] | None = None
@@ -101,6 +103,8 @@ class MinimapCruiseRuntime:
     recovery_held_vk: int = 0
     recovery_stuck_confirmations: int = 0
     periodic_key_next_at: dict[int, float] = field(default_factory=dict)
+    periodic_key_pending_taps: dict[int, tuple[int, float, float]] = field(default_factory=dict)
+    last_periodic_key_tap_at: float | None = None
     _last_status_report: str = field(default="", init=False)
 
     def toggle(self, now: float) -> bool:
@@ -142,17 +146,17 @@ class MinimapCruiseRuntime:
         self._reset_stationary_tracking()
         self.next_lie_detector_alert_at = 0.0
         self.pre_boundary_skill_triggered_boundary = None
-        self.periodic_key_next_at.clear()
+        self._clear_periodic_key_schedule()
         self._reset_red_player_alert()
         self.last_message = message
         self._report_status(message)
 
     def update(self, now: float) -> None:
-        if not self.enabled:
-            return
-
         if self.status == MINIMAP_CRUISE_STATUS_LIE_DETECTOR:
             self._play_lie_detector_alert(now)
+            return
+
+        if not self.enabled:
             return
 
         if not self._can_send_actions():
@@ -270,18 +274,20 @@ class MinimapCruiseRuntime:
         self._cancel_pre_boundary_skill()
         self._cancel_recovery()
         self._release_attack_key()
-        self.periodic_key_next_at.clear()
         self._reset_stationary_tracking()
         self.status = MINIMAP_CRUISE_STATUS_SUSPENDED
         self.last_message = message
         self._report_status(message)
 
     def _block_for_lie_detector(self, now: float) -> None:
+        self.enabled = False
         self._cancel_turn()
         self._cancel_pre_boundary_skill()
         self._cancel_recovery()
         self._release_attack_key()
         self._reset_stationary_tracking()
+        self._clear_periodic_key_schedule()
+        self._reset_red_player_alert()
         self.status = MINIMAP_CRUISE_STATUS_LIE_DETECTOR
         self.last_message = "小地圖巡航：偵測到測謊視窗"
         self._report_status(self.last_message)
@@ -381,6 +387,18 @@ class MinimapCruiseRuntime:
                 self.settings.minimap_cruise_periodic_key_3,
                 float(self.settings.minimap_cruise_periodic_key_3_interval_seconds),
             ),
+            (
+                4,
+                self.settings.minimap_cruise_periodic_key_4_enabled,
+                self.settings.minimap_cruise_periodic_key_4,
+                float(self.settings.minimap_cruise_periodic_key_4_interval_seconds),
+            ),
+            (
+                5,
+                self.settings.minimap_cruise_periodic_key_5_enabled,
+                self.settings.minimap_cruise_periodic_key_5,
+                float(self.settings.minimap_cruise_periodic_key_5_interval_seconds),
+            ),
         )
 
     def _configured_periodic_key_vk(self, key: str) -> int | None:
@@ -393,33 +411,89 @@ class MinimapCruiseRuntime:
             return None
 
     def _reset_periodic_key_schedule(self, now: float) -> None:
-        self.periodic_key_next_at.clear()
+        self._clear_periodic_key_schedule()
         for index, enabled, key, interval in self._periodic_key_slots():
             if enabled and self._configured_periodic_key_vk(key) is not None and interval > 0.0:
                 self.periodic_key_next_at[index] = now + interval
 
+    def _clear_periodic_key_schedule(self) -> None:
+        self.periodic_key_next_at.clear()
+        self.periodic_key_pending_taps.clear()
+        self.last_periodic_key_tap_at = None
+
     def _update_periodic_keys(self, now: float) -> None:
-        active_indexes: set[int] = set()
+        valid_slots: dict[int, tuple[int, float]] = {}
         for index, enabled, key, interval in self._periodic_key_slots():
-            active_indexes.add(index)
             vk = self._configured_periodic_key_vk(key)
             if not enabled or vk is None or interval <= 0.0:
                 self.periodic_key_next_at.pop(index, None)
+                self.periodic_key_pending_taps.pop(index, None)
                 continue
+            valid_slots[index] = (vk, interval)
 
             next_at = self.periodic_key_next_at.get(index)
-            if next_at is None:
+            if next_at is None and index not in self.periodic_key_pending_taps:
                 self.periodic_key_next_at[index] = now + interval
-                continue
-            if now + 1e-9 < next_at:
-                continue
-
-            self.tap_key_func(vk)
-            self.periodic_key_next_at[index] = now + interval
 
         for index in tuple(self.periodic_key_next_at):
-            if index not in active_indexes:
+            if index not in valid_slots:
                 self.periodic_key_next_at.pop(index, None)
+        for index in tuple(self.periodic_key_pending_taps):
+            if index not in valid_slots:
+                self.periodic_key_pending_taps.pop(index, None)
+
+        queued: list[tuple[int, float, int, int, float]] = []
+        for index, (vk, send_at, interval) in self.periodic_key_pending_taps.items():
+            queued.append((0, send_at, index, vk, interval))
+        for index, (vk, interval) in valid_slots.items():
+            if index in self.periodic_key_pending_taps:
+                continue
+            next_at = self.periodic_key_next_at.get(index)
+            if next_at is not None and now + 1e-9 >= next_at:
+                queued.append((1, next_at, index, vk, interval))
+
+        if not queued:
+            return
+
+        queued.sort()
+        if self.should_defer_periodic_keys(now):
+            self._reschedule_periodic_key_taps(queued, now, did_tap=False)
+            return
+
+        earliest_allowed = (
+            float("-inf")
+            if self.last_periodic_key_tap_at is None
+            else self.last_periodic_key_tap_at + MINIMAP_CRUISE_PERIODIC_KEY_TAP_SPACING_SECONDS
+        )
+        if queued[0][1] <= now + 1e-9 and now + 1e-9 >= earliest_allowed:
+            _priority, _send_at, index, vk, interval = queued.pop(0)
+            self.tap_key_func(vk)
+            self.last_periodic_key_tap_at = now
+            self.periodic_key_pending_taps.pop(index, None)
+            self.periodic_key_next_at[index] = now + interval
+
+        self._reschedule_periodic_key_taps(queued, now, did_tap=self.last_periodic_key_tap_at == now)
+
+    def _reschedule_periodic_key_taps(
+        self,
+        queued: list[tuple[int, float, int, int, float]],
+        now: float,
+        *,
+        did_tap: bool,
+    ) -> None:
+        queued.sort()
+        if did_tap:
+            next_available_at = now + MINIMAP_CRUISE_PERIODIC_KEY_TAP_SPACING_SECONDS
+        elif self.last_periodic_key_tap_at is None:
+            next_available_at = float("-inf")
+        else:
+            next_available_at = self.last_periodic_key_tap_at + MINIMAP_CRUISE_PERIODIC_KEY_TAP_SPACING_SECONDS
+        pending_taps: dict[int, tuple[int, float, float]] = {}
+        for _priority, send_at, index, vk, interval in queued:
+            scheduled_at = max(send_at, next_available_at)
+            pending_taps[index] = (vk, scheduled_at, interval)
+            next_available_at = scheduled_at + MINIMAP_CRUISE_PERIODIC_KEY_TAP_SPACING_SECONDS
+        self.periodic_key_pending_taps = pending_taps
 
     def _initial_or_current_direction(self, character_x: int) -> str:
         if self.status not in {MINIMAP_CRUISE_STATUS_STARTING, MINIMAP_CRUISE_STATUS_SUSPENDED}:

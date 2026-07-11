@@ -12,4 +12,7 @@ debug.log
 debug.log.*
 experience_debug.log
 experience_debug.log.*
+telegram_reply.log
+telegram_reply.log.*
 settings.json
+/secrets/

@@ -24,7 +24,7 @@
 ## HP/MP/EXP ROI
 - HP/MP 條與 EXP OCR 範圍需能隨遊戲視窗縮放或重開自動重新定位。
 - 不要依賴固定預設座標。
-- 底部 HUD 定位優先使用 `HP.` / `MP.` / `EXP.` label 的 multi-scale template matching，再用紅/藍/綠條色彩驗證；label 失敗時才回到舊的色條配對 fallback。
+- 底部 HUD 定位以 `HP.` / `MP.` label 的 multi-scale template matching 為準；Boss 技能可能讓 HP/MP 幾乎歸零，紅/藍色條只能用於百分比讀值，不可作為 HUD 存在判定或 fallback 定位依據。
 - 沿用 cached/stale HP/MP ROI 前，需確認 HP/MP 成對幾何合理且兩條都能通過取色驗證；不可只因其中一條成功就沿用整組舊座標。
 - HP/MP 自動喝水前需允許短暫偵測失敗重試。
 - 實際送鍵前需做 confirm capture，確認失敗時可用相近的 unchecked fallback，但差異過大時必須放棄送鍵。

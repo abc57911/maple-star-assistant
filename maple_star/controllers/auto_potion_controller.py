@@ -6,6 +6,7 @@ import math
 import hashlib
 import multiprocessing as mp
 import sys
+import threading
 import time
 import winsound
 from concurrent.futures import ProcessPoolExecutor
@@ -235,6 +236,9 @@ MEDIA_VOLUME_PERCENT = 20
 MCI_MAX_VOLUME = 1000
 MCI_MEDIA_VOLUME = round(MCI_MAX_VOLUME * MEDIA_VOLUME_PERCENT / 100)
 MCI_MEDIA_START_MS = 0
+WINDOWS_MEDIA_DIR = Path("C:/Windows/Media")
+MINIMAP_CRUISE_START_WAV_PATH = WINDOWS_MEDIA_DIR / "Windows Notify System Generic.wav"
+MINIMAP_CRUISE_STOP_WAV_PATH = WINDOWS_MEDIA_DIR / "Windows Default.wav"
 AUTO_DRINK_START_SOUND_PATH = PROJECT_ROOT / "media" / "auto-drink-start.mp3"
 AUTO_DRINK_STOP_SOUND_PATH = PROJECT_ROOT / "media" / "auto-drink-stop.mp3"
 AUTO_DRINK_POTION_CHECK_SOUND_PATH = PROJECT_ROOT / "media" / "auto-drink-postion-check.mp3"
@@ -394,6 +398,7 @@ class AutoPotionController:
         self.experience_total_paused_seconds = 0.0
         self.last_hp_drink_at = -999.0
         self.last_mp_drink_at = -999.0
+        self.runtime_potion_action_defer_until = 0.0
         self.potion_send_prevalidated_at = -999.0
         self.hp_pending_potion_send_at = -999.0
         self.mp_pending_potion_send_at = -999.0
@@ -548,6 +553,7 @@ class AutoPotionController:
         self.last_applied_potion_status_signature: tuple[object, ...] | None = None
         self.last_applied_experience_status_signature: tuple[object, ...] | None = None
         self._media_alias_paths: dict[str, Path] = {}
+        self._lie_detector_alert_thread: threading.Thread | None = None
         self._preload_media_files()
         if start_control_hotkey_worker:
             self._sync_registered_control_hotkeys()
@@ -818,6 +824,10 @@ class AutoPotionController:
             self._play_runtime_media_sound(alias)
         if status.action:
             self.last_action = status.action
+        self.runtime_potion_action_defer_until = max(
+            0.0,
+            float(getattr(status, "potion_action_defer_until", 0.0) or 0.0),
+        )
         for line in status.console_lines:
             print(line)
 
@@ -1771,11 +1781,14 @@ class AutoPotionController:
         self.toggle_auto_drink_enabled()
 
     def notify_minimap_cruise_toggle(self, enabled: bool, changed: bool, message: str) -> None:
-        if changed:
-            self._play_system_notification_sound()
         self.gui.set_status(message)
         self.gui.show_toggle_notice(message)
         self.last_action = message
+        if changed:
+            try:
+                self._play_minimap_cruise_toggle_sound(enabled)
+            except Exception:
+                pass
 
     def toggle_experience_efficiency(self) -> None:
         now = time.monotonic()
@@ -1914,6 +1927,16 @@ class AutoPotionController:
             except RuntimeError:
                 pass
 
+    def _play_minimap_cruise_toggle_sound(self, enabled: bool) -> None:
+        path = MINIMAP_CRUISE_START_WAV_PATH if enabled else MINIMAP_CRUISE_STOP_WAV_PATH
+        try:
+            winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+        except Exception:
+            try:
+                self._play_system_notification_sound()
+            except Exception:
+                pass
+
     def _play_media_file(self, path: Path, alias: str) -> None:
         self._play_media_file_with_volume(path, alias, MCI_MEDIA_VOLUME, media_type="mpegvideo")
 
@@ -1933,10 +1956,17 @@ class AutoPotionController:
             buffer = ctypes.create_unicode_buffer(256)
             if not self._ensure_media_alias_opened(winmm, buffer, path, alias, volume, media_type):
                 return
-            winmm.mciSendStringW(f"stop {alias}", buffer, len(buffer), None)
-            if winmm.mciSendStringW(f"play {alias} from {MCI_MEDIA_START_MS}", buffer, len(buffer), None) != 0:
-                self._close_media_alias(winmm, buffer, alias)
-                self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
+            if self._play_open_media_alias(winmm, buffer, alias, volume):
+                return
+            self._close_media_alias(winmm, buffer, alias)
+            if self._ensure_media_alias_opened(winmm, buffer, path, alias, volume, media_type) and self._play_open_media_alias(
+                winmm,
+                buffer,
+                alias,
+                volume,
+            ):
+                return
+            self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
         except Exception:
             self._play_toggle_beep(EMERGENCY_STOP_BEEP_PATTERN)
 
@@ -1953,6 +1983,18 @@ class AutoPotionController:
         self._play_media_file(AUTO_DRINK_POTION_CHECK_SOUND_PATH, "auto_drink_potion_check")
 
     def _play_lie_detector_alert_sound(self) -> None:
+        alert_thread = getattr(self, "_lie_detector_alert_thread", None)
+        if alert_thread is not None and alert_thread.is_alive():
+            return
+        alert_thread = threading.Thread(
+            target=self._play_lie_detector_alert_sound_blocking,
+            name="maple-star-lie-detector-alert",
+            daemon=True,
+        )
+        self._lie_detector_alert_thread = alert_thread
+        alert_thread.start()
+
+    def _play_lie_detector_alert_sound_blocking(self) -> None:
         volume = self._mci_volume_from_percent(
             getattr(self.settings, "minimap_cruise_lie_detector_alert_volume_percent", 80)
         )
@@ -2018,6 +2060,13 @@ class AutoPotionController:
             return False
         alias_paths[alias] = alias_state
         return True
+
+    def _play_open_media_alias(self, winmm: object, buffer: object, alias: str, volume: int) -> bool:
+        if winmm.mciSendStringW(f"stop {alias}", buffer, len(buffer), None) != 0:
+            return False
+        if winmm.mciSendStringW(f"setaudio {alias} volume to {volume}", buffer, len(buffer), None) != 0:
+            return False
+        return winmm.mciSendStringW(f"play {alias} from {MCI_MEDIA_START_MS}", buffer, len(buffer), None) == 0
 
     def _close_media_alias(self, winmm: object, buffer: object, alias: str) -> None:
         winmm.mciSendStringW(f"close {alias}", buffer, len(buffer), None)
@@ -2107,7 +2156,7 @@ class AutoPotionController:
             return
 
         try:
-            transition_pause_reason = self._transition_pause_reason(now)
+            transition_pause_reason, hud_refreshed_after_transition_probe = self._transition_pause_reason_after_hud_probe(now)
             if transition_pause_reason:
                 self._set_gameplay_hud_active(False, now)
                 self._release_all_potion_keys()
@@ -2116,7 +2165,7 @@ class AutoPotionController:
                 self.gui.set_current_percentages(None, None)
                 return
 
-            if not self._refresh_gameplay_hud_state(now):
+            if not hud_refreshed_after_transition_probe and not self._refresh_gameplay_hud_state(now):
                 self._release_pickup_key()
                 self._release_all_potion_keys()
                 self._pause_experience_for_missing_hud(now)
@@ -2226,7 +2275,7 @@ class AutoPotionController:
                 self.gui.set_experience_snapshot(snapshot)
                 return
 
-            transition_pause_reason = self._transition_pause_reason(now)
+            transition_pause_reason, hud_refreshed_after_transition_probe = self._transition_pause_reason_after_hud_probe(now)
             if transition_pause_reason:
                 self._set_gameplay_hud_active(False, now)
                 self._pause_experience_for_missing_hud(now)
@@ -2234,7 +2283,7 @@ class AutoPotionController:
                 return
 
             if self._experience_runtime_needs_hud_refresh(now):
-                if not self._refresh_gameplay_hud_state(now):
+                if not hud_refreshed_after_transition_probe and not self._refresh_gameplay_hud_state(now):
                     self._pause_experience_for_missing_hud(now)
                     self.gui.set_status("未偵測到遊戲 HUD，暫停 EXP 取樣")
                     return
@@ -2487,7 +2536,6 @@ class AutoPotionController:
         regions, track_regions, client_bounds = cached
         if not self._bar_region_pair_geometry_is_valid(regions, track_regions, client_bounds):
             return False
-        saw_non_empty_sample = False
         for bar_type in ("mp", "hp"):
             sample_region = track_regions.get(bar_type) or regions.get(bar_type)
             if sample_region is None:
@@ -2499,10 +2547,6 @@ class AutoPotionController:
             )
             if percent is None:
                 return False
-            if reason != "OK:EmptyTrack":
-                saw_non_empty_sample = True
-        if not saw_non_empty_sample:
-            return False
         self.bottom_bar_regions = regions
         self.bottom_bar_track_regions = track_regions
         self.bottom_bar_client_bounds = client_bounds
@@ -2522,7 +2566,6 @@ class AutoPotionController:
         if not self._bar_region_pair_geometry_is_valid(regions, track_regions, client_bounds):
             return False
 
-        saw_non_empty_sample = False
         for bar_type in ("mp", "hp"):
             try:
                 percent, reason, _tail_clear = self._bar_percent_from_region_snapshot(
@@ -2535,9 +2578,7 @@ class AutoPotionController:
                 return False
             if percent is None:
                 return False
-            if reason != "OK:EmptyTrack":
-                saw_non_empty_sample = True
-        return saw_non_empty_sample
+        return True
 
     def _can_keep_current_bottom_bar_geometry(
         self,
@@ -4875,25 +4916,80 @@ class AutoPotionController:
         hp_percent: float | None,
         mp_percent: float | None,
     ) -> bool:
+        return self._potion_priority_defer_until(now, hp_percent, mp_percent) > now + POTION_TIME_EPSILON_SECONDS
+
+    def should_defer_periodic_item_for_potion(self, now: float) -> bool:
+        runtime_defer_until = float(getattr(self, "runtime_potion_action_defer_until", 0.0) or 0.0)
+        if runtime_defer_until > now + POTION_TIME_EPSILON_SECONDS:
+            return True
+        return self._potion_priority_defer_until(now, None, None) > now + POTION_TIME_EPSILON_SECONDS
+
+    def potion_priority_defer_until(
+        self,
+        now: float,
+        hp_percent: float | None = None,
+        mp_percent: float | None = None,
+    ) -> float:
+        runtime_defer_until = float(getattr(self, "runtime_potion_action_defer_until", 0.0) or 0.0)
+        return max(runtime_defer_until, self._potion_priority_defer_until(now, hp_percent, mp_percent))
+
+    def _potion_priority_defer_until(
+        self,
+        now: float,
+        hp_percent: float | None,
+        mp_percent: float | None,
+    ) -> float:
         if not self.auto_drink_enabled:
-            return False
-        return self._should_defer_experience_for_potion_bar(
-            "hp",
-            hp_percent,
-            self.settings.hp_enabled,
-            self.settings.hp_threshold_percent,
-            self.settings.hp_continuous_enabled,
-            self.settings.hp_continuous_stop_margin_percent,
-            now,
-        ) or self._should_defer_experience_for_potion_bar(
-            "mp",
-            mp_percent,
-            self.settings.mp_enabled,
-            self.settings.mp_threshold_percent,
-            self.settings.mp_continuous_enabled,
-            self.settings.mp_continuous_stop_margin_percent,
-            now,
+            return 0.0
+        return max(
+            self._potion_priority_defer_until_for_bar(
+                "hp",
+                hp_percent,
+                self.settings.hp_enabled,
+                self.settings.hp_threshold_percent,
+                self.settings.hp_continuous_enabled,
+                self.settings.hp_continuous_stop_margin_percent,
+                now,
+            ),
+            self._potion_priority_defer_until_for_bar(
+                "mp",
+                mp_percent,
+                self.settings.mp_enabled,
+                self.settings.mp_threshold_percent,
+                self.settings.mp_continuous_enabled,
+                self.settings.mp_continuous_stop_margin_percent,
+                now,
+            ),
         )
+
+    def _potion_priority_defer_until_for_bar(
+        self,
+        bar_type: str,
+        percent: float | None,
+        enabled: bool,
+        threshold_percent: float,
+        continuous_enabled: bool,
+        continuous_stop_margin_percent: float,
+        now: float,
+    ) -> float:
+        if not self._should_defer_experience_for_potion_bar(
+            bar_type,
+            percent,
+            enabled,
+            threshold_percent,
+            continuous_enabled,
+            continuous_stop_margin_percent,
+            now,
+        ):
+            return 0.0
+        defer_until = now + POTION_EXPERIENCE_DEFER_SECONDS
+        last_drink_at = self._last_potion_drink_at(bar_type)
+        if last_drink_at > -100.0:
+            defer_until = max(defer_until, last_drink_at + POTION_EXPERIENCE_DEFER_SECONDS)
+        pending_send_at = self._pending_potion_send_at(bar_type)
+        if pending_send_at > -100.0 and now + POTION_TIME_EPSILON_SECONDS >= pending_send_at:
+            defer_until = max(defer_until, now + POTION_EXPERIENCE_DEFER_SECONDS)
+        return defer_until
 
     def _should_defer_experience_for_potion_bar(
         self,
@@ -4908,6 +5004,9 @@ class AutoPotionController:
         if not enabled or self._out_of_potion_hold(bar_type) is not None:
             return False
         if self._potion_held_vk(bar_type):
+            return True
+        pending_send_at = self._pending_potion_send_at(bar_type)
+        if pending_send_at > -100.0 and now + POTION_TIME_EPSILON_SECONDS >= pending_send_at:
             return True
         if percent is not None and self._should_drink_for_current_mode(
             percent,
@@ -5757,25 +5856,6 @@ class AutoPotionController:
                 }
                 break
 
-            hp_candidates = self._bar_run_candidates(hp_mask, search_area.reference_width)
-            mp_candidates = self._bar_run_candidates(mp_mask, search_area.reference_width)
-
-            regions = self._bottom_bar_pair_regions_from_candidates(
-                hp_candidates,
-                mp_candidates,
-                hp_mask=hp_mask,
-                mp_mask=mp_mask,
-                search_left=search_area.left,
-                search_top=search_area.top,
-                search_width=search_area.width,
-                search_height=search_area.height,
-                client_width=search_area.reference_width,
-                client_height=search_area.reference_height,
-                reference_left=search_area.reference_left,
-            )
-            if regions:
-                break
-
         if regions and self._bar_region_pair_geometry_is_valid(
             regions,
             getattr(self, "pending_bottom_bar_track_regions", {}),
@@ -5883,15 +5963,33 @@ class AutoPotionController:
         search_area: HudSearchArea,
     ) -> BottomHudLayout | None:
         matches = self._hud_label_matches(image)
-        if not {"hp", "mp", "exp"}.issubset(matches):
+        if not {"hp", "mp"}.issubset(matches):
             return None
         hp_rect, hp_scale, hp_confidence = matches["hp"]
         mp_rect, mp_scale, mp_confidence = matches["mp"]
-        exp_rect, exp_scale, exp_confidence = matches["exp"]
-        if max(hp_scale, mp_scale, exp_scale) - min(hp_scale, mp_scale, exp_scale) > HUD_LABEL_SCALE_TOLERANCE:
+        exp_match = matches.get("exp")
+        if abs(hp_scale - mp_scale) > HUD_LABEL_SCALE_TOLERANCE:
             return None
-        if not self._bottom_hud_label_geometry_is_valid(hp_rect, mp_rect, exp_rect, search_area.width):
+        if not self._bottom_hud_hp_mp_label_geometry_is_valid(hp_rect, mp_rect, search_area.width):
             return None
+        exp_rect: tuple[int, int, int, int] | None = None
+        exp_scale: float | None = None
+        exp_confidence: float | None = None
+        if exp_match is not None:
+            candidate_exp_rect, candidate_exp_scale, candidate_exp_confidence = exp_match
+            if (
+                max(hp_scale, mp_scale, candidate_exp_scale) - min(hp_scale, mp_scale, candidate_exp_scale)
+                <= HUD_LABEL_SCALE_TOLERANCE
+                and self._bottom_hud_exp_label_geometry_is_valid(
+                    hp_rect,
+                    mp_rect,
+                    candidate_exp_rect,
+                    search_area.width,
+                )
+            ):
+                exp_rect = candidate_exp_rect
+                exp_scale = candidate_exp_scale
+                exp_confidence = candidate_exp_confidence
 
         hp_track = self._bar_track_right_of_label(
             image,
@@ -5909,14 +6007,16 @@ class AutoPotionController:
             search_area.reference_height,
             "mp",
         )
-        exp_track = self._bar_track_right_of_label(
-            image,
-            exp_mask,
-            exp_rect,
-            search_area.reference_width,
-            search_area.reference_height,
-            "exp",
-        )
+        if hp_track is None or mp_track is None:
+            inferred_hp_track, inferred_mp_track = self._hp_mp_tracks_from_label_geometry(
+                image,
+                hp_rect,
+                mp_rect,
+                search_area.reference_width,
+                search_area.reference_height,
+            )
+            hp_track = hp_track or inferred_hp_track
+            mp_track = mp_track or inferred_mp_track
         if hp_track is None or mp_track is None:
             return None
 
@@ -5939,9 +6039,29 @@ class AutoPotionController:
                 mp_width = hp_width
         combined_right = max(hp_left + hp_width, mp_left + mp_width)
 
+        exp_track: tuple[int, int, int, int] | None = None
+        if exp_rect is not None:
+            exp_track = self._bar_track_right_of_label(
+                image,
+                exp_mask,
+                exp_rect,
+                search_area.reference_width,
+                search_area.reference_height,
+                "exp",
+            )
         if exp_track is None:
             exp_left = hp_left
             exp_height = max(8, min(max_hp_mp_height, max(hp_height, mp_height)))
+            if exp_rect is None:
+                label_height = max(hp_rect[3], mp_rect[3])
+                exp_rect = (
+                    hp_rect[0],
+                    hp_rect[1] + round(label_height * 1.65),
+                    max(hp_rect[2], round(label_height * 2.1)),
+                    label_height,
+                )
+                exp_scale = (hp_scale + mp_scale) / 2.0
+                exp_confidence = min(hp_confidence, mp_confidence)
             exp_top = exp_rect[1] + max(1, round((exp_rect[3] - exp_height) / 2))
             exp_top = max(0, min(search_area.height - exp_height, exp_top))
             exp_width = combined_right - exp_left
@@ -5990,8 +6110,12 @@ class AutoPotionController:
             search_area.top,
             (exp_left, exp_top, exp_width, exp_height),
         )
-        confidence = min(hp_confidence, mp_confidence, exp_confidence)
-        scale = (hp_scale + mp_scale + exp_scale) / 3.0
+        confidence = min(hp_confidence, mp_confidence, exp_confidence if exp_confidence is not None else 1.0)
+        scale = (
+            (hp_scale + mp_scale + exp_scale) / 3.0
+            if exp_scale is not None
+            else (hp_scale + mp_scale) / 2.0
+        )
         return BottomHudLayout(
             hp_label_rect=self._offset_rect(hp_rect, search_area.left, search_area.top),
             mp_label_rect=self._offset_rect(mp_rect, search_area.left, search_area.top),
@@ -6108,7 +6232,24 @@ class AutoPotionController:
         mask = (luminance >= 135.0) & (chroma <= 95.0)
         return mask.astype(np.uint8) * 255
 
-    def _bottom_hud_label_geometry_is_valid(
+    def _bottom_hud_hp_mp_label_geometry_is_valid(
+        self,
+        hp_rect: tuple[int, int, int, int],
+        mp_rect: tuple[int, int, int, int],
+        search_width: int,
+    ) -> bool:
+        hp_cx = hp_rect[0] + hp_rect[2] / 2.0
+        hp_cy = hp_rect[1] + hp_rect[3] / 2.0
+        mp_cx = mp_rect[0] + mp_rect[2] / 2.0
+        mp_cy = mp_rect[1] + mp_rect[3] / 2.0
+        y_tolerance = max(hp_rect[3], mp_rect[3]) * HUD_LABEL_GEOMETRY_Y_TOLERANCE_RATIO
+        if abs(hp_cy - mp_cy) > y_tolerance:
+            return False
+        if mp_cx <= hp_cx + max(hp_rect[2], round(search_width * 0.06)):
+            return False
+        return True
+
+    def _bottom_hud_exp_label_geometry_is_valid(
         self,
         hp_rect: tuple[int, int, int, int],
         mp_rect: tuple[int, int, int, int],
@@ -6117,15 +6258,8 @@ class AutoPotionController:
     ) -> bool:
         hp_cx = hp_rect[0] + hp_rect[2] / 2.0
         hp_cy = hp_rect[1] + hp_rect[3] / 2.0
-        mp_cx = mp_rect[0] + mp_rect[2] / 2.0
-        mp_cy = mp_rect[1] + mp_rect[3] / 2.0
         exp_cx = exp_rect[0] + exp_rect[2] / 2.0
         exp_cy = exp_rect[1] + exp_rect[3] / 2.0
-        y_tolerance = max(hp_rect[3], mp_rect[3]) * HUD_LABEL_GEOMETRY_Y_TOLERANCE_RATIO
-        if abs(hp_cy - mp_cy) > y_tolerance:
-            return False
-        if mp_cx <= hp_cx + max(hp_rect[2], round(search_width * 0.06)):
-            return False
         if exp_cy <= hp_cy + max(4, hp_rect[3] * 0.35):
             return False
         if exp_cy - hp_cy > max(28, hp_rect[3] * 2.8):
@@ -6133,6 +6267,42 @@ class AutoPotionController:
         if abs(exp_cx - hp_cx) > max(hp_rect[2] * 1.4, round(search_width * 0.05)):
             return False
         return True
+
+    def _hp_mp_tracks_from_label_geometry(
+        self,
+        image: np.ndarray,
+        hp_rect: tuple[int, int, int, int],
+        mp_rect: tuple[int, int, int, int],
+        client_width: int,
+        client_height: int,
+    ) -> tuple[tuple[int, int, int, int] | None, tuple[int, int, int, int] | None]:
+        hp_label_right = hp_rect[0] + hp_rect[2]
+        mp_label_left = mp_rect[0]
+        mp_label_right = mp_rect[0] + mp_rect[2]
+        label_height = max(hp_rect[3], mp_rect[3])
+        label_gap = max(4, round(label_height * 0.55))
+        min_width = max(48, round(client_width * 0.07))
+        max_width = max(min_width + 1, round(client_width * 0.20))
+
+        hp_left = hp_label_right + label_gap
+        hp_right_limit = mp_label_left - max(3, round(label_height * 0.15))
+        hp_width = min(max_width, hp_right_limit - hp_left)
+        if hp_width < min_width:
+            return None, None
+
+        mp_left = mp_label_right + label_gap
+        mp_width = min(hp_width, max_width, image.shape[1] - mp_left)
+        if mp_width < min_width:
+            return None, None
+
+        track_height = max(10, min(22, round(client_height * 0.015), label_height))
+        label_top = round((hp_rect[1] + mp_rect[1]) / 2)
+        track_top = label_top + max(0, round((label_height - track_height) / 2))
+        track_top = max(0, min(image.shape[0] - track_height, track_top))
+        return (
+            (hp_left, track_top, hp_width, track_height),
+            (mp_left, track_top, mp_width, track_height),
+        )
 
     def _bar_run_right_of_label(
         self,
@@ -7336,6 +7506,16 @@ class AutoPotionController:
             self.last_mp_drink_at = now
             return "過場恢復中，暫停自動喝水"
         return None
+
+    def _transition_pause_reason_after_hud_probe(self, now: float) -> tuple[str | None, bool]:
+        pause_reason = self._transition_pause_reason(now)
+        if pause_reason is None:
+            return None, False
+        if not self._refresh_gameplay_hud_state(now):
+            return pause_reason, False
+        self.fade_guard_hits = 0
+        self.fade_guard_until = 0.0
+        return None, True
 
     def _foreground_client_bounds(self) -> tuple[int, int, int, int]:
         hwnd = user32.GetForegroundWindow()

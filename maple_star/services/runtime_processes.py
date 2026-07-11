@@ -69,6 +69,7 @@ class PotionStatus:
     hp_track_region: tuple[int, int, int, int] | None = None
     mp_track_region: tuple[int, int, int, int] | None = None
     media_sound_aliases: tuple[str, ...] = ()
+    potion_action_defer_until: float = 0.0
     generation: int = 0
 
 
@@ -506,6 +507,12 @@ def _handle_experience_command(controller: Any, target_state: dict[str, int], co
 
 def _potion_status(controller: Any, gui: HeadlessRuntimeGui, generation: int = 0) -> PotionStatus:
     lines = gui.consume_console_lines()
+    now = time.monotonic()
+    potion_action_defer_until = 0.0
+    if hasattr(controller, "potion_priority_defer_until"):
+        potion_action_defer_until = float(
+            controller.potion_priority_defer_until(now, gui.hp_percent, gui.mp_percent) or 0.0
+        )
     return PotionStatus(
         hp_percent=gui.hp_percent,
         mp_percent=gui.mp_percent,
@@ -524,6 +531,7 @@ def _potion_status(controller: Any, gui: HeadlessRuntimeGui, generation: int = 0
         mp_region=_bar_debug_region(controller, "mp"),
         hp_track_region=_bar_debug_track_region(controller, "hp"),
         mp_track_region=_bar_debug_track_region(controller, "mp"),
+        potion_action_defer_until=potion_action_defer_until,
         generation=int(generation or 0),
     )
 
@@ -547,6 +555,7 @@ def _potion_status_signature(status: PotionStatus) -> tuple[object, ...]:
         status.mp_region,
         status.hp_track_region,
         status.mp_track_region,
+        round(float(status.potion_action_defer_until or 0.0), 3),
         int(status.generation or 0),
     )
 

@@ -91,7 +91,14 @@ class MinimapCruiseTests(unittest.TestCase):
             key_down_func=lambda vk: events.append(("down", vk)),
             key_up_func=lambda vk: events.append(("up", vk)),
             tap_key_func=lambda vk: events.append(("tap", vk)),
-            parse_vk_key_func=lambda key: {"A": 0x41, "B": 0x42, "C": 0x43, "V": 0x56}[key],
+            parse_vk_key_func=lambda key: {
+                "A": 0x41,
+                "B": 0x42,
+                "C": 0x43,
+                "D": 0x44,
+                "E": 0x45,
+                "V": 0x56,
+            }[key],
         )
         return runtime, events, statuses, alerts
 
@@ -187,45 +194,53 @@ class MinimapCruiseTests(unittest.TestCase):
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
         self.assertEqual(events, [("down", 0x43)])
 
-    def test_detection_runs_about_once_per_second(self):
+    def test_detection_runs_at_configured_interval(self):
         runtime, events, _statuses, _alerts = self.make_runtime([120, 130])
 
         runtime.toggle(100.0)
         runtime.update(100.0)
-        runtime.update(100.5)
-        runtime.update(101.0)
+        runtime.update(100.1)
+        runtime.update(100.2)
 
         self.assertEqual(runtime.last_detected_x, 130)
-        self.assertAlmostEqual(runtime.next_detect_at, 101.0 + MINIMAP_CRUISE_DETECT_INTERVAL_SECONDS)
+        self.assertAlmostEqual(runtime.next_detect_at, 100.2 + MINIMAP_CRUISE_DETECT_INTERVAL_SECONDS)
         self.assertEqual(events, [("down", 0x43)])
 
-    def test_periodic_keys_fire_independently_after_configured_intervals(self):
-        runtime, events, _statuses, _alerts = self.make_runtime([120, 124, 128, 132])
+    def test_periodic_keys_are_spaced_when_due_at_the_same_time(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([120, 124, 128, 132, 136, 140])
         runtime.settings.minimap_cruise_periodic_key_1_enabled = True
         runtime.settings.minimap_cruise_periodic_key_1 = "V"
-        runtime.settings.minimap_cruise_periodic_key_1_interval_seconds = 1.0
+        runtime.settings.minimap_cruise_periodic_key_1_interval_seconds = 10.0
         runtime.settings.minimap_cruise_periodic_key_2_enabled = True
         runtime.settings.minimap_cruise_periodic_key_2 = "A"
-        runtime.settings.minimap_cruise_periodic_key_2_interval_seconds = 2.0
+        runtime.settings.minimap_cruise_periodic_key_2_interval_seconds = 10.0
         runtime.settings.minimap_cruise_periodic_key_3_enabled = True
         runtime.settings.minimap_cruise_periodic_key_3 = "B"
-        runtime.settings.minimap_cruise_periodic_key_3_interval_seconds = 3.0
+        runtime.settings.minimap_cruise_periodic_key_3_interval_seconds = 10.0
+        runtime.settings.minimap_cruise_periodic_key_4_enabled = True
+        runtime.settings.minimap_cruise_periodic_key_4 = "D"
+        runtime.settings.minimap_cruise_periodic_key_4_interval_seconds = 10.0
+        runtime.settings.minimap_cruise_periodic_key_5_enabled = True
+        runtime.settings.minimap_cruise_periodic_key_5 = "E"
+        runtime.settings.minimap_cruise_periodic_key_5_interval_seconds = 10.0
 
         runtime.toggle(100.0)
         runtime.update(100.0)
-        runtime.update(101.0)
-        runtime.update(102.0)
-        runtime.update(103.0)
+        runtime.update(110.0)
+        runtime.update(111.0)
+        runtime.update(112.0)
+        runtime.update(113.0)
+        runtime.update(114.0)
 
         self.assertEqual(
             events,
             [
                 ("down", 0x43),
                 ("tap", 0x56),
-                ("tap", 0x56),
                 ("tap", 0x41),
-                ("tap", 0x56),
                 ("tap", 0x42),
+                ("tap", 0x44),
+                ("tap", 0x45),
             ],
         )
 
@@ -242,6 +257,47 @@ class MinimapCruiseTests(unittest.TestCase):
         runtime.can_run_actions = lambda: True
         runtime.update(102.0)
         runtime.update(103.0)
+
+        self.assertEqual(events, [("tap", 0x56), ("down", 0x43), ("tap", 0x56)])
+
+    def test_periodic_key_countdown_continues_while_target_is_not_foreground(self):
+        target_active = True
+        runtime, events, _statuses, _alerts = self.make_runtime([120, 124])
+        runtime.is_target_window_active = lambda: target_active
+        runtime.settings.minimap_cruise_periodic_key_1_enabled = True
+        runtime.settings.minimap_cruise_periodic_key_1 = "V"
+        runtime.settings.minimap_cruise_periodic_key_1_interval_seconds = 1.0
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        target_active = False
+        runtime.update(101.0)
+
+        self.assertEqual(events, [("down", 0x43), ("up", 0x43)])
+        self.assertEqual(runtime.periodic_key_next_at[1], 101.0)
+
+        target_active = True
+        runtime.update(102.0)
+
+        self.assertEqual(events, [("down", 0x43), ("up", 0x43), ("tap", 0x56), ("down", 0x43)])
+
+    def test_periodic_keys_wait_while_potion_action_has_priority(self):
+        defer_potion = True
+        runtime, events, _statuses, _alerts = self.make_runtime([120, 124, 128])
+        runtime.should_defer_periodic_keys = lambda _now: defer_potion
+        runtime.settings.minimap_cruise_periodic_key_1_enabled = True
+        runtime.settings.minimap_cruise_periodic_key_1 = "V"
+        runtime.settings.minimap_cruise_periodic_key_1_interval_seconds = 1.0
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        runtime.update(101.0)
+
+        self.assertEqual(events, [("down", 0x43)])
+        self.assertIn(1, runtime.periodic_key_pending_taps)
+
+        defer_potion = False
+        runtime.update(102.0)
 
         self.assertEqual(events, [("down", 0x43), ("tap", 0x56)])
 
@@ -823,7 +879,7 @@ class MinimapCruiseTests(unittest.TestCase):
         self.assertEqual(events, [("up", 0x43)])
         self.assertEqual(statuses[-1], "小地圖巡航：找不到角色點")
 
-    def test_lie_detector_detection_releases_attack_and_keeps_alerting_until_toggle(self):
+    def test_lie_detector_detection_stops_cruise_and_next_toggle_restarts(self):
         loaded = load_lie_detector_bomb_template()
         self.assertIsNotNone(loaded)
         template, _mask = loaded
@@ -838,6 +894,7 @@ class MinimapCruiseTests(unittest.TestCase):
 
         runtime.update(100.0)
 
+        self.assertFalse(runtime.enabled)
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_LIE_DETECTOR)
         self.assertEqual(runtime.attack_held_vk, 0)
         self.assertEqual(events, [("up", 0x43)])
@@ -850,9 +907,12 @@ class MinimapCruiseTests(unittest.TestCase):
         runtime.update(100.0 + MINIMAP_CRUISE_LIE_DETECTOR_ALERT_INTERVAL_SECONDS)
         self.assertEqual(alerts, [100.0, 101.0])
 
-        runtime.toggle(102.0)
-        runtime.update(103.0)
-        self.assertFalse(runtime.enabled)
+        self.assertTrue(runtime.toggle(102.0))
+        runtime.update(102.0)
+
+        self.assertTrue(runtime.enabled)
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
+        self.assertEqual(events, [("up", 0x43), ("down", 0x43)])
         self.assertEqual(alerts, [100.0, 101.0])
 
     def test_lie_detector_detection_releases_turn_key(self):
@@ -871,6 +931,7 @@ class MinimapCruiseTests(unittest.TestCase):
 
         runtime.update(100.0)
 
+        self.assertFalse(runtime.enabled)
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_LIE_DETECTOR)
         self.assertEqual(runtime.turn_held_vk, 0)
         self.assertEqual(runtime.turn_direction_vk, 0)

@@ -6,12 +6,15 @@ from unittest.mock import Mock
 from maple_star.debug_logging import (
     close_debug_logging,
     close_experience_debug_logging,
+    close_telegram_reply_logging,
     configure_debug_logging,
     configure_experience_debug_logging,
+    configure_telegram_reply_logging,
     DEBUG_LOG_MAX_BYTES,
     EXPERIENCE_DEBUG_LOG_MAX_BYTES,
     log_exception,
     log_experience_debug,
+    log_telegram_reply,
     write_debug_text,
 )
 from maple_star.gui import GuiConsoleWriter
@@ -147,6 +150,39 @@ class DebugLoggingTests(unittest.TestCase):
             self.assertLessEqual(len(log_files), 3)
             self.assertTrue((debug_log.parent / "experience_debug.log.1").exists())
             self.assertTrue(debug_log.exists())
+
+    def test_log_telegram_reply_writes_jsonl_to_telegram_reply_log(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reply_log = Path(temp_dir) / "telegram_reply.log"
+
+            try:
+                configure_telegram_reply_logging(reply_log, reset=True)
+                log_telegram_reply({"chat_id": 123, "message_id": 456, "text": "ABC"})
+            finally:
+                close_telegram_reply_logging()
+
+            text = reply_log.read_text(encoding="utf-8")
+            self.assertIn('"logged_at":', text)
+            self.assertIn('"chat_id":123', text)
+            self.assertIn('"message_id":456', text)
+            self.assertIn('"text":"ABC"', text)
+
+    def test_configure_telegram_reply_logging_reset_clears_previous_log(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            reply_log = Path(temp_dir) / "telegram_reply.log"
+            reply_log.write_text("old log\n", encoding="utf-8")
+            (reply_log.parent / "telegram_reply.log.1").write_text("old backup\n", encoding="utf-8")
+
+            try:
+                configure_telegram_reply_logging(reply_log, reset=True)
+                log_telegram_reply({"text": "new"})
+            finally:
+                close_telegram_reply_logging()
+
+            text = reply_log.read_text(encoding="utf-8")
+            self.assertNotIn("old log", text)
+            self.assertIn('"text":"new"', text)
+            self.assertFalse((reply_log.parent / "telegram_reply.log.1").exists())
 
 
 if __name__ == "__main__":

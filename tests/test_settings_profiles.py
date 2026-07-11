@@ -56,6 +56,7 @@ class SettingsProfileTests(unittest.TestCase):
         )
         self.assertFalse(settings.console_collapsed)
         self.assertFalse(settings.combo_group_collapsed)
+        self.assertFalse(settings.minimap_cruise_group_collapsed)
         self.assertFalse(settings.compact_experience_mode)
         self.assertFalse(settings.window_topmost)
         self.assertFalse(settings.hp_continuous_enabled)
@@ -102,6 +103,7 @@ class SettingsProfileTests(unittest.TestCase):
         )
         self.assertFalse(saved["console_collapsed"])
         self.assertFalse(saved["combo_group_collapsed"])
+        self.assertFalse(saved["minimap_cruise_group_collapsed"])
         self.assertFalse(saved["compact_experience_mode"])
         self.assertFalse(saved["window_topmost"])
         self.assertIsNone(saved["full_panel_window_x"])
@@ -118,6 +120,7 @@ class SettingsProfileTests(unittest.TestCase):
                     "hp_key": "9",
                     "console_collapsed": True,
                     "combo_group_collapsed": True,
+                    "minimap_cruise_group_collapsed": True,
                     "compact_experience_mode": True,
                     "window_topmost": True,
                 }
@@ -131,6 +134,7 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(settings.hp_key, "9")
         self.assertTrue(settings.console_collapsed)
         self.assertTrue(settings.combo_group_collapsed)
+        self.assertTrue(settings.minimap_cruise_group_collapsed)
         self.assertTrue(settings.compact_experience_mode)
         self.assertTrue(settings.window_topmost)
         self.assertIsNone(settings.full_panel_window_x)
@@ -265,6 +269,12 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertFalse(settings.minimap_cruise_periodic_key_3_enabled)
         self.assertEqual(settings.minimap_cruise_periodic_key_3, "")
         self.assertEqual(settings.minimap_cruise_periodic_key_3_interval_seconds, 60.0)
+        self.assertFalse(settings.minimap_cruise_periodic_key_4_enabled)
+        self.assertEqual(settings.minimap_cruise_periodic_key_4, "")
+        self.assertEqual(settings.minimap_cruise_periodic_key_4_interval_seconds, 60.0)
+        self.assertFalse(settings.minimap_cruise_periodic_key_5_enabled)
+        self.assertEqual(settings.minimap_cruise_periodic_key_5, "")
+        self.assertEqual(settings.minimap_cruise_periodic_key_5_interval_seconds, 60.0)
         self.assertEqual(saved["minimap_cruise_toggle_hotkey"], "F6")
         self.assertEqual(saved["minimap_cruise_attack_key"], "A")
         self.assertEqual(saved["minimap_cruise_left_x"], 276)
@@ -285,6 +295,12 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertFalse(saved["minimap_cruise_periodic_key_3_enabled"])
         self.assertEqual(saved["minimap_cruise_periodic_key_3"], "")
         self.assertEqual(saved["minimap_cruise_periodic_key_3_interval_seconds"], 60.0)
+        self.assertFalse(saved["minimap_cruise_periodic_key_4_enabled"])
+        self.assertEqual(saved["minimap_cruise_periodic_key_4"], "")
+        self.assertEqual(saved["minimap_cruise_periodic_key_4_interval_seconds"], 60.0)
+        self.assertFalse(saved["minimap_cruise_periodic_key_5_enabled"])
+        self.assertEqual(saved["minimap_cruise_periodic_key_5"], "")
+        self.assertEqual(saved["minimap_cruise_periodic_key_5_interval_seconds"], 60.0)
         self.assertNotIn("minimap_cruise_toggle_hotkey", saved["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_attack_key", saved["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_left_x", saved["profiles"]["Default"])
@@ -301,6 +317,12 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertNotIn("minimap_cruise_periodic_key_3_enabled", saved["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_periodic_key_3", saved["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_periodic_key_3_interval_seconds", saved["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_periodic_key_4_enabled", saved["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_periodic_key_4", saved["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_periodic_key_4_interval_seconds", saved["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_periodic_key_5_enabled", saved["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_periodic_key_5", saved["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_periodic_key_5_interval_seconds", saved["profiles"]["Default"])
 
     def test_apply_profile_saves_current_profile_before_switching(self):
         settings = AutoPotionSettings(hp_key="9", hp_continuous_enabled=True, active_profile="Main")
@@ -380,8 +402,15 @@ class SettingsProfileTests(unittest.TestCase):
             minimap_cruise_periodic_key_3_enabled=True,
             minimap_cruise_periodic_key_3="V",
             minimap_cruise_periodic_key_3_interval_seconds=3.5,
+            minimap_cruise_periodic_key_4_enabled=True,
+            minimap_cruise_periodic_key_4="D",
+            minimap_cruise_periodic_key_4_interval_seconds=4.5,
+            minimap_cruise_periodic_key_5_enabled=True,
+            minimap_cruise_periodic_key_5="E",
+            minimap_cruise_periodic_key_5_interval_seconds=5.5,
             console_collapsed=True,
             combo_group_collapsed=True,
+            minimap_cruise_group_collapsed=True,
             compact_experience_mode=True,
             window_topmost=True,
             full_panel_window_x=100,
@@ -418,8 +447,15 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertTrue(payload["minimap_cruise_periodic_key_3_enabled"])
         self.assertEqual(payload["minimap_cruise_periodic_key_3"], "V")
         self.assertEqual(payload["minimap_cruise_periodic_key_3_interval_seconds"], 3.5)
+        self.assertTrue(payload["minimap_cruise_periodic_key_4_enabled"])
+        self.assertEqual(payload["minimap_cruise_periodic_key_4"], "D")
+        self.assertEqual(payload["minimap_cruise_periodic_key_4_interval_seconds"], 4.5)
+        self.assertTrue(payload["minimap_cruise_periodic_key_5_enabled"])
+        self.assertEqual(payload["minimap_cruise_periodic_key_5"], "E")
+        self.assertEqual(payload["minimap_cruise_periodic_key_5_interval_seconds"], 5.5)
         self.assertTrue(payload["console_collapsed"])
         self.assertTrue(payload["combo_group_collapsed"])
+        self.assertTrue(payload["minimap_cruise_group_collapsed"])
         self.assertTrue(payload["compact_experience_mode"])
         self.assertTrue(payload["window_topmost"])
         self.assertEqual(payload["full_panel_window_x"], 100)
@@ -456,8 +492,15 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertNotIn("minimap_cruise_periodic_key_3_enabled", payload["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_periodic_key_3", payload["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_periodic_key_3_interval_seconds", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_periodic_key_4_enabled", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_periodic_key_4", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_periodic_key_4_interval_seconds", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_periodic_key_5_enabled", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_periodic_key_5", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_periodic_key_5_interval_seconds", payload["profiles"]["Default"])
         self.assertNotIn("console_collapsed", payload["profiles"]["Default"])
         self.assertNotIn("combo_group_collapsed", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_group_collapsed", payload["profiles"]["Default"])
         self.assertNotIn("compact_experience_mode", payload["profiles"]["Default"])
         self.assertNotIn("window_topmost", payload["profiles"]["Default"])
         self.assertNotIn("full_panel_window_x", payload["profiles"]["Default"])

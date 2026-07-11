@@ -266,7 +266,11 @@ class AutoPotionSettingsGui:
         self.combo_group_body: ctk.CTkFrame | None = None
         self.combo_group_title_label: ctk.CTkLabel | None = None
         self.minimap_cruise_section: ctk.CTkFrame | None = None
+        self.minimap_cruise_body: ctk.CTkFrame | None = None
+        self.minimap_cruise_title_label: ctk.CTkLabel | None = None
+        self.minimap_cruise_extra_settings_window: ctk.CTkToplevel | None = None
         self.combo_group_collapsed = False
+        self.minimap_cruise_group_collapsed = False
         self.full_panel_widgets: list[tk.Misc] = []
         self.panel_mode_button: ctk.CTkButton | None = None
         self.topmost_button: ctk.CTkButton | None = None
@@ -370,16 +374,22 @@ class AutoPotionSettingsGui:
             tk.BooleanVar(value=settings.minimap_cruise_periodic_key_1_enabled),
             tk.BooleanVar(value=settings.minimap_cruise_periodic_key_2_enabled),
             tk.BooleanVar(value=settings.minimap_cruise_periodic_key_3_enabled),
+            tk.BooleanVar(value=settings.minimap_cruise_periodic_key_4_enabled),
+            tk.BooleanVar(value=settings.minimap_cruise_periodic_key_5_enabled),
         ]
         self.minimap_cruise_periodic_key_vars = [
             tk.StringVar(value=settings.minimap_cruise_periodic_key_1),
             tk.StringVar(value=settings.minimap_cruise_periodic_key_2),
             tk.StringVar(value=settings.minimap_cruise_periodic_key_3),
+            tk.StringVar(value=settings.minimap_cruise_periodic_key_4),
+            tk.StringVar(value=settings.minimap_cruise_periodic_key_5),
         ]
         self.minimap_cruise_periodic_key_interval_vars = [
             tk.StringVar(value=f"{settings.minimap_cruise_periodic_key_1_interval_seconds:g}"),
             tk.StringVar(value=f"{settings.minimap_cruise_periodic_key_2_interval_seconds:g}"),
             tk.StringVar(value=f"{settings.minimap_cruise_periodic_key_3_interval_seconds:g}"),
+            tk.StringVar(value=f"{settings.minimap_cruise_periodic_key_4_interval_seconds:g}"),
+            tk.StringVar(value=f"{settings.minimap_cruise_periodic_key_5_interval_seconds:g}"),
         ]
         self.minimap_cruise_boundary_status = tk.StringVar(value=self._minimap_cruise_boundary_status_text())
         self.minimap_cruise_boundary_step = ""
@@ -605,8 +615,15 @@ class AutoPotionSettingsGui:
             pady=(8, 0),
         )
         self.minimap_cruise_section = minimap_section
-        self._title_label(minimap_header, "小地圖巡航").grid(row=0, column=0, sticky="w", padx=8, pady=4)
-        minimap_frame.columnconfigure(7, weight=1)
+        self.minimap_cruise_body = minimap_frame
+        self.minimap_cruise_title_label = self._title_label(minimap_header, "小地圖巡航")
+        self.minimap_cruise_title_label.grid(row=0, column=0, sticky="w", padx=8, pady=4)
+        minimap_header.bind("<Button-1>", lambda _event: self.toggle_minimap_cruise_group_collapsed())
+        self.minimap_cruise_title_label.bind(
+            "<Button-1>",
+            lambda _event: self.toggle_minimap_cruise_group_collapsed(),
+        )
+        minimap_frame.columnconfigure(6, weight=1)
         self._label(minimap_frame, "啟停").grid(row=0, column=0, sticky="w", padx=(0, 4), pady=6)
         minimap_toggle_entry = self._entry(
             minimap_frame,
@@ -639,93 +656,21 @@ class AutoPotionSettingsGui:
             padx=(8, 8),
             pady=6,
         )
-        self._label(minimap_frame, textvariable=self.minimap_cruise_boundary_status, color=MUTED_TEXT).grid(
+        self._button(minimap_frame, "進階設定", self.open_minimap_cruise_extra_settings, width=88).grid(
             row=0,
             column=5,
-            columnspan=3,
             sticky="w",
             padx=(0, 8),
             pady=6,
         )
-        self._checkbox(
-            minimap_frame,
-            "邊界前技能",
-            self.minimap_cruise_pre_boundary_skill_enabled,
-            width=104,
-        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=(0, 8), pady=(0, 6))
-        self._label(minimap_frame, "技能鍵").grid(row=1, column=2, sticky="w", padx=(8, 4), pady=(0, 6))
-        minimap_pre_boundary_skill_entry = self._entry(
-            minimap_frame,
-            self.minimap_cruise_pre_boundary_skill_key,
-            width=HOTKEY_ENTRY_WIDTH,
-            justify="center",
-            placeholder_text="自訂",
+        self._label(minimap_frame, textvariable=self.minimap_cruise_boundary_status, color=MUTED_TEXT).grid(
+            row=0,
+            column=6,
+            columnspan=4,
+            sticky="w",
+            padx=(0, 8),
+            pady=6,
         )
-        minimap_pre_boundary_skill_entry.grid(row=1, column=3, sticky="w", padx=(0, 8), pady=(0, 6))
-        minimap_pre_boundary_skill_entry.bind(
-            "<Button-1>",
-            lambda event: self._start_key_detection_from_entry(
-                event,
-                self.minimap_cruise_pre_boundary_skill_key,
-                "巡航邊界前技能鍵",
-            ),
-        )
-        self._label(minimap_frame, "距離").grid(row=1, column=4, sticky="w", padx=(8, 4), pady=(0, 6))
-        self._entry(
-            minimap_frame,
-            self.minimap_cruise_pre_boundary_distance,
-            width=56,
-            justify="center",
-        ).grid(row=1, column=5, sticky="w", padx=(0, 4), pady=(0, 6))
-        self._label(minimap_frame, "px").grid(row=1, column=6, sticky="w", padx=(0, 8), pady=(0, 6))
-        self._label(minimap_frame, "測謊音量").grid(row=1, column=7, sticky="w", padx=(8, 4), pady=(0, 6))
-        self._entry(
-            minimap_frame,
-            self.minimap_cruise_lie_detector_alert_volume,
-            width=48,
-            justify="center",
-        ).grid(row=1, column=8, sticky="w", padx=(0, 4), pady=(0, 6))
-        self._label(minimap_frame, "%").grid(row=1, column=9, sticky="w", padx=(0, 8), pady=(0, 6))
-        for index, (enabled_var, key_var, interval_var) in enumerate(
-            zip(
-                self.minimap_cruise_periodic_key_enabled_vars,
-                self.minimap_cruise_periodic_key_vars,
-                self.minimap_cruise_periodic_key_interval_vars,
-            ),
-            start=1,
-        ):
-            row = index + 1
-            self._checkbox(
-                minimap_frame,
-                f"定期按鍵{index}",
-                enabled_var,
-                width=104,
-            ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(0, 8), pady=(0, 6))
-            self._label(minimap_frame, "熱鍵").grid(row=row, column=2, sticky="w", padx=(8, 4), pady=(0, 6))
-            periodic_key_entry = self._entry(
-                minimap_frame,
-                key_var,
-                width=HOTKEY_ENTRY_WIDTH,
-                justify="center",
-                placeholder_text="自訂",
-            )
-            periodic_key_entry.grid(row=row, column=3, sticky="w", padx=(0, 8), pady=(0, 6))
-            periodic_key_entry.bind(
-                "<Button-1>",
-                lambda event, var=key_var, slot=index: self._start_key_detection_from_entry(
-                    event,
-                    var,
-                    f"巡航定期按鍵{slot}",
-                ),
-            )
-            self._label(minimap_frame, "間隔").grid(row=row, column=4, sticky="w", padx=(8, 4), pady=(0, 6))
-            self._entry(
-                minimap_frame,
-                interval_var,
-                width=56,
-                justify="center",
-            ).grid(row=row, column=5, sticky="w", padx=(0, 4), pady=(0, 6))
-            self._label(minimap_frame, "秒").grid(row=row, column=6, sticky="w", padx=(0, 8), pady=(0, 6))
 
         combo_group_section, combo_group_header, combo_group_body = self._build_section(
             controls_frame,
@@ -862,6 +807,7 @@ class AutoPotionSettingsGui:
         self.console_scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 1), pady=1)
         self.root.bind("<Configure>", self._on_root_configure, add="+")
         self.set_window_topmost(settings.window_topmost)
+        self.set_minimap_cruise_group_collapsed(settings.minimap_cruise_group_collapsed)
         self.set_combo_group_collapsed(settings.combo_group_collapsed)
         self.set_console_collapsed(settings.console_collapsed)
         self.set_compact_experience_mode(settings.compact_experience_mode, restore_saved_position=True)
@@ -908,6 +854,189 @@ class AutoPotionSettingsGui:
 
     def toggle_combo_group_collapsed(self) -> None:
         self.set_combo_group_collapsed(not self.combo_group_collapsed)
+
+    def toggle_minimap_cruise_group_collapsed(self) -> None:
+        self.set_minimap_cruise_group_collapsed(not self.minimap_cruise_group_collapsed)
+
+    def open_minimap_cruise_extra_settings(self) -> None:
+        existing = self.minimap_cruise_extra_settings_window
+        if existing is not None:
+            try:
+                if bool(existing.winfo_exists()):
+                    existing.lift()
+                    existing.focus_set()
+                    return
+            except tk.TclError:
+                self.minimap_cruise_extra_settings_window = None
+
+        window = self._create_auxiliary_window(fg_color=APP_BG)
+        self.minimap_cruise_extra_settings_window = window
+        window.title("巡航進階設定")
+        window.resizable(False, False)
+        window.protocol("WM_DELETE_WINDOW", self.close_minimap_cruise_extra_settings)
+        window.columnconfigure(0, weight=1)
+
+        container = ctk.CTkFrame(window, fg_color="transparent")
+        container.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        container.columnconfigure(0, weight=1)
+        self._build_minimap_cruise_extra_settings(container)
+
+        actions = ctk.CTkFrame(container, fg_color="transparent")
+        actions.grid(row=2, column=0, sticky="e", pady=(8, 0))
+        self._button(actions, "關閉", self.close_minimap_cruise_extra_settings, width=74).grid(
+            row=0,
+            column=0,
+            sticky="e",
+        )
+
+        window.update_idletasks()
+        self._prepare_auxiliary_window_for_show(window)
+        x = self.root.winfo_rootx() + 72
+        y = self.root.winfo_rooty() + 72
+        window.geometry(f"+{x}+{y}")
+        window.deiconify()
+        window.lift()
+        window.focus_set()
+
+    def close_minimap_cruise_extra_settings(self) -> None:
+        window = self.minimap_cruise_extra_settings_window
+        self.minimap_cruise_extra_settings_window = None
+        if window is None:
+            return
+        if not self.closed:
+            try:
+                self.apply_to_settings()
+            except tk.TclError:
+                pass
+        try:
+            window.destroy()
+        except tk.TclError:
+            pass
+
+    def _build_minimap_cruise_extra_settings(self, parent: ctk.CTkFrame) -> None:
+        skill_section, _skill_header, skill_frame = self._build_section(
+            parent,
+            "邊界技能",
+            row=0,
+            pady=(0, 0),
+        )
+        skill_section.grid_propagate(False)
+        skill_section.configure(width=610, height=92)
+        for column in range(9):
+            skill_frame.columnconfigure(column, weight=0)
+        skill_frame.columnconfigure(9, weight=1)
+        self._checkbox(
+            skill_frame,
+            "邊界前技能",
+            self.minimap_cruise_pre_boundary_skill_enabled,
+            width=104,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=(0, 8), pady=6)
+        self._label(skill_frame, "技能鍵").grid(row=0, column=2, sticky="w", padx=(8, 4), pady=6)
+        skill_entry = self._entry(
+            skill_frame,
+            self.minimap_cruise_pre_boundary_skill_key,
+            width=HOTKEY_ENTRY_WIDTH,
+            justify="center",
+            placeholder_text="自訂",
+        )
+        skill_entry.grid(row=0, column=3, sticky="w", padx=(0, 8), pady=6)
+        skill_entry.bind(
+            "<Button-1>",
+            lambda event: self._start_key_detection_from_entry(
+                event,
+                self.minimap_cruise_pre_boundary_skill_key,
+                "巡航邊界前技能鍵",
+            ),
+        )
+        self._label(skill_frame, "距離").grid(row=0, column=4, sticky="w", padx=(8, 4), pady=6)
+        self._entry(
+            skill_frame,
+            self.minimap_cruise_pre_boundary_distance,
+            width=56,
+            justify="center",
+        ).grid(row=0, column=5, sticky="w", padx=(0, 4), pady=6)
+        self._label(skill_frame, "px").grid(row=0, column=6, sticky="w", padx=(0, 8), pady=6)
+        self._label(skill_frame, "測謊音量").grid(row=0, column=7, sticky="w", padx=(8, 4), pady=6)
+        self._entry(
+            skill_frame,
+            self.minimap_cruise_lie_detector_alert_volume,
+            width=48,
+            justify="center",
+        ).grid(row=0, column=8, sticky="w", padx=(0, 4), pady=6)
+        self._label(skill_frame, "%").grid(row=0, column=9, sticky="w", padx=(0, 8), pady=6)
+
+        periodic_section, _periodic_header, periodic_frame = self._build_section(
+            parent,
+            "定期熱鍵",
+            row=1,
+            pady=(8, 0),
+        )
+        periodic_section.configure(width=610)
+        for column in range(7):
+            periodic_frame.columnconfigure(column, weight=0)
+        periodic_frame.columnconfigure(7, weight=1)
+        for index, (enabled_var, key_var, interval_var) in enumerate(
+            zip(
+                self.minimap_cruise_periodic_key_enabled_vars,
+                self.minimap_cruise_periodic_key_vars,
+                self.minimap_cruise_periodic_key_interval_vars,
+            ),
+            start=1,
+        ):
+            row = index - 1
+            self._checkbox(
+                periodic_frame,
+                f"定期按鍵{index}",
+                enabled_var,
+                width=104,
+            ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(0, 8), pady=(0, 6))
+            self._label(periodic_frame, "熱鍵").grid(row=row, column=2, sticky="w", padx=(8, 4), pady=(0, 6))
+            periodic_key_entry = self._entry(
+                periodic_frame,
+                key_var,
+                width=HOTKEY_ENTRY_WIDTH,
+                justify="center",
+                placeholder_text="自訂",
+            )
+            periodic_key_entry.grid(row=row, column=3, sticky="w", padx=(0, 8), pady=(0, 6))
+            periodic_key_entry.bind(
+                "<Button-1>",
+                lambda event, var=key_var, slot=index: self._start_key_detection_from_entry(
+                    event,
+                    var,
+                    f"巡航定期按鍵{slot}",
+                ),
+            )
+            self._label(periodic_frame, "間隔").grid(row=row, column=4, sticky="w", padx=(8, 4), pady=(0, 6))
+            self._entry(
+                periodic_frame,
+                interval_var,
+                width=56,
+                justify="center",
+            ).grid(row=row, column=5, sticky="w", padx=(0, 4), pady=(0, 6))
+            self._label(periodic_frame, "秒").grid(row=row, column=6, sticky="w", padx=(0, 8), pady=(0, 6))
+
+    def set_minimap_cruise_group_collapsed(self, collapsed: bool) -> None:
+        collapsed = bool(collapsed)
+        self.minimap_cruise_group_collapsed = collapsed
+        if hasattr(self, "settings"):
+            self.settings.minimap_cruise_group_collapsed = collapsed
+        try:
+            if self.minimap_cruise_body is not None:
+                if collapsed:
+                    self.minimap_cruise_body.grid_remove()
+                else:
+                    self.minimap_cruise_body.grid()
+            if self.minimap_cruise_title_label is not None:
+                self.minimap_cruise_title_label.configure(
+                    text="小地圖巡航（已收合）" if collapsed else "小地圖巡航"
+                )
+        except tk.TclError:
+            return
+        if getattr(self, "console_collapsed", False):
+            self._sync_full_window_height_to_left_panel()
+        else:
+            self._sync_console_height_to_left_panel()
 
     def set_combo_group_collapsed(self, collapsed: bool) -> None:
         collapsed = bool(collapsed)
@@ -2187,6 +2316,7 @@ class AutoPotionSettingsGui:
     def close(self) -> None:
         self.cancel_minimap_cruise_boundary_setup()
         self.cancel_key_detection()
+        self.close_minimap_cruise_extra_settings()
         self._remember_current_mode_window_position()
         self.apply_to_settings()
         save_settings(self.settings, SETTINGS_PATH)
@@ -2272,6 +2402,7 @@ class AutoPotionSettingsGui:
         windows: list[tk.Misc] = [self.root]
         for candidate in (
             self.key_detection_window,
+            self.minimap_cruise_extra_settings_window,
             self.toggle_notice_window,
             self.tooltip_window,
         ):
@@ -2404,23 +2535,31 @@ class AutoPotionSettingsGui:
             self.settings.minimap_cruise_periodic_key_1_enabled,
             self.settings.minimap_cruise_periodic_key_2_enabled,
             self.settings.minimap_cruise_periodic_key_3_enabled,
+            self.settings.minimap_cruise_periodic_key_4_enabled,
+            self.settings.minimap_cruise_periodic_key_5_enabled,
         )
         periodic_keys = (
             self.settings.minimap_cruise_periodic_key_1,
             self.settings.minimap_cruise_periodic_key_2,
             self.settings.minimap_cruise_periodic_key_3,
+            self.settings.minimap_cruise_periodic_key_4,
+            self.settings.minimap_cruise_periodic_key_5,
         )
         periodic_intervals = (
             self.settings.minimap_cruise_periodic_key_1_interval_seconds,
             self.settings.minimap_cruise_periodic_key_2_interval_seconds,
             self.settings.minimap_cruise_periodic_key_3_interval_seconds,
+            self.settings.minimap_cruise_periodic_key_4_interval_seconds,
+            self.settings.minimap_cruise_periodic_key_5_interval_seconds,
         )
-        for index in range(3):
+        for index in range(len(self.minimap_cruise_periodic_key_enabled_vars)):
             self.minimap_cruise_periodic_key_enabled_vars[index].set(periodic_enabled[index])
             self.minimap_cruise_periodic_key_vars[index].set(periodic_keys[index])
             self.minimap_cruise_periodic_key_interval_vars[index].set(f"{periodic_intervals[index]:g}")
         self.minimap_cruise_boundary_status.set(self._minimap_cruise_boundary_status_text())
         self.set_window_topmost(self.settings.window_topmost)
+        self.set_minimap_cruise_group_collapsed(self.settings.minimap_cruise_group_collapsed)
+        self.set_combo_group_collapsed(self.settings.combo_group_collapsed)
         self.set_console_collapsed(self.settings.console_collapsed)
         self.set_compact_experience_mode(self.settings.compact_experience_mode)
         self._refresh_profile_select()
@@ -2961,7 +3100,7 @@ class AutoPotionSettingsGui:
         periodic_enabled_vars = getattr(self, "minimap_cruise_periodic_key_enabled_vars", ())
         periodic_key_vars = getattr(self, "minimap_cruise_periodic_key_vars", ())
         periodic_interval_vars = getattr(self, "minimap_cruise_periodic_key_interval_vars", ())
-        for index in range(min(len(periodic_enabled_vars), len(periodic_key_vars), len(periodic_interval_vars), 3)):
+        for index in range(min(len(periodic_enabled_vars), len(periodic_key_vars), len(periodic_interval_vars), 5)):
             slot = index + 1
             enabled = periodic_enabled_vars[index].get()
             key = periodic_key_vars[index].get().strip()
@@ -2978,6 +3117,11 @@ class AutoPotionSettingsGui:
             periodic_interval_vars[index].set(f"{interval:g}")
         self.settings.console_collapsed = self.console_collapsed
         self.settings.combo_group_collapsed = self.combo_group_collapsed
+        self.settings.minimap_cruise_group_collapsed = getattr(
+            self,
+            "minimap_cruise_group_collapsed",
+            self.settings.minimap_cruise_group_collapsed,
+        )
         self.settings.compact_experience_mode = self.compact_experience_mode
         self.settings.window_topmost = self.window_topmost
 
