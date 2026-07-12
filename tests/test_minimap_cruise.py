@@ -245,7 +245,7 @@ class MinimapCruiseTests(unittest.TestCase):
         )
 
     def test_periodic_keys_resume_without_backlog_after_suspend(self):
-        runtime, events, _statuses, _alerts = self.make_runtime([120, 121, 122])
+        runtime, events, _statuses, _alerts = self.make_runtime([120, 124, 128])
         runtime.settings.minimap_cruise_periodic_key_1_enabled = True
         runtime.settings.minimap_cruise_periodic_key_1 = "V"
         runtime.settings.minimap_cruise_periodic_key_1_interval_seconds = 1.0
@@ -301,7 +301,7 @@ class MinimapCruiseTests(unittest.TestCase):
 
         self.assertEqual(events, [("down", 0x43), ("tap", 0x56)])
 
-    def test_stationary_character_turns_after_two_seconds_without_boundary_hit(self):
+    def test_stationary_character_turns_after_configured_delay_without_boundary_hit(self):
         runtime, events, _statuses, _alerts = self.make_runtime([150, 150])
 
         runtime.toggle(100.0)
@@ -321,15 +321,19 @@ class MinimapCruiseTests(unittest.TestCase):
         )
 
     def test_stationary_tracking_allows_small_x_jitter(self):
-        runtime, events, _statuses, _alerts = self.make_runtime([150, 151, 151])
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 151, 151, 151])
 
         runtime.toggle(100.0)
         runtime.update(100.0)
-        runtime.update(101.0)
+        runtime.update(100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS - 0.001)
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
         self.assertEqual(events, [("down", 0x43)])
 
-        runtime.update(102.0)
+        runtime.update(
+            100.0
+            + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
+            + MINIMAP_CRUISE_DETECT_INTERVAL_SECONDS
+        )
 
         self.assertEqual(runtime.current_direction, "left")
         self.assertEqual(runtime.turn_direction_vk, LEFT_DIRECTION_VK)
@@ -351,7 +355,7 @@ class MinimapCruiseTests(unittest.TestCase):
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
         self.assertEqual(events, [("down", 0x43)])
 
-        runtime.update(102.0)
+        runtime.update(101.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS - 0.001)
 
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
         self.assertEqual(runtime.turn_direction_vk, 0)
