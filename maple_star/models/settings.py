@@ -300,6 +300,7 @@ class AutoPotionSettings:
     minimap_cruise_pre_boundary_skill_enabled: bool = False
     minimap_cruise_pre_boundary_skill_key: str = ""
     minimap_cruise_pre_boundary_distance: int = MINIMAP_CRUISE_DEFAULT_PRE_BOUNDARY_SKILL_DISTANCE
+    minimap_cruise_stationary_skill_key: str = ""
     minimap_cruise_lie_detector_alert_volume_percent: int = MINIMAP_CRUISE_DEFAULT_LIE_DETECTOR_ALERT_VOLUME_PERCENT
     minimap_cruise_periodic_key_1_enabled: bool = False
     minimap_cruise_periodic_key_1: str = ""
@@ -402,6 +403,7 @@ class AutoPotionSettings:
             self.minimap_cruise_pre_boundary_skill_enabled,
             self.minimap_cruise_pre_boundary_skill_key,
             self.minimap_cruise_pre_boundary_distance,
+            self.minimap_cruise_stationary_skill_key,
             self.minimap_cruise_lie_detector_alert_volume_percent,
             self.minimap_cruise_periodic_key_1_enabled,
             self.minimap_cruise_periodic_key_1,
@@ -483,6 +485,7 @@ class AutoPotionSettings:
             "minimap_cruise_pre_boundary_skill_enabled": self.minimap_cruise_pre_boundary_skill_enabled,
             "minimap_cruise_pre_boundary_skill_key": self.minimap_cruise_pre_boundary_skill_key,
             "minimap_cruise_pre_boundary_distance": self.minimap_cruise_pre_boundary_distance,
+            "minimap_cruise_stationary_skill_key": self.minimap_cruise_stationary_skill_key,
             "minimap_cruise_lie_detector_alert_volume_percent": self.minimap_cruise_lie_detector_alert_volume_percent,
             "minimap_cruise_periodic_key_1_enabled": self.minimap_cruise_periodic_key_1_enabled,
             "minimap_cruise_periodic_key_1": self.minimap_cruise_periodic_key_1,
@@ -604,6 +607,7 @@ GLOBAL_SETTING_KEYS = (
     "minimap_cruise_pre_boundary_skill_enabled",
     "minimap_cruise_pre_boundary_skill_key",
     "minimap_cruise_pre_boundary_distance",
+    "minimap_cruise_stationary_skill_key",
     "minimap_cruise_lie_detector_alert_volume_percent",
     "minimap_cruise_periodic_key_1_enabled",
     "minimap_cruise_periodic_key_1",
@@ -807,6 +811,7 @@ def settings_from_profile_payload(
         minimap_cruise_pre_boundary_skill_enabled=fallback.minimap_cruise_pre_boundary_skill_enabled,
         minimap_cruise_pre_boundary_skill_key=fallback.minimap_cruise_pre_boundary_skill_key,
         minimap_cruise_pre_boundary_distance=fallback.minimap_cruise_pre_boundary_distance,
+        minimap_cruise_stationary_skill_key=fallback.minimap_cruise_stationary_skill_key,
         minimap_cruise_lie_detector_alert_volume_percent=fallback.minimap_cruise_lie_detector_alert_volume_percent,
         minimap_cruise_periodic_key_1_enabled=fallback.minimap_cruise_periodic_key_1_enabled,
         minimap_cruise_periodic_key_1=fallback.minimap_cruise_periodic_key_1,
@@ -970,6 +975,11 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
             settings.minimap_cruise_pre_boundary_distance,
             MINIMAP_CRUISE_MIN_PRE_BOUNDARY_SKILL_DISTANCE,
             MINIMAP_CRUISE_MAX_PRE_BOUNDARY_SKILL_DISTANCE,
+        ),
+        minimap_cruise_stationary_skill_key=_read_string(
+            raw,
+            "minimap_cruise_stationary_skill_key",
+            settings.minimap_cruise_stationary_skill_key,
         ),
         minimap_cruise_lie_detector_alert_volume_percent=_read_int(
             raw,

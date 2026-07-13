@@ -183,6 +183,37 @@ class TelegramReplyListenerTests(unittest.TestCase):
 
         self.assertEqual(client.sent_messages, [(123, "hello")])
 
+    def test_listener_queues_message_without_waiting_for_slow_send(self):
+        send_started = threading.Event()
+        release_send = threading.Event()
+
+        class SlowSendClient:
+            def get_updates(self, *, offset, timeout_seconds):
+                time.sleep(0.01)
+                return []
+
+            def send_message(self, *, chat_id, text):
+                send_started.set()
+                release_send.wait(1.0)
+
+        listener = TelegramReplyListener(
+            TelegramBotConfig(bot_token="token", allowed_chat_id=123, poll_timeout_seconds=1),
+            client=SlowSendClient(),
+        )
+
+        try:
+            listener.start()
+            started_at = time.monotonic()
+            queued = listener.queue_message("hello")
+            elapsed = time.monotonic() - started_at
+
+            self.assertTrue(queued)
+            self.assertLess(elapsed, 0.1)
+            self.assertTrue(send_started.wait(1.0))
+        finally:
+            release_send.set()
+            listener.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

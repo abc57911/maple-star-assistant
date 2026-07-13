@@ -10,6 +10,7 @@ from typing import Callable
 
 from ..constants import (
     INPUT_KEYBOARD,
+    KEYEVENTF_EXTENDEDKEY,
     KEYEVENTF_KEYUP,
 )
 
@@ -88,6 +89,21 @@ for code in range(0x41, 0x5B):
     VK_DISPLAY_NAMES[code] = chr(code)
 for index in range(1, 25):
     VK_DISPLAY_NAMES[0x70 + index - 1] = f"F{index}"
+
+EXTENDED_KEY_VKS = frozenset(
+    {
+        0x21,  # PageUp
+        0x22,  # PageDown
+        0x23,  # End
+        0x24,  # Home
+        0x25,  # Left
+        0x26,  # Up
+        0x27,  # Right
+        0x28,  # Down
+        0x2D,  # Insert
+        0x2E,  # Delete
+    }
+)
 
 
 class KeyBdInput(ctypes.Structure):
@@ -351,13 +367,16 @@ except Exception:
     except Exception:
         pass
 def keyboard_input(vk_code: int, flags: int = 0) -> Input:
+    resolved_flags = int(flags)
+    if int(vk_code) in EXTENDED_KEY_VKS:
+        resolved_flags |= KEYEVENTF_EXTENDEDKEY
     return Input(
         type=INPUT_KEYBOARD,
         union=InputUnion(
             ki=KeyBdInput(
                 wVk=vk_code,
                 wScan=0,
-                dwFlags=flags,
+                dwFlags=resolved_flags,
                 time=0,
                 dwExtraInfo=None,
             )

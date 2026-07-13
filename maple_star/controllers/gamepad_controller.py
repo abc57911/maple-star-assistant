@@ -622,10 +622,8 @@ def main() -> None:
     def send_telegram_message(text: str) -> bool:
         if telegram_reply_listener is None:
             return False
-        try:
-            telegram_reply_listener.send_message(text)
-        except Exception as exc:
-            print(f"Telegram 通知發送失敗：{type(exc).__name__}")
+        if not telegram_reply_listener.queue_message(text):
+            print("Telegram 通知發送佇列已滿")
             return False
         return True
 

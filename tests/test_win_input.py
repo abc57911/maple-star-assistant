@@ -4,6 +4,23 @@ from unittest.mock import patch
 from maple_star.adapters import win_input
 
 
+class KeyboardInputTests(unittest.TestCase):
+    def test_extended_keys_include_extended_flag(self):
+        event = win_input.keyboard_input(win_input.parse_vk_key("PageUp"))
+        key_up_event = win_input.keyboard_input(win_input.parse_vk_key("PageUp"), win_input.KEYEVENTF_KEYUP)
+
+        self.assertEqual(event.union.ki.dwFlags, win_input.KEYEVENTF_EXTENDEDKEY)
+        self.assertEqual(
+            key_up_event.union.ki.dwFlags,
+            win_input.KEYEVENTF_EXTENDEDKEY | win_input.KEYEVENTF_KEYUP,
+        )
+
+    def test_regular_keys_do_not_include_extended_flag(self):
+        event = win_input.keyboard_input(win_input.parse_vk_key("C"))
+
+        self.assertEqual(event.union.ki.dwFlags, 0)
+
+
 class TemporaryMouseInputLockTests(unittest.TestCase):
     def test_physical_mouse_activity_observer_records_only_non_injected_events(self):
         times = iter([10.0, 11.0])

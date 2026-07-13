@@ -207,8 +207,10 @@ class TelegramReplyListener:
         self.config = config
         self.client = client or TelegramBotApiClient(config.bot_token)
         self._queue: queue.Queue[TelegramReply] = queue.Queue()
+        self._send_queue: queue.Queue[str | None] = queue.Queue(maxsize=20)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._send_thread: threading.Thread | None = None
         self._offset: int | None = None
         self._last_error: str | None = None
 
@@ -217,18 +219,31 @@ class TelegramReplyListener:
         return self._last_error
 
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
+        poll_thread_alive = self._thread is not None and self._thread.is_alive()
+        send_thread_alive = self._send_thread is not None and self._send_thread.is_alive()
+        if poll_thread_alive and send_thread_alive:
             return
         self._stop.clear()
         self._last_error = None
-        self._thread = threading.Thread(target=self._run, name="maple-star-telegram-reply", daemon=True)
-        self._thread.start()
+        if not poll_thread_alive:
+            self._thread = threading.Thread(target=self._run, name="maple-star-telegram-reply", daemon=True)
+            self._thread.start()
+        if not send_thread_alive:
+            self._send_thread = threading.Thread(target=self._run_sender, name="maple-star-telegram-send", daemon=True)
+            self._send_thread.start()
 
     def stop(self, timeout_seconds: float = 2.0) -> None:
         self._stop.set()
+        try:
+            self._send_queue.put_nowait(None)
+        except queue.Full:
+            pass
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(max(0.0, float(timeout_seconds)))
+        send_thread = self._send_thread
+        if send_thread is not None and send_thread.is_alive():
+            send_thread.join(max(0.0, float(timeout_seconds)))
 
     def is_running(self) -> bool:
         thread = self._thread
@@ -244,6 +259,27 @@ class TelegramReplyListener:
 
     def send_message(self, text: str) -> None:
         self.client.send_message(chat_id=self.config.allowed_chat_id, text=text)
+
+    def queue_message(self, text: str) -> bool:
+        try:
+            self._send_queue.put_nowait(str(text))
+        except queue.Full:
+            self._last_error = "SendQueueFull"
+            return False
+        return True
+
+    def _run_sender(self) -> None:
+        while not self._stop.is_set():
+            try:
+                text = self._send_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if text is None:
+                break
+            try:
+                self.send_message(text)
+            except Exception as exc:
+                self._last_error = type(exc).__name__
 
     def _run(self) -> None:
         while not self._stop.is_set():

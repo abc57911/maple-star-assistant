@@ -367,6 +367,7 @@ class AutoPotionSettingsGui:
         self.minimap_cruise_pre_boundary_distance = tk.StringVar(
             value=f"{settings.minimap_cruise_pre_boundary_distance:g}"
         )
+        self.minimap_cruise_stationary_skill_key = tk.StringVar(value=settings.minimap_cruise_stationary_skill_key)
         self.minimap_cruise_lie_detector_alert_volume = tk.StringVar(
             value=f"{settings.minimap_cruise_lie_detector_alert_volume_percent:g}"
         )
@@ -921,7 +922,7 @@ class AutoPotionSettingsGui:
             pady=(0, 0),
         )
         skill_section.grid_propagate(False)
-        skill_section.configure(width=610, height=92)
+        skill_section.configure(width=610, height=126)
         for column in range(9):
             skill_frame.columnconfigure(column, weight=0)
         skill_frame.columnconfigure(9, weight=1)
@@ -964,6 +965,23 @@ class AutoPotionSettingsGui:
             justify="center",
         ).grid(row=0, column=8, sticky="w", padx=(0, 4), pady=6)
         self._label(skill_frame, "%").grid(row=0, column=9, sticky="w", padx=(0, 8), pady=6)
+        self._label(skill_frame, "原地位移技").grid(row=1, column=0, columnspan=2, sticky="w", padx=(0, 8), pady=6)
+        stationary_skill_entry = self._entry(
+            skill_frame,
+            self.minimap_cruise_stationary_skill_key,
+            width=HOTKEY_ENTRY_WIDTH,
+            justify="center",
+            placeholder_text="空白=轉向",
+        )
+        stationary_skill_entry.grid(row=1, column=2, sticky="w", padx=(8, 8), pady=6)
+        stationary_skill_entry.bind(
+            "<Button-1>",
+            lambda event: self._start_key_detection_from_entry(
+                event,
+                self.minimap_cruise_stationary_skill_key,
+                "巡航原地位移技",
+            ),
+        )
 
         periodic_section, _periodic_header, periodic_frame = self._build_section(
             parent,
@@ -2531,6 +2549,7 @@ class AutoPotionSettingsGui:
         )
         self.minimap_cruise_pre_boundary_skill_key.set(self.settings.minimap_cruise_pre_boundary_skill_key)
         self.minimap_cruise_pre_boundary_distance.set(f"{self.settings.minimap_cruise_pre_boundary_distance:g}")
+        self.minimap_cruise_stationary_skill_key.set(self.settings.minimap_cruise_stationary_skill_key)
         periodic_enabled = (
             self.settings.minimap_cruise_periodic_key_1_enabled,
             self.settings.minimap_cruise_periodic_key_2_enabled,
@@ -3087,6 +3106,9 @@ class AutoPotionSettingsGui:
             )
             self.settings.minimap_cruise_pre_boundary_distance = distance
             minimap_pre_skill_distance.set(str(distance))
+        minimap_stationary_skill_key = getattr(self, "minimap_cruise_stationary_skill_key", None)
+        if minimap_stationary_skill_key is not None:
+            self.settings.minimap_cruise_stationary_skill_key = minimap_stationary_skill_key.get().strip()
         minimap_lie_detector_alert_volume = getattr(self, "minimap_cruise_lie_detector_alert_volume", None)
         if minimap_lie_detector_alert_volume is not None:
             volume = self._read_int_text(

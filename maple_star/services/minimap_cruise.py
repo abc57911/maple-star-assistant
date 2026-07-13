@@ -28,9 +28,10 @@ MINIMAP_CRUISE_LIE_DETECTOR_CHECK_INTERVAL_SECONDS = 0.5
 MINIMAP_CRUISE_LIE_DETECTOR_ALERT_INTERVAL_SECONDS = 1.0
 MINIMAP_CRUISE_LIE_DETECTOR_MATCH_THRESHOLD = 0.82
 MINIMAP_CRUISE_RED_PLAYER_CHECK_INTERVAL_SECONDS = 1.0
-MINIMAP_CRUISE_RED_PLAYER_ALERT_AFTER_SECONDS = 60.0
+MINIMAP_CRUISE_RED_PLAYER_ALERT_AFTER_SECONDS = 20.0
 MINIMAP_CRUISE_RED_PLAYER_ALERT_INTERVAL_SECONDS = 1.0
 MINIMAP_CRUISE_PRE_BOUNDARY_SKILL_HOLD_SECONDS = 2.0
+MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS = 0.8
 MINIMAP_CRUISE_OUT_OF_BOUNDS_RECOVERY_INTERVAL_SECONDS = 0.5
 MINIMAP_CRUISE_RECOVERY_STUCK_CONFIRMATIONS = 2
 MINIMAP_CRUISE_PERIODIC_KEY_TAP_SPACING_SECONDS = 1.0
@@ -42,6 +43,7 @@ MINIMAP_CRUISE_STATUS_SUSPENDED = "suspended"
 MINIMAP_CRUISE_STATUS_TURNING = "turning"
 MINIMAP_CRUISE_STATUS_LIE_DETECTOR = "lie_detector"
 MINIMAP_CRUISE_STATUS_PRE_BOUNDARY_SKILL = "pre_boundary_skill"
+MINIMAP_CRUISE_STATUS_STATIONARY_SKILL = "stationary_skill"
 MINIMAP_CRUISE_STATUS_RECOVERING = "recovering"
 
 LEFT_DIRECTION_VK = 0x25
@@ -97,6 +99,8 @@ class MinimapCruiseRuntime:
     pre_boundary_skill_held_vk: int = 0
     pre_boundary_skill_key_up_at: float | None = None
     pre_boundary_skill_triggered_boundary: str | None = None
+    stationary_skill_held_vk: int = 0
+    stationary_skill_key_up_at: float | None = None
     recovery_boundary: str | None = None
     recovery_last_x: int | None = None
     recovery_direction_vk: int = 0
@@ -141,6 +145,7 @@ class MinimapCruiseRuntime:
         self.status = MINIMAP_CRUISE_STATUS_STOPPED
         self._cancel_turn()
         self._cancel_pre_boundary_skill()
+        self._cancel_stationary_skill()
         self._cancel_recovery()
         self._release_attack_key()
         self._reset_stationary_tracking()
@@ -173,6 +178,10 @@ class MinimapCruiseRuntime:
 
         if self.status == MINIMAP_CRUISE_STATUS_PRE_BOUNDARY_SKILL:
             self._update_pre_boundary_skill(now)
+            return
+
+        if self.status == MINIMAP_CRUISE_STATUS_STATIONARY_SKILL:
+            self._update_stationary_skill(now)
             return
 
         if self.status == MINIMAP_CRUISE_STATUS_TURNING:
@@ -222,6 +231,8 @@ class MinimapCruiseRuntime:
             return
 
         if self._stationary_too_long(now):
+            if self._maybe_begin_stationary_skill(now):
+                return
             self._turn(now)
             return
 
@@ -236,6 +247,8 @@ class MinimapCruiseRuntime:
             return "巡航(測謊暫停)"
         if self.status == MINIMAP_CRUISE_STATUS_PRE_BOUNDARY_SKILL:
             return "巡航(邊界前技能)"
+        if self.status == MINIMAP_CRUISE_STATUS_STATIONARY_SKILL:
+            return "巡航(原地位移技)"
         if self.status == MINIMAP_CRUISE_STATUS_RECOVERING:
             return "巡航(復位中)"
         direction = "左" if self.current_direction == "left" else "右"
@@ -272,6 +285,7 @@ class MinimapCruiseRuntime:
     def _suspend(self, message: str) -> None:
         self._cancel_turn()
         self._cancel_pre_boundary_skill()
+        self._cancel_stationary_skill()
         self._cancel_recovery()
         self._release_attack_key()
         self._reset_stationary_tracking()
@@ -283,6 +297,7 @@ class MinimapCruiseRuntime:
         self.enabled = False
         self._cancel_turn()
         self._cancel_pre_boundary_skill()
+        self._cancel_stationary_skill()
         self._cancel_recovery()
         self._release_attack_key()
         self._reset_stationary_tracking()
@@ -311,7 +326,7 @@ class MinimapCruiseRuntime:
                 if now - self.red_player_present_since >= MINIMAP_CRUISE_RED_PLAYER_ALERT_AFTER_SECONDS:
                     if not self.red_player_alert_active:
                         self.red_player_alert_active = True
-                        self.last_message = "小地圖巡航：其他玩家紅點超過 1 分鐘"
+                        self.last_message = "小地圖巡航：其他玩家紅點超過 20 秒"
                         self._report_status(self.last_message)
                     self._play_red_player_alert(now)
                 return
@@ -360,6 +375,15 @@ class MinimapCruiseRuntime:
 
     def _configured_pre_boundary_skill_vk(self) -> int | None:
         key = self.settings.minimap_cruise_pre_boundary_skill_key.strip()
+        if not key:
+            return None
+        try:
+            return self.parse_vk_key_func(key)
+        except ValueError:
+            return None
+
+    def _configured_stationary_skill_vk(self) -> int | None:
+        key = self.settings.minimap_cruise_stationary_skill_key.strip()
         if not key:
             return None
         try:
@@ -517,6 +541,7 @@ class MinimapCruiseRuntime:
 
     def _turn(self, now: float) -> None:
         self._reset_stationary_tracking()
+        self._cancel_stationary_skill()
         self._cancel_recovery()
         self.pre_boundary_skill_triggered_boundary = None
         forced_direction = None if self.last_detected_x is None else self._forced_direction_toward_bounds(self.last_detected_x)
@@ -578,6 +603,7 @@ class MinimapCruiseRuntime:
     def _begin_pre_boundary_skill(self, skill_vk: int, boundary: str, now: float) -> None:
         self._cancel_turn()
         self._cancel_recovery()
+        self._cancel_stationary_skill()
         self.key_down_func(skill_vk)
         self.pre_boundary_skill_held_vk = skill_vk
         self.pre_boundary_skill_key_up_at = now + MINIMAP_CRUISE_PRE_BOUNDARY_SKILL_HOLD_SECONDS
@@ -655,6 +681,60 @@ class MinimapCruiseRuntime:
             return "left"
         return None
 
+    def _maybe_begin_stationary_skill(self, now: float) -> bool:
+        skill_vk = self._configured_stationary_skill_vk()
+        if skill_vk is None:
+            return False
+        self._begin_stationary_skill(skill_vk, now)
+        return True
+
+    def _begin_stationary_skill(self, skill_vk: int, now: float) -> None:
+        self._cancel_turn()
+        self._cancel_recovery()
+        self._cancel_pre_boundary_skill()
+        self._release_attack_key()
+        self.key_down_func(skill_vk)
+        self.stationary_skill_held_vk = skill_vk
+        self.stationary_skill_key_up_at = now + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS
+        self.status = MINIMAP_CRUISE_STATUS_STATIONARY_SKILL
+        self.last_message = "小地圖巡航：原地位移技"
+
+    def _update_stationary_skill(self, now: float) -> None:
+        if not self._can_send_actions():
+            self._suspend("小地圖巡航暫停")
+            return
+        if self.stationary_skill_held_vk and self.stationary_skill_key_up_at is not None:
+            if now + 1e-9 < self.stationary_skill_key_up_at:
+                if self._handle_out_of_bounds_during_stationary_skill(now):
+                    return
+                return
+            self._cancel_stationary_skill()
+            if self._handle_out_of_bounds_during_stationary_skill(now):
+                return
+        self._reset_stationary_tracking()
+        if not self._hold_attack_key():
+            return
+        self.status = MINIMAP_CRUISE_STATUS_ATTACKING
+        self.last_message = "小地圖巡航中"
+        self.next_detect_at = now
+
+    def _handle_out_of_bounds_during_stationary_skill(self, now: float) -> bool:
+        character_x = self._capture_character_x()
+        if character_x is None:
+            return False
+        self.consecutive_detection_failures = 0
+        self.last_detected_x = character_x
+        out_of_bounds_direction = self._direction_toward_bounds_if_outside(character_x)
+        if out_of_bounds_direction is None:
+            return False
+        self._cancel_stationary_skill()
+        self._begin_turn(
+            out_of_bounds_direction,
+            self._boundary_for_out_of_bounds_direction(out_of_bounds_direction),
+            now,
+        )
+        return True
+
     def _cancel_pre_boundary_skill(self) -> None:
         held_vk = self.pre_boundary_skill_held_vk
         if held_vk:
@@ -663,6 +743,15 @@ class MinimapCruiseRuntime:
             finally:
                 self.pre_boundary_skill_held_vk = 0
         self.pre_boundary_skill_key_up_at = None
+
+    def _cancel_stationary_skill(self) -> None:
+        held_vk = self.stationary_skill_held_vk
+        if held_vk:
+            try:
+                self.key_up_func(held_vk)
+            finally:
+                self.stationary_skill_held_vk = 0
+        self.stationary_skill_key_up_at = None
 
     def _update_recovery(self, character_x: int, direction: str, now: float) -> None:
         boundary = "left" if direction == "right" else "right"

@@ -11,6 +11,7 @@ from maple_star.services.minimap_cruise import (
     MINIMAP_CRUISE_PRE_BOUNDARY_SKILL_HOLD_SECONDS,
     MINIMAP_CRUISE_RED_PLAYER_ALERT_AFTER_SECONDS,
     MINIMAP_CRUISE_RED_PLAYER_ALERT_INTERVAL_SECONDS,
+    MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS,
     MINIMAP_CRUISE_STATIONARY_TURN_SECONDS,
     MINIMAP_CRUISE_TURN_AFTER_ATTACK_RELEASE_DELAY_SECONDS,
     MINIMAP_CRUISE_TURN_KEY_HOLD_SECONDS,
@@ -19,6 +20,7 @@ from maple_star.services.minimap_cruise import (
     MINIMAP_CRUISE_STATUS_LIE_DETECTOR,
     MINIMAP_CRUISE_STATUS_PRE_BOUNDARY_SKILL,
     MINIMAP_CRUISE_STATUS_RECOVERING,
+    MINIMAP_CRUISE_STATUS_STATIONARY_SKILL,
     MINIMAP_CRUISE_STATUS_TURNING,
     RIGHT_DIRECTION_VK,
     MinimapCruiseRuntime,
@@ -316,6 +318,90 @@ class MinimapCruiseTests(unittest.TestCase):
             [
                 ("down", 0x43),
                 ("up", 0x43),
+                ("down", LEFT_DIRECTION_VK),
+            ],
+        )
+
+    def test_stationary_character_holds_stationary_skill_when_configured(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 150])
+        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        runtime.update(100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STATIONARY_SKILL)
+        self.assertEqual(runtime.stationary_skill_held_vk, 0x56)
+        self.assertEqual(runtime.attack_held_vk, 0)
+        self.assertEqual(events, [("down", 0x43), ("up", 0x43), ("down", 0x56)])
+
+        runtime.update(
+            100.0
+            + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
+            + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS
+        )
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
+        self.assertEqual(runtime.stationary_skill_held_vk, 0)
+        self.assertEqual(runtime.attack_held_vk, 0x43)
+        self.assertEqual(
+            events,
+            [
+                ("down", 0x43),
+                ("up", 0x43),
+                ("down", 0x56),
+                ("up", 0x56),
+                ("down", 0x43),
+            ],
+        )
+
+    def test_stationary_skill_turns_immediately_if_character_moves_outside_boundary(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 205])
+        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        runtime.update(100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS)
+        runtime.update(100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS + 0.1)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_TURNING)
+        self.assertEqual(runtime.stationary_skill_held_vk, 0)
+        self.assertEqual(runtime.turn_direction_vk, LEFT_DIRECTION_VK)
+        self.assertEqual(
+            events,
+            [
+                ("down", 0x43),
+                ("up", 0x43),
+                ("down", 0x56),
+                ("up", 0x56),
+                ("down", LEFT_DIRECTION_VK),
+            ],
+        )
+
+    def test_stationary_skill_checks_boundary_before_resuming_attack(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 205])
+        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        runtime.update(100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS)
+        runtime.update(
+            100.0
+            + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
+            + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS
+        )
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_TURNING)
+        self.assertEqual(runtime.stationary_skill_held_vk, 0)
+        self.assertEqual(runtime.attack_held_vk, 0)
+        self.assertEqual(runtime.turn_direction_vk, LEFT_DIRECTION_VK)
+        self.assertEqual(
+            events,
+            [
+                ("down", 0x43),
+                ("up", 0x43),
+                ("down", 0x56),
+                ("up", 0x56),
                 ("down", LEFT_DIRECTION_VK),
             ],
         )
@@ -942,7 +1028,7 @@ class MinimapCruiseTests(unittest.TestCase):
         self.assertEqual(events, [("up", LEFT_DIRECTION_VK)])
         self.assertEqual(alerts, [100.0])
 
-    def test_red_player_dot_alerts_after_one_minute_without_stopping_cruise(self):
+    def test_red_player_dot_alerts_after_twenty_seconds_without_stopping_cruise(self):
         red_image = np.zeros((84, 96, 4), dtype=np.uint8)
         cv2.circle(red_image, (45, 45), 4, (0, 0, 230, 255), thickness=-1)
         runtime, events, statuses, alerts = self.make_runtime(
@@ -965,14 +1051,14 @@ class MinimapCruiseTests(unittest.TestCase):
         runtime.update(100.0 + MINIMAP_CRUISE_RED_PLAYER_ALERT_AFTER_SECONDS + 1.0)
 
         self.assertTrue(runtime.red_player_alert_active)
-        self.assertEqual(statuses[-1], "小地圖巡航：其他玩家紅點超過 1 分鐘")
-        self.assertEqual(alerts, [161.0])
+        self.assertEqual(statuses[-1], "小地圖巡航：其他玩家紅點超過 20 秒")
+        self.assertEqual(alerts, [121.0])
 
-        runtime.update(161.0 + MINIMAP_CRUISE_RED_PLAYER_ALERT_INTERVAL_SECONDS - 0.001)
-        self.assertEqual(alerts, [161.0])
+        runtime.update(121.0 + MINIMAP_CRUISE_RED_PLAYER_ALERT_INTERVAL_SECONDS - 0.001)
+        self.assertEqual(alerts, [121.0])
 
-        runtime.update(161.0 + MINIMAP_CRUISE_RED_PLAYER_ALERT_INTERVAL_SECONDS)
-        self.assertEqual(alerts, [161.0, 162.0])
+        runtime.update(121.0 + MINIMAP_CRUISE_RED_PLAYER_ALERT_INTERVAL_SECONDS)
+        self.assertEqual(alerts, [121.0, 122.0])
 
     def test_red_player_dot_timer_resets_when_dot_disappears(self):
         red_image = np.zeros((84, 96, 4), dtype=np.uint8)
@@ -988,11 +1074,11 @@ class MinimapCruiseTests(unittest.TestCase):
         runtime.next_red_player_check_at = 100.0
 
         runtime.update(100.0)
+        runtime.update(110.0)
         runtime.update(130.0)
-        runtime.update(160.0)
 
         self.assertFalse(runtime.red_player_alert_active)
-        self.assertEqual(runtime.red_player_present_since, 160.0)
+        self.assertEqual(runtime.red_player_present_since, 130.0)
         self.assertEqual(alerts, [])
 
 
