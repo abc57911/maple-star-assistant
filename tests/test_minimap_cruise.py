@@ -406,7 +406,7 @@ class MinimapCruiseTests(unittest.TestCase):
             ],
         )
 
-    def test_stationary_tracking_allows_small_x_jitter(self):
+    def test_stationary_tracking_restarts_after_one_pixel_forward_progress(self):
         runtime, events, _statuses, _alerts = self.make_runtime([150, 151, 151, 151])
 
         runtime.toggle(100.0)
@@ -421,6 +421,12 @@ class MinimapCruiseTests(unittest.TestCase):
             + MINIMAP_CRUISE_DETECT_INTERVAL_SECONDS
         )
 
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
+        self.assertEqual(runtime.turn_direction_vk, 0)
+        self.assertEqual(events, [("down", 0x43)])
+
+        runtime.update(102.0)
+
         self.assertEqual(runtime.current_direction, "left")
         self.assertEqual(runtime.turn_direction_vk, LEFT_DIRECTION_VK)
         self.assertEqual(
@@ -432,7 +438,56 @@ class MinimapCruiseTests(unittest.TestCase):
             ],
         )
 
-    def test_stationary_tracking_resets_when_character_x_changes_beyond_tolerance(self):
+    def test_stationary_tracking_treats_rightward_bounce_progress_as_movement(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 151, 150, 151, 150])
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        runtime.update(100.2)
+        runtime.update(100.4)
+        runtime.update(100.6)
+        runtime.update(101.3)
+
+        self.assertEqual(runtime.current_direction, "right")
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
+        self.assertEqual(runtime.turn_direction_vk, 0)
+        self.assertEqual(events, [("down", 0x43)])
+
+    def test_stationary_tracking_treats_leftward_bounce_progress_as_movement(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([160, 159, 160, 159, 160])
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        runtime.update(100.2)
+        runtime.update(100.4)
+        runtime.update(100.6)
+        runtime.update(101.3)
+
+        self.assertEqual(runtime.current_direction, "left")
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
+        self.assertEqual(runtime.turn_direction_vk, 0)
+        self.assertEqual(events, [("down", 0x43)])
+
+    def test_stationary_tracking_does_not_count_only_backward_movement_as_progress(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 149, 148])
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        runtime.update(100.2)
+        runtime.update(101.0)
+
+        self.assertEqual(runtime.current_direction, "left")
+        self.assertEqual(runtime.turn_direction_vk, LEFT_DIRECTION_VK)
+        self.assertEqual(
+            events,
+            [
+                ("down", 0x43),
+                ("up", 0x43),
+                ("down", LEFT_DIRECTION_VK),
+            ],
+        )
+
+    def test_stationary_tracking_restarts_after_larger_forward_progress(self):
         runtime, events, _statuses, _alerts = self.make_runtime([150, 153, 153, 153])
 
         runtime.toggle(100.0)

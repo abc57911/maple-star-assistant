@@ -16,7 +16,6 @@ from ..models.settings import (
 
 MINIMAP_CRUISE_DETECT_INTERVAL_SECONDS = 0.2
 MINIMAP_CRUISE_STATIONARY_TURN_SECONDS = 1.0
-MINIMAP_CRUISE_STATIONARY_X_TOLERANCE_PIXELS = 2
 MINIMAP_CRUISE_CONFIRM_TURN_INTERVAL_SECONDS = 0.35
 MINIMAP_CRUISE_TURN_AFTER_ATTACK_RELEASE_DELAY_SECONDS = 0.0
 MINIMAP_CRUISE_TURN_KEY_HOLD_SECONDS = 0.30
@@ -200,9 +199,9 @@ class MinimapCruiseRuntime:
 
         self.consecutive_detection_failures = 0
         self.last_detected_x = character_x
-        self._update_stationary_tracking(character_x, now)
         self.current_direction = self._initial_or_current_direction(character_x)
         self.settings.minimap_cruise_last_direction = self.current_direction
+        self._update_stationary_tracking(character_x, now)
         out_of_bounds_direction = self._direction_toward_bounds_if_outside(character_x)
         forced_direction = self._forced_direction_toward_bounds(character_x)
 
@@ -658,9 +657,9 @@ class MinimapCruiseRuntime:
 
         self.consecutive_detection_failures = 0
         self.last_detected_x = character_x
-        self._update_stationary_tracking(character_x, now)
         self.current_direction = self._initial_or_current_direction(character_x)
         self.settings.minimap_cruise_last_direction = self.current_direction
+        self._update_stationary_tracking(character_x, now)
         out_of_bounds_direction = self._direction_toward_bounds_if_outside(character_x)
         if out_of_bounds_direction is not None:
             self._begin_turn(
@@ -820,11 +819,15 @@ class MinimapCruiseRuntime:
         self.recovery_stuck_confirmations = 0
 
     def _update_stationary_tracking(self, character_x: int, now: float) -> None:
-        if (
-            self.stationary_x is None
-            or abs(character_x - self.stationary_x) > MINIMAP_CRUISE_STATIONARY_X_TOLERANCE_PIXELS
-        ):
-            self.stationary_x = character_x
+        previous_x = self.stationary_x
+        self.stationary_x = character_x
+        if previous_x is None:
+            self.stationary_started_at = now
+            return
+
+        displacement = character_x - previous_x
+        moving_forward = displacement > 0 if self.current_direction == "right" else displacement < 0
+        if moving_forward:
             self.stationary_started_at = now
             return
         if self.stationary_started_at is None:
