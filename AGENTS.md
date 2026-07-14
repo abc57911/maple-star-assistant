@@ -24,11 +24,10 @@
 - 發行流程：[docs/release.md](docs/release.md)
 
 ## 最低驗證
-- 修改 Python 程式後至少執行：
+- 日常修改只需執行：
 
 ```powershell
-python -m py_compile main.py main.pyw maple_gamepad_macro.py auto_potion.py
-python -m compileall -q maple_star
+python tools\verify.py
 ```
 
-- 修改 MVC 結構、相容 facade、入口檔、EXP OCR、經驗統計、GUI pump、settings 遷移或 HP/MP 偵測時，依 [docs/verification.md](docs/verification.md) 補跑對應測試。
+- 發行前或 PaddleOCR 專項驗證依 [docs/verification.md](docs/verification.md) 使用對應 profile。

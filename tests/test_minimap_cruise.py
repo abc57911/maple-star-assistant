@@ -12,6 +12,7 @@ from maple_star.services.minimap_cruise import (
     MINIMAP_CRUISE_RED_PLAYER_ALERT_AFTER_SECONDS,
     MINIMAP_CRUISE_RED_PLAYER_ALERT_INTERVAL_SECONDS,
     MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS,
+    MINIMAP_CRUISE_STATIONARY_SKILL_POST_DELAY_SECONDS,
     MINIMAP_CRUISE_STATIONARY_TURN_SECONDS,
     MINIMAP_CRUISE_TURN_AFTER_ATTACK_RELEASE_DELAY_SECONDS,
     MINIMAP_CRUISE_TURN_KEY_HOLD_SECONDS,
@@ -21,6 +22,7 @@ from maple_star.services.minimap_cruise import (
     MINIMAP_CRUISE_STATUS_PRE_BOUNDARY_SKILL,
     MINIMAP_CRUISE_STATUS_RECOVERING,
     MINIMAP_CRUISE_STATUS_STATIONARY_SKILL,
+    MINIMAP_CRUISE_STATUS_SUSPENDED,
     MINIMAP_CRUISE_STATUS_TURNING,
     RIGHT_DIRECTION_VK,
     MinimapCruiseRuntime,
@@ -322,89 +324,270 @@ class MinimapCruiseTests(unittest.TestCase):
             ],
         )
 
-    def test_stationary_character_holds_stationary_skill_when_configured(self):
+    def test_stationary_skill_resumes_attack_immediately_but_starts_tracking_after_post_delay(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 150, 150, 150])
+        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+        self.assertEqual(MINIMAP_CRUISE_STATIONARY_SKILL_POST_DELAY_SECONDS, 0.2)
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        skill_started_at = 100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
+        skill_ended_at = skill_started_at + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS
+        post_delay_ended_at = skill_ended_at + MINIMAP_CRUISE_STATIONARY_SKILL_POST_DELAY_SECONDS
+        runtime.update(skill_started_at)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STATIONARY_SKILL)
+        self.assertEqual(runtime.stationary_skill_held_vk, 0x56)
+        self.assertEqual(runtime.attack_held_vk, 0)
+        self.assertIsNone(runtime.stationary_x)
+        self.assertIsNone(runtime.stationary_started_at)
+        self.assertEqual(events, [("down", 0x43), ("up", 0x43), ("down", 0x56)])
+
+        runtime.update(skill_ended_at)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STATIONARY_SKILL)
+        self.assertEqual(runtime.stationary_skill_held_vk, 0)
+        self.assertEqual(runtime.attack_held_vk, 0x43)
+        self.assertEqual(runtime.stationary_skill_post_delay_until, post_delay_ended_at)
+        self.assertIsNone(runtime.stationary_x)
+        self.assertIsNone(runtime.stationary_started_at)
+        self.assertEqual(
+            events,
+            [
+                ("down", 0x43),
+                ("up", 0x43),
+                ("down", 0x56),
+                ("up", 0x56),
+                ("down", 0x43),
+            ],
+        )
+
+        runtime.update(post_delay_ended_at - 0.001)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STATIONARY_SKILL)
+        self.assertIsNone(runtime.stationary_x)
+        self.assertIsNone(runtime.stationary_started_at)
+
+        runtime.update(post_delay_ended_at)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
+        self.assertIsNone(runtime.stationary_skill_post_delay_until)
+        self.assertEqual(runtime.stationary_x, 150)
+        self.assertEqual(runtime.stationary_started_at, post_delay_ended_at)
+
+        runtime.update(post_delay_ended_at + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS - 0.001)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
+        self.assertEqual(runtime.turn_direction_vk, 0)
+
+    def test_stationary_skill_completes_hold_and_delays_right_boundary_turn(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 205, 205])
+        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        skill_started_at = 100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
+        skill_ended_at = skill_started_at + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS
+        post_delay_ended_at = skill_ended_at + MINIMAP_CRUISE_STATIONARY_SKILL_POST_DELAY_SECONDS
+        runtime.update(skill_started_at)
+        runtime.update(skill_started_at + 0.1)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STATIONARY_SKILL)
+        self.assertEqual(runtime.stationary_skill_held_vk, 0x56)
+        self.assertEqual(events, [("down", 0x43), ("up", 0x43), ("down", 0x56)])
+
+        runtime.update(skill_ended_at)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STATIONARY_SKILL)
+        self.assertEqual(runtime.stationary_skill_held_vk, 0)
+        self.assertEqual(runtime.attack_held_vk, 0)
+        self.assertEqual(runtime.turn_direction_vk, 0)
+        self.assertEqual(events[-1], ("up", 0x56))
+
+        runtime.update(post_delay_ended_at - 0.001)
+
+        self.assertEqual(runtime.turn_direction_vk, 0)
+
+        runtime.update(post_delay_ended_at)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_TURNING)
+        self.assertEqual(runtime.turn_direction_vk, LEFT_DIRECTION_VK)
+        self.assertEqual(
+            events,
+            [
+                ("down", 0x43),
+                ("up", 0x43),
+                ("down", 0x56),
+                ("up", 0x56),
+                ("down", LEFT_DIRECTION_VK),
+            ],
+        )
+
+    def test_stationary_skill_delays_left_boundary_turn(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 95, 95])
+        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        skill_started_at = 100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
+        skill_ended_at = skill_started_at + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS
+        post_delay_ended_at = skill_ended_at + MINIMAP_CRUISE_STATIONARY_SKILL_POST_DELAY_SECONDS
+        runtime.update(skill_started_at)
+        runtime.update(skill_ended_at)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STATIONARY_SKILL)
+        self.assertEqual(runtime.turn_direction_vk, 0)
+
+        runtime.update(post_delay_ended_at)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_TURNING)
+        self.assertEqual(runtime.attack_held_vk, 0)
+        self.assertEqual(runtime.turn_direction_vk, RIGHT_DIRECTION_VK)
+        self.assertEqual(
+            events,
+            [
+                ("down", 0x43),
+                ("up", 0x43),
+                ("down", 0x56),
+                ("up", 0x56),
+                ("down", RIGHT_DIRECTION_VK),
+            ],
+        )
+
+    def test_stationary_skill_uses_post_delay_position_when_moving_out_of_bounds(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 150, 205])
+        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        skill_started_at = 100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
+        skill_ended_at = skill_started_at + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS
+        runtime.update(skill_started_at)
+        runtime.update(skill_ended_at)
+
+        self.assertEqual(runtime.attack_held_vk, 0x43)
+        self.assertEqual(events[-1], ("down", 0x43))
+
+        runtime.update(skill_ended_at + MINIMAP_CRUISE_STATIONARY_SKILL_POST_DELAY_SECONDS)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_TURNING)
+        self.assertEqual(runtime.attack_held_vk, 0)
+        self.assertEqual(runtime.turn_direction_vk, LEFT_DIRECTION_VK)
+        self.assertEqual(events[-2:], [("up", 0x43), ("down", LEFT_DIRECTION_VK)])
+
+    def test_stationary_skill_uses_post_delay_position_when_returning_in_bounds(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 205, 190])
+        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        skill_started_at = 100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
+        skill_ended_at = skill_started_at + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS
+        post_delay_ended_at = skill_ended_at + MINIMAP_CRUISE_STATIONARY_SKILL_POST_DELAY_SECONDS
+        runtime.update(skill_started_at)
+        runtime.update(skill_ended_at)
+
+        self.assertEqual(runtime.attack_held_vk, 0)
+        self.assertEqual(runtime.turn_direction_vk, 0)
+
+        runtime.update(post_delay_ended_at)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
+        self.assertEqual(runtime.attack_held_vk, 0x43)
+        self.assertEqual(runtime.turn_direction_vk, 0)
+        self.assertEqual(runtime.stationary_x, 190)
+        self.assertEqual(runtime.stationary_started_at, post_delay_ended_at)
+        self.assertEqual(events[-1], ("down", 0x43))
+
+    def test_stationary_skill_suspends_when_release_position_is_missing(self):
+        runtime, events, statuses, _alerts = self.make_runtime([150, 150, None])
+        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        skill_started_at = 100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
+        runtime.update(skill_started_at)
+        runtime.update(skill_started_at + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_SUSPENDED)
+        self.assertEqual(runtime.attack_held_vk, 0)
+        self.assertEqual(runtime.stationary_skill_held_vk, 0)
+        self.assertIsNone(runtime.stationary_skill_post_delay_until)
+        self.assertEqual(statuses[-1], "小地圖巡航：找不到角色點")
+        self.assertEqual(events[-1], ("up", 0x56))
+
+    def test_stationary_skill_suspends_when_post_delay_position_is_missing(self):
+        runtime, events, statuses, _alerts = self.make_runtime([150, 150, 150, None])
+        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        skill_started_at = 100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
+        skill_ended_at = skill_started_at + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS
+        runtime.update(skill_started_at)
+        runtime.update(skill_ended_at)
+        runtime.update(skill_ended_at + MINIMAP_CRUISE_STATIONARY_SKILL_POST_DELAY_SECONDS)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_SUSPENDED)
+        self.assertEqual(runtime.attack_held_vk, 0)
+        self.assertIsNone(runtime.stationary_skill_post_delay_until)
+        self.assertEqual(statuses[-1], "小地圖巡航：找不到角色點")
+        self.assertEqual(events[-2:], [("down", 0x43), ("up", 0x43)])
+
+    def test_stop_during_stationary_skill_post_delay_clears_deadline(self):
         runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 150])
         runtime.settings.minimap_cruise_stationary_skill_key = "V"
 
         runtime.toggle(100.0)
         runtime.update(100.0)
-        runtime.update(100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS)
+        skill_started_at = 100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
+        runtime.update(skill_started_at)
+        runtime.update(skill_started_at + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS)
 
-        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STATIONARY_SKILL)
-        self.assertEqual(runtime.stationary_skill_held_vk, 0x56)
-        self.assertEqual(runtime.attack_held_vk, 0)
-        self.assertEqual(events, [("down", 0x43), ("up", 0x43), ("down", 0x56)])
-
-        runtime.update(
-            100.0
-            + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
-            + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS
-        )
-
-        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
-        self.assertEqual(runtime.stationary_skill_held_vk, 0)
+        self.assertIsNotNone(runtime.stationary_skill_post_delay_until)
         self.assertEqual(runtime.attack_held_vk, 0x43)
-        self.assertEqual(
-            events,
-            [
-                ("down", 0x43),
-                ("up", 0x43),
-                ("down", 0x56),
-                ("up", 0x56),
-                ("down", 0x43),
-            ],
-        )
 
-    def test_stationary_skill_turns_immediately_if_character_moves_outside_boundary(self):
-        runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 205])
-        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+        runtime.stop()
 
-        runtime.toggle(100.0)
-        runtime.update(100.0)
-        runtime.update(100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS)
-        runtime.update(100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS + 0.1)
-
-        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_TURNING)
-        self.assertEqual(runtime.stationary_skill_held_vk, 0)
-        self.assertEqual(runtime.turn_direction_vk, LEFT_DIRECTION_VK)
-        self.assertEqual(
-            events,
-            [
-                ("down", 0x43),
-                ("up", 0x43),
-                ("down", 0x56),
-                ("up", 0x56),
-                ("down", LEFT_DIRECTION_VK),
-            ],
-        )
-
-    def test_stationary_skill_checks_boundary_before_resuming_attack(self):
-        runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 205])
-        runtime.settings.minimap_cruise_stationary_skill_key = "V"
-
-        runtime.toggle(100.0)
-        runtime.update(100.0)
-        runtime.update(100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS)
-        runtime.update(
-            100.0
-            + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
-            + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS
-        )
-
-        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_TURNING)
-        self.assertEqual(runtime.stationary_skill_held_vk, 0)
+        self.assertIsNone(runtime.stationary_skill_post_delay_until)
         self.assertEqual(runtime.attack_held_vk, 0)
-        self.assertEqual(runtime.turn_direction_vk, LEFT_DIRECTION_VK)
-        self.assertEqual(
-            events,
-            [
-                ("down", 0x43),
-                ("up", 0x43),
-                ("down", 0x56),
-                ("up", 0x56),
-                ("down", LEFT_DIRECTION_VK),
-            ],
+        self.assertEqual(events[-1], ("up", 0x43))
+
+    def test_lie_detector_during_stationary_skill_post_delay_clears_deadline(self):
+        loaded = load_lie_detector_bomb_template()
+        self.assertIsNotNone(loaded)
+        template, _mask = loaded
+        blank_lie_image = np.zeros((160, 200, 4), dtype=np.uint8)
+        lie_image = blank_lie_image.copy()
+        height, width = template.shape[:2]
+        lie_image[35 : 35 + height, 40 : 40 + width, :3] = template
+        lie_image[35 : 35 + height, 40 : 40 + width, 3] = 255
+        runtime, events, _statuses, alerts = self.make_runtime(
+            [150, 150, 150],
+            [blank_lie_image.copy(), blank_lie_image.copy(), blank_lie_image.copy(), lie_image],
         )
+        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+        skill_started_at = 100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
+        skill_ended_at = skill_started_at + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS
+        runtime.update(skill_started_at)
+        runtime.update(skill_ended_at)
+
+        self.assertIsNotNone(runtime.stationary_skill_post_delay_until)
+        self.assertEqual(runtime.attack_held_vk, 0x43)
+
+        alert_at = skill_ended_at + 0.1
+        runtime.next_lie_detector_check_at = alert_at
+        runtime.update(alert_at)
+
+        self.assertFalse(runtime.enabled)
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_LIE_DETECTOR)
+        self.assertIsNone(runtime.stationary_skill_post_delay_until)
+        self.assertEqual(runtime.attack_held_vk, 0)
+        self.assertEqual(events[-1], ("up", 0x43))
+        self.assertEqual(alerts, [alert_at])
 
     def test_stationary_tracking_restarts_after_one_pixel_forward_progress(self):
         runtime, events, _statuses, _alerts = self.make_runtime([150, 151, 151, 151])

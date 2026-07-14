@@ -7,7 +7,7 @@
 - [development-guidelines.md](development-guidelines.md)：本機設定、ignore/commit 約束、共用常數、入口檔與相容性維護規則。
 - [experience-ocr.md](experience-ocr.md)：Pixel OCR primary、PaddleOCR fallback、learning mode、經驗統計與 OCR guard 規則。
 - [runtime-compatibility.md](runtime-compatibility.md)：GUI、遊戲視窗、DPI、HP/MP/EXP ROI、loading/fade 與前景切換注意事項。
-- [verification.md](verification.md)：一般修改、OCR/經驗效率、發行/commit 前驗證命令。
+- [verification.md](verification.md)：日常、發行前與 PaddleOCR 專項驗證命令。
 - [release.md](release.md)：本機打包、GitHub Releases、ZIP 驗證與失敗處理流程。
 
 ## 任務對照
