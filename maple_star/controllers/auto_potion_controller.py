@@ -428,6 +428,7 @@ class AutoPotionController:
         self.last_direct_bar_failure_warning_at = -999.0
         self.last_direct_bar_failure_reason = ""
         self.auto_drink_enabled = True
+        self.auto_drink_challenge_paused = False
         self.scripts_enabled = True
         self.auto_drink_potion_option_snapshot: tuple[bool, bool] | None = None
         self.hotkey_registered = False
@@ -543,7 +544,7 @@ class AutoPotionController:
         self.runtime_processes: RuntimeProcessCoordinator | None = None
         self.runtime_settings_snapshot: tuple[object, ...] | None = None
         self.runtime_target_hwnd = 0
-        self.runtime_control_state: tuple[bool, bool, bool] | None = None
+        self.runtime_control_state: tuple[bool, bool, bool, bool] | None = None
         self.runtime_potion_generation = 0
         self.runtime_experience_generation = 0
         self.runtime_potion_crash_reported = False
@@ -610,6 +611,18 @@ class AutoPotionController:
         self._disable_auto_drink_from_gui()
         return not bool(getattr(self, "auto_drink_enabled", False))
 
+    def set_auto_drink_challenge_paused(self, paused: bool) -> None:
+        desired = bool(paused)
+        if desired == bool(getattr(self, "auto_drink_challenge_paused", False)):
+            return
+        self.auto_drink_challenge_paused = desired
+        if desired:
+            self._release_all_potion_keys()
+            self._clear_potion_attempt_state("hp")
+            self._clear_potion_attempt_state("mp")
+        if self._runtime_processes_active():
+            self._send_runtime_controls_if_needed()
+
     def set_pickup_enabled(self, enabled: bool) -> bool:
         desired = bool(enabled)
         if desired == bool(getattr(self, "pickup_enabled", False)):
@@ -656,28 +669,30 @@ class AutoPotionController:
         state = (
             bool(getattr(self, "auto_drink_enabled", False)),
             bool(getattr(self, "scripts_enabled", False)),
+            bool(getattr(self, "auto_drink_challenge_paused", False)),
             bool(getattr(self.settings, "exp_efficiency_enabled", False)),
         )
         if state == getattr(self, "runtime_control_state", None):
             return
         previous_state = getattr(self, "runtime_control_state", None)
-        if previous_state is None or state[:2] != previous_state[:2]:
+        if previous_state is None or state[:3] != previous_state[:3]:
             self.runtime_potion_generation = int(getattr(self, "runtime_potion_generation", 0)) + 1
             self.last_runtime_potion_status_at = time.monotonic()
-        if previous_state is None or state[1:] != previous_state[1:]:
+        if previous_state is None or (state[1], state[3]) != (previous_state[1], previous_state[3]):
             self.runtime_experience_generation = int(getattr(self, "runtime_experience_generation", 0)) + 1
         self.runtime_control_state = state
         runtime.send_potion_control(
             PotionControl(
                 enabled=state[0],
                 scripts_enabled=state[1],
+                challenge_paused=state[2],
                 generation=int(getattr(self, "runtime_potion_generation", 0)),
             )
         )
         runtime.send_experience_control(
             ExperienceControl(
-                enabled=state[2] and state[1],
-                resume=state[2] and state[1],
+                enabled=state[3] and state[1],
+                resume=state[3] and state[1],
                 generation=int(getattr(self, "runtime_experience_generation", 0)),
             )
         )
@@ -1809,6 +1824,7 @@ class AutoPotionController:
             self.runtime_control_state = (
                 bool(getattr(self, "auto_drink_enabled", False)),
                 bool(getattr(self, "scripts_enabled", False)),
+                bool(getattr(self, "auto_drink_challenge_paused", False)),
                 enabled,
             )
             if enabled:
@@ -2118,10 +2134,15 @@ class AutoPotionController:
 
         if target_window_active:
             self._sync_pickup_key_state()
-            self._process_due_potion_sends(now)
+            if not bool(getattr(self, "auto_drink_challenge_paused", False)):
+                self._process_due_potion_sends(now)
         else:
             self._release_pickup_key()
             self._release_all_potion_keys()
+
+        if bool(getattr(self, "auto_drink_challenge_paused", False)):
+            self._update_without_potion_bar_monitoring(now, "挑戰畫面中，暫停自動喝水")
+            return
 
         next_pending_send_at = self._next_pending_potion_send_at()
         if (
@@ -4749,6 +4770,10 @@ class AutoPotionController:
         continuous_enabled: bool,
         continuous_stop_margin_percent: float,
     ) -> None:
+        if bool(getattr(self, "auto_drink_challenge_paused", False)):
+            self._release_potion_key(bar_type)
+            self._clear_pending_potion_send(bar_type)
+            return
         if not enabled:
             self._clear_potion_bar_state(bar_type)
             return
@@ -4845,7 +4870,7 @@ class AutoPotionController:
         return max(1.0, float(threshold_percent) - margin)
 
     def _process_due_potion_sends(self, now: float) -> None:
-        if not self.auto_drink_enabled:
+        if not self.auto_drink_enabled or bool(getattr(self, "auto_drink_challenge_paused", False)):
             self._clear_pending_potion_send("hp")
             self._clear_pending_potion_send("mp")
             return

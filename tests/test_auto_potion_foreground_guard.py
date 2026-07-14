@@ -72,6 +72,7 @@ from maple_star.services.runtime_processes import (
     PotionStatus,
     WorkerCrashed,
     _experience_status_signature,
+    _handle_potion_command,
     _is_target_hwnd_active,
     _potion_status,
     _potion_status_signature,
@@ -204,6 +205,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.last_failed_experience_ocr_signature = None
         controller.emergency_stop_requested = False
         controller.auto_drink_enabled = True
+        controller.auto_drink_challenge_paused = False
         controller.scripts_enabled = True
         controller.auto_drink_potion_option_snapshot = None
         controller.registered_toggle_hotkey_vk = 0
@@ -1916,7 +1918,109 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._sync_pickup_key_state.assert_called_once()
         self.assertEqual(runtime.targets_sent, [4321])
         self.assertEqual(runtime.settings_sent, [controller.settings.snapshot()])
-        self.assertEqual(runtime.potion_controls[-1], PotionControl(enabled=True, scripts_enabled=True, generation=1))
+        self.assertEqual(
+            runtime.potion_controls[-1],
+            PotionControl(enabled=True, scripts_enabled=True, challenge_paused=False, generation=1),
+        )
+
+    def test_challenge_pause_releases_local_potion_actions_without_disabling_auto_drink(self):
+        controller = self.make_controller([True])
+        controller._release_all_potion_keys = Mock()
+        controller.hp_potion_effect_attempts = [Mock()]
+        controller.mp_potion_effect_attempts = [Mock()]
+        controller.hp_potion_no_effect_count = 2
+        controller.mp_potion_no_effect_count = 2
+        controller.hp_pending_potion_send_at = 101.0
+        controller.mp_pending_potion_send_at = 102.0
+        hp_hold = OutOfPotionHold(99.0, 25.0)
+        mp_hold = OutOfPotionHold(99.0, 25.0)
+        controller.hp_out_of_potion_hold = hp_hold
+        controller.mp_out_of_potion_hold = mp_hold
+
+        controller.set_auto_drink_challenge_paused(True)
+
+        self.assertTrue(controller.auto_drink_enabled)
+        self.assertTrue(controller.auto_drink_challenge_paused)
+        controller._release_all_potion_keys.assert_called_once()
+        self.assertEqual(controller.hp_potion_effect_attempts, [])
+        self.assertEqual(controller.mp_potion_effect_attempts, [])
+        self.assertEqual(controller.hp_potion_no_effect_count, 0)
+        self.assertEqual(controller.mp_potion_no_effect_count, 0)
+        self.assertEqual(controller.hp_pending_potion_send_at, -999.0)
+        self.assertEqual(controller.mp_pending_potion_send_at, -999.0)
+        self.assertIs(controller.hp_out_of_potion_hold, hp_hold)
+        self.assertIs(controller.mp_out_of_potion_hold, mp_hold)
+
+        controller.set_auto_drink_challenge_paused(False)
+
+        self.assertTrue(controller.auto_drink_enabled)
+        self.assertFalse(controller.auto_drink_challenge_paused)
+        controller._release_all_potion_keys.assert_called_once()
+
+    def test_runtime_challenge_pause_is_sent_to_potion_process(self):
+        controller = self.make_controller([True])
+        runtime = self.FakeRuntime()
+        controller.runtime_processes_enabled = True
+        controller.runtime_processes = runtime
+        controller.runtime_control_state = (True, True, False, False)
+
+        controller.set_auto_drink_challenge_paused(True)
+
+        self.assertTrue(controller.auto_drink_enabled)
+        self.assertTrue(controller.auto_drink_challenge_paused)
+        self.assertTrue(any(command.release_all for command in runtime.potion_controls))
+        self.assertEqual(
+            runtime.potion_controls[-1],
+            PotionControl(
+                enabled=True,
+                scripts_enabled=True,
+                challenge_paused=True,
+                generation=1,
+            ),
+        )
+
+    def test_potion_runtime_command_applies_challenge_pause_without_disabling_user_intent(self):
+        controller = SimpleNamespace(
+            auto_drink_enabled=True,
+            auto_drink_challenge_paused=False,
+            scripts_enabled=True,
+            _release_all_potion_keys=Mock(),
+            _clear_potion_effect_state=Mock(),
+            _clear_potion_attempt_state=Mock(),
+        )
+        gui = HeadlessRuntimeGui(AutoPotionSettings())
+
+        _handle_potion_command(
+            controller,
+            gui,
+            {"hwnd": 0},
+            PotionControl(enabled=True, scripts_enabled=True, challenge_paused=True),
+        )
+
+        self.assertTrue(controller.auto_drink_enabled)
+        self.assertTrue(controller.auto_drink_challenge_paused)
+        controller._release_all_potion_keys.assert_called_once()
+        self.assertEqual(
+            controller._clear_potion_attempt_state.call_args_list,
+            [call("hp"), call("mp")],
+        )
+
+    def test_update_skips_potion_capture_while_challenge_pause_is_active(self):
+        controller = self.make_controller([True])
+        controller.auto_drink_challenge_paused = True
+        controller.control_hotkey_worker = None
+        controller.gui.pump.return_value = True
+        controller._sync_registered_control_hotkeys = Mock()
+        controller._save_settings_when_idle = Mock()
+        controller._release_all_potion_keys = Mock()
+        controller._capture_bar_percents = Mock()
+
+        controller.update(100.0)
+
+        controller._release_all_potion_keys.assert_called_once()
+        controller._capture_bar_percents.assert_not_called()
+        controller.gui.set_current_percentages.assert_called_with(None, None)
+        controller.gui.set_status.assert_called_with("挑戰畫面中，暫停自動喝水")
 
     def test_runtime_pickup_refreshes_local_hud_when_auto_drink_is_disabled(self):
         controller = self.make_controller([True])
@@ -2442,16 +2546,19 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.runtime_processes_enabled = True
         controller.runtime_processes = runtime
         controller.target_window_provider = Mock(return_value=2468)
-        controller.runtime_control_state = (True, True, False)
+        controller.runtime_control_state = (True, True, False, False)
         controller.runtime_potion_generation = 5
         controller.last_runtime_potion_status_at = 100.0
 
         controller._recover_stale_runtime_potion_process(100.0 + RUNTIME_POTION_STATUS_TIMEOUT_SECONDS)
 
         self.assertEqual(runtime.potion_restarts, [(controller.settings.snapshot(), 2468)])
-        self.assertEqual(controller.runtime_control_state, (True, True, False))
+        self.assertEqual(controller.runtime_control_state, (True, True, False, False))
         self.assertEqual(controller.runtime_potion_generation, 6)
-        self.assertEqual(runtime.potion_controls[-1], PotionControl(enabled=True, scripts_enabled=True, generation=6))
+        self.assertEqual(
+            runtime.potion_controls[-1],
+            PotionControl(enabled=True, scripts_enabled=True, challenge_paused=False, generation=6),
+        )
         controller.gui.set_status.assert_any_call("喝水 process 無回報，已自動重啟")
 
     def test_runtime_potion_status_watchdog_waits_for_first_status(self):

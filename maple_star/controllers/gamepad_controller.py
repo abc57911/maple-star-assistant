@@ -635,6 +635,9 @@ def main() -> None:
         last_telegram_lie_detector_notice_at = now
         send_telegram_message("maple-star：偵測到測謊/挑戰視窗，巡航已暫停，請回到電腦處理。")
 
+    def notify_red_player_detected(_now: float) -> None:
+        send_telegram_message("maple-star：小地圖偵測到其他玩家紅點持續超過 20 秒。")
+
     minimap_cruise = MinimapCruiseRuntime(
         settings=auto_potion.settings,
         is_target_window_active=is_target_window_active,
@@ -646,7 +649,9 @@ def main() -> None:
         should_defer_periodic_keys=auto_potion.should_defer_periodic_item_for_potion,
         set_status=auto_potion.gui.set_status,
         lie_detector_alert_func=play_lie_detector_alert,
+        lie_detector_state_func=auto_potion.set_auto_drink_challenge_paused,
         red_player_alert_func=lambda _now: auto_potion._play_toggle_beep(MINIMAP_PLAYER_ALERT_BEEP_PATTERN),
+        red_player_detected_func=notify_red_player_detected,
     )
 
     def toggle_minimap_cruise() -> None:

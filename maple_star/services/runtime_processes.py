@@ -31,6 +31,7 @@ class TargetWindowUpdated:
 class PotionControl:
     enabled: bool
     scripts_enabled: bool
+    challenge_paused: bool | None = None
     emergency_stop: bool = False
     release_all: bool = False
     generation: int = 0
@@ -472,7 +473,17 @@ def _handle_potion_command(
         was_enabled = bool(getattr(controller, "auto_drink_enabled", False))
         controller.scripts_enabled = command.scripts_enabled
         controller.auto_drink_enabled = command.enabled and command.scripts_enabled
-        if command.release_all or command.emergency_stop or not controller.auto_drink_enabled:
+        if command.challenge_paused is not None:
+            controller.auto_drink_challenge_paused = command.challenge_paused
+            if command.challenge_paused:
+                controller._clear_potion_attempt_state("hp")
+                controller._clear_potion_attempt_state("mp")
+        if (
+            command.release_all
+            or command.emergency_stop
+            or not controller.auto_drink_enabled
+            or bool(getattr(controller, "auto_drink_challenge_paused", False))
+        ):
             controller._release_all_potion_keys()
         if controller.auto_drink_enabled and not was_enabled:
             controller._clear_potion_effect_state()

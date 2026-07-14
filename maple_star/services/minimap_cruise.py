@@ -69,7 +69,9 @@ class MinimapCruiseRuntime:
     should_defer_periodic_keys: Callable[[float], bool] = lambda _now: False
     set_status: Callable[[str], None] | None = None
     lie_detector_alert_func: Callable[[float], None] | None = None
+    lie_detector_state_func: Callable[[bool], None] | None = None
     red_player_alert_func: Callable[[float], None] | None = None
+    red_player_detected_func: Callable[[float], None] | None = None
     key_down_func: Callable[[int], None] = key_down
     key_up_func: Callable[[int], None] = key_up
     tap_key_func: Callable[[int], None] = tap_key
@@ -92,6 +94,7 @@ class MinimapCruiseRuntime:
     turn_confirmation_boundary: str | None = None
     next_lie_detector_check_at: float = 0.0
     next_lie_detector_alert_at: float = 0.0
+    lie_detector_challenge_active: bool = False
     next_red_player_check_at: float = 0.0
     next_red_player_alert_at: float = 0.0
     red_player_present_since: float | None = None
@@ -125,7 +128,11 @@ class MinimapCruiseRuntime:
             return False
 
         self.enabled = True
-        self.status = MINIMAP_CRUISE_STATUS_STARTING
+        self.status = (
+            MINIMAP_CRUISE_STATUS_LIE_DETECTOR
+            if self.lie_detector_challenge_active
+            else MINIMAP_CRUISE_STATUS_STARTING
+        )
         self.next_detect_at = now
         self.next_lie_detector_check_at = now
         self.next_lie_detector_alert_at = now
@@ -137,7 +144,11 @@ class MinimapCruiseRuntime:
         self._reset_periodic_key_schedule(now)
         self._reset_stationary_tracking()
         self.consecutive_detection_failures = 0
-        self.last_message = "小地圖巡航已啟用"
+        self.last_message = (
+            "小地圖巡航：偵測到測謊視窗"
+            if self.lie_detector_challenge_active
+            else "小地圖巡航已啟用"
+        )
         self._report_status(self.last_message)
         return True
 
@@ -158,8 +169,8 @@ class MinimapCruiseRuntime:
         self._report_status(message)
 
     def update(self, now: float) -> None:
-        if self.status == MINIMAP_CRUISE_STATUS_LIE_DETECTOR:
-            self._play_lie_detector_alert(now)
+        if self.lie_detector_challenge_active:
+            self._update_lie_detector_pause(now)
             return
 
         if not self.enabled:
@@ -171,7 +182,7 @@ class MinimapCruiseRuntime:
 
         self._update_red_player_alert(now)
 
-        if self._lie_detector_challenge_visible(now):
+        if self._lie_detector_challenge_visible(now) is True:
             self._block_for_lie_detector(now)
             return
 
@@ -295,7 +306,10 @@ class MinimapCruiseRuntime:
         self._report_status(message)
 
     def _block_for_lie_detector(self, now: float) -> None:
-        self.enabled = False
+        if not self.lie_detector_challenge_active:
+            self.lie_detector_challenge_active = True
+            if self.lie_detector_state_func is not None:
+                self.lie_detector_state_func(True)
         self._cancel_turn()
         self._cancel_pre_boundary_skill()
         self._cancel_stationary_skill()
@@ -308,6 +322,37 @@ class MinimapCruiseRuntime:
         self.last_message = "小地圖巡航：偵測到測謊視窗"
         self._report_status(self.last_message)
         self._play_lie_detector_alert(now)
+
+    def _update_lie_detector_pause(self, now: float) -> None:
+        if not self.is_target_window_active() or self.is_action_blocked():
+            self._play_lie_detector_alert(now)
+            return
+        challenge_visible = self._lie_detector_challenge_visible(now)
+        if challenge_visible is False:
+            self._finish_lie_detector_pause(now)
+            return
+        self._play_lie_detector_alert(now)
+
+    def _finish_lie_detector_pause(self, now: float) -> None:
+        self.lie_detector_challenge_active = False
+        if self.lie_detector_state_func is not None:
+            self.lie_detector_state_func(False)
+        if not self.enabled:
+            return
+        self._resume_after_lie_detector(now)
+
+    def _resume_after_lie_detector(self, now: float) -> None:
+        self.status = MINIMAP_CRUISE_STATUS_STARTING
+        self.next_detect_at = now
+        self.next_lie_detector_alert_at = 0.0
+        self.next_red_player_check_at = now
+        self.next_red_player_alert_at = now
+        self._reset_red_player_alert()
+        self._reset_periodic_key_schedule(now)
+        self._reset_stationary_tracking()
+        self.consecutive_detection_failures = 0
+        self.last_message = "小地圖巡航：測謊已完成，自動恢復"
+        self._report_status(self.last_message)
 
     def _play_lie_detector_alert(self, now: float) -> None:
         if self.lie_detector_alert_func is None:
@@ -329,6 +374,8 @@ class MinimapCruiseRuntime:
                         self.red_player_alert_active = True
                         self.last_message = "小地圖巡航：其他玩家紅點超過 20 秒"
                         self._report_status(self.last_message)
+                        if self.red_player_detected_func is not None:
+                            self.red_player_detected_func(now)
                     self._play_red_player_alert(now)
                 return
             if self.red_player_alert_active:
@@ -944,13 +991,13 @@ class MinimapCruiseRuntime:
             self.turn_held_vk = 0
             self.turn_key_up_at = None
 
-    def _lie_detector_challenge_visible(self, now: float) -> bool:
+    def _lie_detector_challenge_visible(self, now: float) -> bool | None:
         if now + 1e-9 < self.next_lie_detector_check_at:
-            return False
+            return None
         self.next_lie_detector_check_at = now + MINIMAP_CRUISE_LIE_DETECTOR_CHECK_INTERVAL_SECONDS
         region = self._lie_detector_capture_region()
         if region is None:
-            return False
+            return None
         image = self.capture_provider(region)
         return detect_lie_detector_bomb(image)
 

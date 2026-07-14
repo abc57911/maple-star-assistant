@@ -21,7 +21,9 @@ from maple_star.services.minimap_cruise import (
     MINIMAP_CRUISE_STATUS_LIE_DETECTOR,
     MINIMAP_CRUISE_STATUS_PRE_BOUNDARY_SKILL,
     MINIMAP_CRUISE_STATUS_RECOVERING,
+    MINIMAP_CRUISE_STATUS_STARTING,
     MINIMAP_CRUISE_STATUS_STATIONARY_SKILL,
+    MINIMAP_CRUISE_STATUS_STOPPED,
     MINIMAP_CRUISE_STATUS_SUSPENDED,
     MINIMAP_CRUISE_STATUS_TURNING,
     RIGHT_DIRECTION_VK,
@@ -582,7 +584,7 @@ class MinimapCruiseTests(unittest.TestCase):
         runtime.next_lie_detector_check_at = alert_at
         runtime.update(alert_at)
 
-        self.assertFalse(runtime.enabled)
+        self.assertTrue(runtime.enabled)
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_LIE_DETECTOR)
         self.assertIsNone(runtime.stationary_skill_post_delay_until)
         self.assertEqual(runtime.attack_held_vk, 0)
@@ -1207,41 +1209,124 @@ class MinimapCruiseTests(unittest.TestCase):
         self.assertEqual(events, [("up", 0x43)])
         self.assertEqual(statuses[-1], "小地圖巡航：找不到角色點")
 
-    def test_lie_detector_detection_stops_cruise_and_next_toggle_restarts(self):
+    def test_lie_detector_detection_pauses_and_auto_resumes_after_challenge_disappears(self):
         loaded = load_lie_detector_bomb_template()
         self.assertIsNotNone(loaded)
         template, _mask = loaded
+        blank_image = np.zeros((160, 200, 4), dtype=np.uint8)
         lie_image = np.zeros((160, 200, 4), dtype=np.uint8)
         height, width = template.shape[:2]
         lie_image[35 : 35 + height, 40 : 40 + width, :3] = template
         lie_image[35 : 35 + height, 40 : 40 + width, 3] = 255
-        runtime, events, statuses, alerts = self.make_runtime([120], [lie_image])
+        runtime, events, statuses, alerts = self.make_runtime(
+            [120],
+            [lie_image, lie_image.copy(), lie_image.copy(), blank_image],
+        )
+        challenge_pause_states: list[bool] = []
+        runtime.lie_detector_state_func = challenge_pause_states.append
         runtime.enabled = True
         runtime.status = MINIMAP_CRUISE_STATUS_ATTACKING
         runtime.attack_held_vk = 0x43
 
         runtime.update(100.0)
 
-        self.assertFalse(runtime.enabled)
+        self.assertTrue(runtime.enabled)
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_LIE_DETECTOR)
         self.assertEqual(runtime.attack_held_vk, 0)
         self.assertEqual(events, [("up", 0x43)])
         self.assertEqual(statuses[-1], "小地圖巡航：偵測到測謊視窗")
         self.assertEqual(alerts, [100.0])
+        self.assertEqual(runtime.status_text(), "巡航(測謊暫停)")
+        self.assertEqual(challenge_pause_states, [True])
 
-        runtime.update(100.0 + MINIMAP_CRUISE_LIE_DETECTOR_ALERT_INTERVAL_SECONDS - 0.001)
+        runtime.update(100.5)
+
+        self.assertTrue(runtime.enabled)
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_LIE_DETECTOR)
         self.assertEqual(alerts, [100.0])
 
         runtime.update(100.0 + MINIMAP_CRUISE_LIE_DETECTOR_ALERT_INTERVAL_SECONDS)
+
+        self.assertTrue(runtime.enabled)
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_LIE_DETECTOR)
         self.assertEqual(alerts, [100.0, 101.0])
 
-        self.assertTrue(runtime.toggle(102.0))
-        runtime.update(102.0)
+        runtime.update(101.5)
+
+        self.assertTrue(runtime.enabled)
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STARTING)
+        self.assertEqual(statuses[-1], "小地圖巡航：測謊已完成，自動恢復")
+        self.assertEqual(alerts, [100.0, 101.0])
+        self.assertEqual(challenge_pause_states, [True, False])
+
+        runtime.update(101.5)
 
         self.assertTrue(runtime.enabled)
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
         self.assertEqual(events, [("up", 0x43), ("down", 0x43)])
         self.assertEqual(alerts, [100.0, 101.0])
+
+    def test_manual_stop_during_lie_detector_pause_prevents_auto_resume(self):
+        loaded = load_lie_detector_bomb_template()
+        self.assertIsNotNone(loaded)
+        template, _mask = loaded
+        blank_image = np.zeros((160, 200, 4), dtype=np.uint8)
+        lie_image = np.zeros((160, 200, 4), dtype=np.uint8)
+        height, width = template.shape[:2]
+        lie_image[35 : 35 + height, 40 : 40 + width, :3] = template
+        lie_image[35 : 35 + height, 40 : 40 + width, 3] = 255
+        runtime, events, statuses, _alerts = self.make_runtime([120], [lie_image, blank_image])
+        challenge_pause_states: list[bool] = []
+        runtime.lie_detector_state_func = challenge_pause_states.append
+        runtime.enabled = True
+        runtime.status = MINIMAP_CRUISE_STATUS_ATTACKING
+        runtime.attack_held_vk = 0x43
+
+        runtime.update(100.0)
+        runtime.stop("小地圖巡航已停用")
+        runtime.update(101.0)
+
+        self.assertFalse(runtime.enabled)
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STOPPED)
+        self.assertEqual(runtime.attack_held_vk, 0)
+        self.assertEqual(events, [("up", 0x43)])
+        self.assertEqual(statuses[-1], "小地圖巡航已停用")
+        self.assertEqual(challenge_pause_states, [True, False])
+
+    def test_lie_detector_pause_does_not_resume_when_challenge_state_is_unknown(self):
+        runtime, events, statuses, alerts = self.make_runtime([120])
+        runtime.enabled = True
+        runtime.status = MINIMAP_CRUISE_STATUS_LIE_DETECTOR
+        runtime.lie_detector_challenge_active = True
+        runtime.next_lie_detector_check_at = 100.0
+        runtime.next_lie_detector_alert_at = 100.0
+        runtime.target_client_bounds_provider = lambda: None
+
+        runtime.update(100.0)
+
+        self.assertTrue(runtime.enabled)
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_LIE_DETECTOR)
+        self.assertEqual(events, [])
+        self.assertEqual(statuses, [])
+        self.assertEqual(alerts, [100.0])
+
+    def test_lie_detector_pause_can_finish_while_gameplay_hud_is_inactive(self):
+        blank_image = np.zeros((160, 200, 4), dtype=np.uint8)
+        runtime, _events, statuses, _alerts = self.make_runtime([120], [blank_image])
+        challenge_pause_states: list[bool] = []
+        runtime.lie_detector_state_func = challenge_pause_states.append
+        runtime.enabled = True
+        runtime.status = MINIMAP_CRUISE_STATUS_LIE_DETECTOR
+        runtime.lie_detector_challenge_active = True
+        runtime.can_run_actions = lambda: False
+        runtime.next_lie_detector_check_at = 100.0
+
+        runtime.update(100.0)
+
+        self.assertFalse(runtime.lie_detector_challenge_active)
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STARTING)
+        self.assertEqual(challenge_pause_states, [False])
+        self.assertEqual(statuses[-1], "小地圖巡航：測謊已完成，自動恢復")
 
     def test_lie_detector_detection_releases_turn_key(self):
         loaded = load_lie_detector_bomb_template()
@@ -1259,7 +1344,7 @@ class MinimapCruiseTests(unittest.TestCase):
 
         runtime.update(100.0)
 
-        self.assertFalse(runtime.enabled)
+        self.assertTrue(runtime.enabled)
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_LIE_DETECTOR)
         self.assertEqual(runtime.turn_held_vk, 0)
         self.assertEqual(runtime.turn_direction_vk, 0)
@@ -1277,6 +1362,8 @@ class MinimapCruiseTests(unittest.TestCase):
         runtime.status = MINIMAP_CRUISE_STATUS_ATTACKING
         runtime.next_detect_at = 9999.0
         runtime.next_red_player_check_at = 100.0
+        red_player_notices: list[float] = []
+        runtime.red_player_detected_func = red_player_notices.append
 
         runtime.update(100.0)
         runtime.update(100.0 + MINIMAP_CRUISE_RED_PLAYER_ALERT_AFTER_SECONDS - 0.001)
@@ -1291,12 +1378,14 @@ class MinimapCruiseTests(unittest.TestCase):
         self.assertTrue(runtime.red_player_alert_active)
         self.assertEqual(statuses[-1], "小地圖巡航：其他玩家紅點超過 20 秒")
         self.assertEqual(alerts, [121.0])
+        self.assertEqual(red_player_notices, [121.0])
 
         runtime.update(121.0 + MINIMAP_CRUISE_RED_PLAYER_ALERT_INTERVAL_SECONDS - 0.001)
         self.assertEqual(alerts, [121.0])
 
         runtime.update(121.0 + MINIMAP_CRUISE_RED_PLAYER_ALERT_INTERVAL_SECONDS)
         self.assertEqual(alerts, [121.0, 122.0])
+        self.assertEqual(red_player_notices, [121.0])
 
     def test_red_player_dot_timer_resets_when_dot_disappears(self):
         red_image = np.zeros((84, 96, 4), dtype=np.uint8)
@@ -1318,6 +1407,37 @@ class MinimapCruiseTests(unittest.TestCase):
         self.assertFalse(runtime.red_player_alert_active)
         self.assertEqual(runtime.red_player_present_since, 130.0)
         self.assertEqual(alerts, [])
+
+    def test_red_player_notice_rearms_after_dot_disappears(self):
+        red_image = np.zeros((84, 96, 4), dtype=np.uint8)
+        cv2.circle(red_image, (45, 45), 4, (0, 0, 230, 255), thickness=-1)
+        blank = np.zeros_like(red_image)
+        runtime, _events, _statuses, alerts = self.make_runtime(
+            [],
+            red_player_images=[
+                red_image.copy(),
+                red_image.copy(),
+                blank,
+                red_image.copy(),
+                red_image.copy(),
+            ],
+        )
+        runtime.enabled = True
+        runtime.status = MINIMAP_CRUISE_STATUS_ATTACKING
+        runtime.next_detect_at = 9999.0
+        runtime.next_red_player_check_at = 100.0
+        red_player_notices: list[float] = []
+        runtime.red_player_detected_func = red_player_notices.append
+
+        runtime.update(100.0)
+        runtime.update(121.0)
+        runtime.update(122.0)
+        runtime.update(130.0)
+        runtime.update(151.0)
+
+        self.assertTrue(runtime.red_player_alert_active)
+        self.assertEqual(red_player_notices, [121.0, 151.0])
+        self.assertEqual(alerts, [121.0, 151.0])
 
 
 if __name__ == "__main__":
