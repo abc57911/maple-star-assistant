@@ -18,6 +18,7 @@
 ## 常用索引
 - 專案結構與 facade：[docs/project-structure.md](docs/project-structure.md)
 - 開發約束與 commit 邊界：[docs/development-guidelines.md](docs/development-guidelines.md)
+- 安裝、移機與環境重建：[docs/installation.md](docs/installation.md)
 - EXP OCR 與經驗效率：[docs/experience-ocr.md](docs/experience-ocr.md)
 - GUI / 視窗 / ROI 相容性：[docs/runtime-compatibility.md](docs/runtime-compatibility.md)
 - 驗證命令：[docs/verification.md](docs/verification.md)
