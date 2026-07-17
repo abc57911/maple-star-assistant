@@ -2,26 +2,37 @@
 
 > 知識庫索引：[docs/INDEX.md](INDEX.md)
 
-## 日常修改
+## 預設原則：修改哪裡，測試哪裡
 
-日常修改只執行：
+日常修改只執行受影響子系統的精準測試：
+
+```powershell
+python -m unittest tests.test_<affected_subsystem>
+```
+
+依下列規則選擇範圍：
+
+- 修改單一函式或模組時，先跑最接近該行為的 test class、test method 或 test module。
+- 修改跨模組介面、共用資料契約或 cleanup ownership 時，只補跑直接依賴該介面的契約或整合測試。
+- 測試失敗時，先重跑失敗案例。只有證據顯示影響跨出目前邊界時，才擴到最近的相依模組。
+- 程式狀態未改變時，不重跑已通過的測試。
+- 純文件修改只檢查文件 diff、連結與格式，不執行 runtime 測試。
+
+不要把 `python tools\verify.py`、全套測試或下列專項 profile 當作日常預設。
+
+## 跨子系統快速驗證
+
+只有使用者明確要求，或修改同時影響多個核心子系統時，才執行：
 
 ```powershell
 python tools\verify.py
 ```
 
-此命令會完成：
-
-- entrypoint `py_compile`
-- `maple_star` compileall
-- 精簡 smoke tests
-- `git diff --check`
-
-不需另外執行 `py_compile`、`compileall` 或個別 smoke test。
+此命令包含 entrypoint `py_compile`、`maple_star` compileall、精簡 smoke tests 與 `git diff --check`。
 
 ## 發行前
 
-發行前執行完整測試：
+只有使用者明確要求時，才執行完整測試：
 
 ```powershell
 python tools\verify.py full
@@ -29,13 +40,13 @@ python tools\verify.py full
 
 ## PaddleOCR 專項
 
-涉及 PaddleOCR runtime、fixture 準確率或 `.venv-paddleocr` 時執行：
+只有使用者明確要求 OCR 專項 gate 時，才執行：
 
 ```powershell
 python tools\verify.py ocr-slow
 ```
 
-日常不執行 `full` 或 `ocr-slow`；只在上述情境使用。
+日常不執行 `full` 或 `ocr-slow`。
 
 ## Release artifact OCR
 
@@ -57,7 +68,7 @@ python -m venv .venv-release
 
 ## 筆電效能專項
 
-完成 control runtime 或 GUI 架構變更後，在目標筆電執行：
+只有使用者明確要求效能 gate 時，才在目標筆電執行：
 
 ```powershell
 python tools\verify.py performance

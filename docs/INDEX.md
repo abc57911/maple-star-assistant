@@ -8,17 +8,20 @@
 - [installation.md](installation.md)：Windows、Python、全部外部套件、AI agent 安裝順序、環境驗證與移機故障排除。
 - [experience-ocr.md](experience-ocr.md)：Pixel OCR primary、PaddleOCR fallback、learning mode、經驗統計與 OCR guard 規則。
 - [runtime-compatibility.md](runtime-compatibility.md)：GUI、遊戲視窗、DPI、HP/MP/EXP ROI、loading/fade 與前景切換注意事項。
-- [verification.md](verification.md)：日常、發行前與 PaddleOCR 專項驗證命令。
+- [verification.md](verification.md)：精準測試原則、跨子系統、發行前與 PaddleOCR 專項驗證命令。
 - [release.md](release.md)：本機打包、GitHub Releases、ZIP 驗證與失敗處理流程。
 - [緊湊 GUI 版面設計](superpowers/specs/2026-07-17-compact-gui-layout-design.md)：五頁字型、靠左分頁與內容驅動版面規格。
 - [全專案 Code Review 與減肥設計](superpowers/specs/2026-07-17-project-slimming-design.md)：開發工具移除、發行包減肥、巨型模組拆分與分批驗證規格。
 - [Stage 3 OCR 與 GUI 拆分設計](superpowers/specs/2026-07-17-stage-3-ocr-gui-decomposition-design.md)：實際 public API manifest、OCR 責任拆分、GUI page builder 與逐批 rollback 規格。
 - [Stage 3 OCR 與 GUI 拆分實作計畫](superpowers/plans/2026-07-17-stage-3-ocr-gui-decomposition-plan.md)：依 facade、OCR leaf/service 與 GUI page builder 分成十批執行與驗證。
 - [Stage 4 AutoPotionController 拆分設計](superpowers/specs/2026-07-17-stage-4-auto-potion-controller-decomposition-design.md)：runtime composition、media、hotkey、HUD、potion 與 EXP capture 的責任、ownership、相容與分批 rollback 規格。
+- [Stage 4 AutoPotionController 拆分實作計畫](superpowers/plans/2026-07-17-stage-4-auto-potion-controller-decomposition-plan.md)：依 contracts、runtime、media、hotkey、capture、HUD、potion 與 EXP 分九批實作、驗證及 rollback。
 - [第一階段全專案 Code Review Gate 計畫](superpowers/plans/2026-07-17-project-review-phase-1-plan.md)：全 repository review、baseline、findings 分級與後續階段分流。
 - [2026-07-17 全專案 Code Review](reviews/2026-07-17-project-code-review.md)：全 repository baseline、分級 findings、證據與減肥階段分流。
 - [Stage 3 OCR／GUI 拆分 Baseline](reviews/2026-07-17-stage-3-baseline.md)：拆分前 LOC、fixture 數量與 GUI/control performance 比較基準。
 - [Stage 3 OCR／GUI 拆分 Review](reviews/2026-07-17-stage-3-review.md)：拆分後 LOC、模組責任、效能比較、驗證證據與 residual coupling。
+- [Stage 4 AutoPotionController 拆分 Baseline](reviews/2026-07-17-stage-4-baseline.md)：拆分前controller結構、runtime import、resource ownership、patch seam與performance比較基準。
+- [Stage 4 AutoPotionController 拆分 Review](reviews/2026-07-17-stage-4-review.md)：拆分後結構、canonical ownership、相容邊界、分批驗證證據與residual coupling。
 - [階段 1A Cleanup 與 Startup Reliability 計畫](superpowers/plans/2026-07-17-cleanup-startup-reliability-plan.md)：child process、controller、父程序與桌面入口的例外 cleanup 邊界。
 - [階段 1B Developer Tooling 與 Dead Code 移除計畫](superpowers/plans/2026-07-17-developer-tooling-dead-code-removal-plan.md)：低耦合 dead code 與 EXP OCR learning 分批刪除邊界。
 - [階段 2A Release Package Baseline 計畫](superpowers/plans/2026-07-17-release-package-baseline-plan.md)：未修改 collect 規則的 ZIP、PyInstaller analysis 與 dependency baseline。

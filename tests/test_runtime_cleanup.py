@@ -9,13 +9,15 @@ from unittest.mock import Mock, patch
 from maple_star.controllers.auto_potion_controller import AutoPotionController, _create_auto_potion_controller
 from maple_star.controllers import gamepad_controller
 from maple_star.controllers.gamepad_controller import _run_shutdown_step
+from maple_star.controllers.runtime_child_entrypoints import (
+    run_experience_stats_process as _run_experience_stats_process,
+    run_potion_runtime_process as _run_potion_runtime_process,
+)
 from maple_star.services.runtime_processes import (
     RuntimeProcessCoordinator,
     WorkerCrashed,
     _report_worker_crash,
     _run_child_cleanup_step,
-    _run_experience_stats_process,
-    _run_potion_runtime_process,
 )
 
 

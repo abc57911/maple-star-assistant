@@ -20,7 +20,8 @@
 - `maple_star/constants.py`：跨模組共用常數，包含偵測節奏、狀態條定位、快捷鍵 ID 與 loading/fade guard。
 
 ## 主要模組職責
-- `maple_star/controllers/auto_potion_controller.py`：自動喝水主流程、HUD/ROI 定位、HP/MP direct bar capture、EXP tooltip/bottom OCR orchestration、hotkey gating 與 cleanup。
+- `maple_star/controllers/auto_potion_controller.py`：自動喝水、EXP 與 GUI publish 的主流程 orchestration；透過相容 shim 委派 hotkey、capture、HUD、potion、media 與 EXP job lifecycle。
+- `maple_star/controllers/auto_potion_factory.py`、`auto_potion_runtime_composition.py`、`runtime_child_entrypoints.py`：controller 建立、runtime dependency composition 與 spawn-safe child entrypoints。
 - `maple_star/controllers/gamepad_controller.py`：GUI orchestration、control runtime entrypoint、RB/LB 巨集 state machine 與 runtime info refresh；實際 deadline 在 control process 執行。
 - `maple_star/models/settings.py`：`settings.json` schema、profile migration、controller button alias、全域 UI 狀態與 profile-scoped potion/macro 設定。
 - `maple_star/models/experience.py`：舊 import path 相容 aggregator；實作分別位於 `experience_tracker.py`、`experience_types.py`、`experience_constants.py` 與 `services/experience_*`。
@@ -35,8 +36,15 @@
 - `maple_star/views/gui_theme.py`、`gui_presentation.py`：theme constants、共用 widget factory、responsive layout 與 tooltip 呈現。
 - `maple_star/views/pages/`：Monitor、Potion、Minimap、Combo、Console page builders 與 frozen context/ref contracts。
 - `maple_star/services/runtime_processes.py`：potion、EXP 與 control runtime 的 multiprocessing coordinator、command/status dataclass、bounded queue、status signature 與 heartbeat。
+- `maple_star/services/runtime_api.py`、`controller_collaborator_api.py`：runtime message、port 與 collaborator contracts；避免 controller/runtime concrete module 互相 import。
+- `maple_star/services/screen_capture.py`：MSS backend 的唯一 owner，提供共用 screen capture port。
+- `maple_star/services/hud_bar_detector.py`、`hud_bar_detection_algorithms.py`：HUD geometry、GDI direct capture 與 bar detection algorithms。
+- `maple_star/services/potion_engine.py`：HP/MP threshold、cooldown、effect watch、pending command 與 held-key 狀態的唯一 domain owner。
+- `maple_star/services/experience_capture_coordinator.py`：EXP OCR executor、future/job、signature suppression、baseline/checkpoint capture state、cursor restore 與 cleanup owner；不持有 MSS。
+- `maple_star/services/control_hotkey_coordinator.py`：控制熱鍵 registration、polling fallback、down-state 與 worker lifecycle。
+- `maple_star/services/media_playback.py`：MCI alias、音效播放與 lie-detector alert thread lifecycle。
 - `maple_star/services/control_scheduler.py`：control runtime 的絕對 deadline、無 backlog cadence、高解析等待與 lateness 統計。
-- `maple_star/services/potion_action_worker.py`：背景送鍵 worker；key-up 成功後才清除 held state，例外只記錄並保留可重試狀態。
+- `maple_star/services/potion_action_worker.py`：背景送鍵 worker；實際 SendInput 前重驗 foreground，並回報 executed/rejected/failed completion result。
 - `maple_star/services/control_hotkey_worker.py`：全域控制熱鍵 worker；RegisterHotKey 失敗時仍保留 polling fallback。
 - `maple_star/services/gamepad_bindings.py`：設定中的 controller button 名稱轉成 SDL button，並決定目前啟用的 RB/LB binding。
 - `maple_star/services/bar_detection.py`：bar percent 正規化、threshold 判斷、loading 畫面指標與 preview PPM 轉換。

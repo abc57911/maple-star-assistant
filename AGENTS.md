@@ -24,11 +24,10 @@
 - 驗證命令：[docs/verification.md](docs/verification.md)
 - 發行流程：[docs/release.md](docs/release.md)
 
-## 最低驗證
-- 日常修改只需執行：
-
-```powershell
-python tools\verify.py
-```
-
-- 發行前或 PaddleOCR 專項驗證依 [docs/verification.md](docs/verification.md) 使用對應 profile。
+## 驗證原則
+- 預設只執行受本次修改直接影響的測試；修改哪個子系統，就測哪個子系統。
+- 跨模組介面、共用契約或 cleanup ownership 有變動時，只補跑直接相關的契約或整合測試。
+- 測試失敗時，先重跑失敗案例；需要擴大範圍時，只擴到最近的相依邊界。
+- 程式狀態未改變時，不重跑已通過的測試。
+- 文件修改只檢查文件 diff、連結與格式，不執行 runtime 測試。
+- 不要預設執行全套測試、`python tools\verify.py`、`full`、`ocr-slow` 或 `performance`。只有使用者明確要求時，才依 [docs/verification.md](docs/verification.md) 執行對應 profile。

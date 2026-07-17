@@ -12,7 +12,8 @@ from typing import Callable
 
 import numpy as np
 
-from .auto_potion_controller import AutoPotionController, _create_auto_potion_controller
+from .auto_potion_controller import AutoPotionController
+from .auto_potion_factory import _create_auto_potion_controller
 from ..constants import MINIMAP_PLAYER_ALERT_BEEP_PATTERN
 from ..adapters.debug_logging import log_telegram_reply
 from ..adapters.win_input import (
@@ -58,17 +59,19 @@ from ..services.control_scheduler import (
     next_absolute_deadline,
     wait_until_next_poll,
 )
-from ..services.runtime_processes import (
+from ..services.runtime_api import (
     ControlCommand,
     ControlStatus,
     SettingsUpdated,
     Shutdown,
     TargetWindowUpdated,
     WorkerCrashed,
+    control_status_signature,
+)
+from ..services.runtime_processes import (
     _drain_queue,
     _is_target_hwnd_active,
     _settings_from_payload,
-    control_status_signature,
 )
 
 from ..adapters.controller_worker import (
@@ -1164,10 +1167,11 @@ def _run_main(cleanup_actions: dict[str, Callable[[], None]]) -> None:
         f"按 {auto_potion.settings.emergency_stop_hotkey} 可切換總開關並釋放按鍵。按 Ctrl+C 結束。"
     )
 
-    runtime = getattr(auto_potion, "runtime_processes", None)
-    if runtime is None or controller_worker is None:
+    if controller_worker is None or not auto_potion.start_control_runtime(
+        run_control_runtime_process,
+        controller_worker.event_queue,
+    ):
         raise RuntimeError("control runtime 無法啟動")
-    runtime.start_control(run_control_runtime_process, controller_worker.event_queue)
 
     def send_control_state(*, force: bool = False, release_all: bool = False) -> None:
         nonlocal last_control_command_signature
@@ -1196,14 +1200,14 @@ def _run_main(cleanup_actions: dict[str, Callable[[], None]]) -> None:
         if not force and signature == last_control_command_signature:
             return
         if release_all:
-            runtime.request_control_release(command)
+            auto_potion.request_control_release(command)
         else:
-            runtime.send_control(command)
+            auto_potion.send_control_runtime(command)
         last_control_command_signature = signature
 
     cleanup_actions["request control key release"] = lambda: (
         send_control_state(force=True, release_all=True)
-        if getattr(auto_potion, "runtime_processes", None) is not None
+        if auto_potion.runtime_port is not None
         else None
     )
 
@@ -1247,7 +1251,7 @@ def _run_main(cleanup_actions: dict[str, Callable[[], None]]) -> None:
         nonlocal control_last_action, control_challenge_paused, telegram_reply_config_error_reported
         nonlocal last_control_status_at, control_failure_reported
         latest: ControlStatus | None = None
-        for item in runtime.drain_control_statuses(limit=256):
+        for item in auto_potion.drain_control_runtime_statuses(limit=256):
             if isinstance(item, WorkerCrashed):
                 if item.worker == "control":
                     release_parent_known_control_keys()
@@ -1364,10 +1368,13 @@ def _run_main(cleanup_actions: dict[str, Callable[[], None]]) -> None:
             drain_control_statuses()
             maybe_refresh_runtime_info(now)
             report_controller_worker_if_dead()
-            control_unhealthy = not runtime.control_alive() or now - last_control_status_at > CONTROL_STATUS_TIMEOUT_SECONDS
+            control_unhealthy = (
+                not auto_potion.control_runtime_alive()
+                or now - last_control_status_at > CONTROL_STATUS_TIMEOUT_SECONDS
+            )
             if control_unhealthy and not control_failure_reported:
                 control_failure_reported = True
-                reason = "已停止" if not runtime.control_alive() else "heartbeat timeout"
+                reason = "已停止" if not auto_potion.control_runtime_alive() else "heartbeat timeout"
                 auto_potion.gui.set_status(f"control runtime {reason}，全部自動化已停用")
                 auto_potion.emergency_stop()
                 release_parent_known_control_keys()

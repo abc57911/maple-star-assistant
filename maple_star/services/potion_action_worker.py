@@ -4,6 +4,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Callable, Literal
 
 from ..adapters.debug_logging import log_exception
 from ..adapters.win_input import key_down, key_up, tap_hotkey
@@ -19,14 +20,26 @@ class PotionAction:
     bar_type: str
     key_name: str = ""
     vk_code: int = 0
+    command_id: int = 0
+
+
+@dataclass(frozen=True)
+class PotionActionResult:
+    command_id: int
+    outcome: Literal["executed", "rejected_foreground", "failed"]
+    completed_at: float
+    held_vk: int = 0
+    reason: str = ""
 
 
 @dataclass
 class PotionActionWorker:
+    can_execute: Callable[[PotionAction], bool] | None = None
     max_pending_actions: int = POTION_ACTION_WORKER_MAX_PENDING_ACTIONS
     _stop_event: threading.Event = field(default_factory=threading.Event)
     _condition: threading.Condition = field(default_factory=threading.Condition)
     _actions: deque[PotionAction] = field(default_factory=deque)
+    _results: deque[PotionActionResult] = field(default_factory=deque)
     _thread: threading.Thread | None = None
 
     def __post_init__(self) -> None:
@@ -66,8 +79,28 @@ class PotionActionWorker:
     def release_all(self) -> None:
         self._enqueue(PotionAction("release_all", "all"))
 
+    def submit(self, action: PotionAction) -> bool:
+        if action.command_id <= 0:
+            raise ValueError("command action requires a positive command_id")
+        with self._condition:
+            if len(self._actions) >= self.max_pending_actions:
+                return False
+            self._actions.append(action)
+            self._condition.notify()
+        return True
+
+    def drain_results(self, limit: int = 64) -> list[PotionActionResult]:
+        results: list[PotionActionResult] = []
+        with self._condition:
+            for _ in range(max(0, int(limit))):
+                if not self._results:
+                    break
+                results.append(self._results.popleft())
+        return results
+
     def clear_actions(self) -> None:
         with self._condition:
+            self._record_cancelled_actions_locked(self._actions, "action queue cleared")
             self._actions.clear()
 
     def drain_actions(self, limit: int = 64) -> list[PotionAction]:
@@ -89,6 +122,7 @@ class PotionActionWorker:
 
     def _coalesce_pending_actions(self, action: PotionAction) -> None:
         if action.action == "release_all":
+            self._record_cancelled_actions_locked(self._actions, "release all superseded command")
             self._actions.clear()
             return
         if action.action not in _COALESCED_ACTIONS:
@@ -114,6 +148,18 @@ class PotionActionWorker:
                 return
         self._actions.popleft()
 
+    def _record_cancelled_actions_locked(self, actions: deque[PotionAction], reason: str) -> None:
+        for pending in actions:
+            if pending.command_id > 0:
+                self._results.append(
+                    PotionActionResult(
+                        pending.command_id,
+                        "failed",
+                        time.monotonic(),
+                        reason=reason,
+                    )
+                )
+
     def _get_action(self, timeout: float) -> PotionAction | None:
         deadline = time.monotonic() + max(0.0, timeout)
         with self._condition:
@@ -133,8 +179,43 @@ class PotionActionWorker:
             if action is None:
                 continue
             try:
-                _apply_potion_action(action, held)
-            except Exception:
+                if (
+                    action.command_id > 0
+                    and action.action not in {"release", "release_all"}
+                    and self.can_execute is not None
+                    and not self.can_execute(action)
+                ):
+                    with self._condition:
+                        self._results.append(
+                            PotionActionResult(
+                                action.command_id,
+                                "rejected_foreground",
+                                time.monotonic(),
+                            )
+                        )
+                    continue
+                held_vk = _apply_potion_action(action, held)
+                if action.command_id > 0:
+                    with self._condition:
+                        self._results.append(
+                            PotionActionResult(
+                                action.command_id,
+                                "executed",
+                                time.monotonic(),
+                                held_vk=held_vk,
+                            )
+                        )
+            except Exception as exc:
+                if action.command_id > 0:
+                    with self._condition:
+                        self._results.append(
+                            PotionActionResult(
+                                action.command_id,
+                                "failed",
+                                time.monotonic(),
+                                reason=str(exc),
+                            )
+                        )
                 log_exception(
                     "喝水按鍵背景工作失敗："
                     f"action={action.action} bar={action.bar_type} "
@@ -144,21 +225,21 @@ class PotionActionWorker:
         _release_held_potion_keys(held)
 
 
-def _apply_potion_action(action: PotionAction, held: dict[str, int]) -> None:
+def _apply_potion_action(action: PotionAction, held: dict[str, int]) -> int:
     if action.action == "tap":
         tap_hotkey(action.key_name)
-        return
+        return held.get(action.bar_type, 0)
 
     if action.action == "hold":
         current_vk = held.get(action.bar_type, 0)
         if current_vk == action.vk_code:
-            return
+            return current_vk
         if current_vk:
             key_up(current_vk)
             held.pop(action.bar_type, None)
         key_down(action.vk_code)
         held[action.bar_type] = action.vk_code
-        return
+        return action.vk_code
 
     if action.action == "refresh_hold":
         current_vk = held.get(action.bar_type, 0)
@@ -167,7 +248,7 @@ def _apply_potion_action(action: PotionAction, held: dict[str, int]) -> None:
             held.pop(action.bar_type, None)
         key_down(action.vk_code)
         held[action.bar_type] = action.vk_code
-        return
+        return action.vk_code
 
     if action.action == "release":
         current_vk = held.get(action.bar_type, 0)
@@ -175,10 +256,13 @@ def _apply_potion_action(action: PotionAction, held: dict[str, int]) -> None:
         if vk_code:
             key_up(vk_code)
         held.pop(action.bar_type, None)
-        return
+        return 0
 
     if action.action == "release_all":
         _release_held_potion_keys(held)
+        return 0
+
+    raise ValueError(f"unknown potion action: {action.action}")
 
 
 def _release_held_potion_keys(held: dict[str, int]) -> None:

@@ -22,15 +22,15 @@ REQUIRED_EXPORTS = {
         "AutoPotionController": "maple_star.controllers.auto_potion_controller",
         "loading_screen_metrics": "maple_star.services.bar_detection",
         "normalize_bar_percent": "maple_star.services.bar_detection",
-        "AUTO_DRINK_POTION_CHECK_SOUND_PATH": "maple_star.controllers.auto_potion_controller",
-        "AUTO_DRINK_START_SOUND_PATH": "maple_star.controllers.auto_potion_controller",
-        "AUTO_DRINK_STOP_SOUND_PATH": "maple_star.controllers.auto_potion_controller",
-        "AUTO_PICKUP_START_SOUND_PATH": "maple_star.controllers.auto_potion_controller",
-        "AUTO_PICKUP_STOP_SOUND_PATH": "maple_star.controllers.auto_potion_controller",
+        "AUTO_DRINK_POTION_CHECK_SOUND_PATH": "maple_star.services.media_playback",
+        "AUTO_DRINK_START_SOUND_PATH": "maple_star.services.media_playback",
+        "AUTO_DRINK_STOP_SOUND_PATH": "maple_star.services.media_playback",
+        "AUTO_PICKUP_START_SOUND_PATH": "maple_star.services.media_playback",
+        "AUTO_PICKUP_STOP_SOUND_PATH": "maple_star.services.media_playback",
         "ExperienceOcrJob": "maple_star.models.controller_state",
-        "LIE_DETECTOR_ALERT_SOUND_PATH": "maple_star.controllers.auto_potion_controller",
-        "MINIMAP_CRUISE_START_WAV_PATH": "maple_star.controllers.auto_potion_controller",
-        "MINIMAP_CRUISE_STOP_WAV_PATH": "maple_star.controllers.auto_potion_controller",
+        "LIE_DETECTOR_ALERT_SOUND_PATH": "maple_star.services.media_playback",
+        "MINIMAP_CRUISE_START_WAV_PATH": "maple_star.services.media_playback",
+        "MINIMAP_CRUISE_STOP_WAV_PATH": "maple_star.services.media_playback",
         "BarDetectionDebug": "maple_star.models.controller_state",
         "bgra_image_to_ppm_data": "maple_star.services.bar_detection",
     },
@@ -218,6 +218,7 @@ PATCH_POINTS = {
         "ctypes.windll",
         "key_down",
         "key_up",
+        "mss.mss",
         "save_settings",
         "tap_hotkey",
         "threading.Thread",
@@ -228,6 +229,27 @@ PATCH_POINTS = {
         "winsound.MessageBeep",
         "winsound.PlaySound",
     ),
+    "maple_star.controllers.auto_potion_controller": (
+        "get_cursor_position",
+        "log_exception",
+        "log_experience_debug",
+        "save_settings",
+        "set_cursor_position",
+        "sleep_while_pumping_messages",
+        "temporary_mouse_input_lock",
+        "user32.ClientToScreen",
+        "user32.GetClientRect",
+        "user32.GetForegroundWindow",
+    ),
+}
+
+
+PATCH_POINT_OWNERS = {
+    module_name: {
+        name: "dynamic_adapter"
+        for name in patch_points
+    }
+    for module_name, patch_points in PATCH_POINTS.items()
 }
 
 

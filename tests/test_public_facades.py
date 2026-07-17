@@ -14,6 +14,7 @@ from tests.public_facade_manifest import (
     MODULE_ALIASES,
     PACKAGE_ROOT_EXPORTS,
     PATCH_POINTS,
+    PATCH_POINT_OWNERS,
     REQUIRED_EXPORTS,
 )
 
@@ -55,6 +56,11 @@ class PublicFacadeTests(unittest.TestCase):
             for dotted_name in patch_points:
                 with self.subTest(module=module_name, patch=dotted_name):
                     self.assertIsNotNone(_resolve_attribute(module, dotted_name))
+
+    def test_controller_patch_points_have_stage4_owners(self) -> None:
+        for module_name, patch_points in PATCH_POINTS.items():
+            self.assertEqual(set(PATCH_POINT_OWNERS[module_name]), set(patch_points))
+            self.assertEqual(set(PATCH_POINT_OWNERS[module_name].values()), {"dynamic_adapter"})
 
     def test_experience_target_owner_manifest_matches_staged_manifest(self) -> None:
         self.assertEqual(EXPERIENCE_STAGED_OWNERS, EXPERIENCE_TARGET_OWNERS)

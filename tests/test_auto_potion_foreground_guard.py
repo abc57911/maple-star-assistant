@@ -64,7 +64,12 @@ from maple_star.services.control_hotkey_worker import (
     CONTROL_HOTKEY_MINIMAP_CRUISE_TOGGLE,
     CONTROL_HOTKEY_PICKUP_TOGGLE,
 )
-from maple_star.services.potion_action_worker import PotionAction, PotionActionWorker, _apply_potion_action
+from maple_star.services.potion_action_worker import (
+    PotionAction,
+    PotionActionResult,
+    PotionActionWorker,
+    _apply_potion_action,
+)
 from maple_star.services.runtime_processes import (
     ExperienceStatus,
     HeadlessRuntimeGui,
@@ -1827,6 +1832,74 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             ],
         )
 
+    def test_potion_action_worker_rejects_tracked_command_when_queue_is_full(self):
+        worker = PotionActionWorker(max_pending_actions=1)
+
+        self.assertTrue(worker.submit(PotionAction("tap", "hp", key_name="A", command_id=1)))
+        self.assertFalse(worker.submit(PotionAction("tap", "mp", key_name="B", command_id=2)))
+        self.assertEqual(
+            worker.drain_actions(),
+            [PotionAction("tap", "hp", key_name="A", command_id=1)],
+        )
+
+    def test_potion_action_worker_rechecks_before_tracked_send(self):
+        can_execute = Mock(return_value=False)
+        worker = PotionActionWorker(can_execute=can_execute)
+
+        with patch("maple_star.services.potion_action_worker.tap_hotkey") as tap_hotkey:
+            worker.start()
+            try:
+                worker.submit(PotionAction("tap", "hp", key_name="Delete", command_id=1))
+                deadline = time.monotonic() + 1.0
+                results = []
+                while time.monotonic() < deadline and not results:
+                    results = worker.drain_results()
+                    if not results:
+                        time.sleep(0.01)
+            finally:
+                worker.stop()
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].outcome, "rejected_foreground")
+        self.assertGreater(results[0].completed_at, 0.0)
+        can_execute.assert_called_once()
+        tap_hotkey.assert_not_called()
+
+    def test_potion_action_worker_records_actual_completion_time(self):
+        worker = PotionActionWorker()
+
+        with patch("maple_star.services.potion_action_worker.tap_hotkey"):
+            started_at = time.monotonic()
+            worker.start()
+            try:
+                worker.submit(PotionAction("tap", "hp", key_name="Delete", command_id=1))
+                deadline = started_at + 1.0
+                results = []
+                while time.monotonic() < deadline and not results:
+                    results = worker.drain_results()
+                    if not results:
+                        time.sleep(0.01)
+            finally:
+                worker.stop()
+            finished_at = time.monotonic()
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].outcome, "executed")
+        self.assertGreaterEqual(results[0].completed_at, started_at)
+        self.assertLessEqual(results[0].completed_at, finished_at)
+
+    def test_worker_time_potion_guard_is_read_only_and_release_is_always_allowed(self):
+        controller = self.make_controller([])
+        controller.gameplay_hud_active = True
+        controller.is_target_window_active = Mock(return_value=True)
+
+        self.assertTrue(controller._can_execute_potion_action(PotionAction("tap", "hp")))
+        controller.auto_drink_challenge_paused = True
+        self.assertFalse(controller._can_execute_potion_action(PotionAction("hold", "hp")))
+        controller.gameplay_hud_active = False
+        controller.is_target_window_active.return_value = False
+        self.assertTrue(controller._can_execute_potion_action(PotionAction("release", "hp")))
+
     def test_potion_action_worker_coalesces_control_actions_per_bar(self):
         worker = PotionActionWorker()
 
@@ -2927,6 +3000,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
     def test_hp_auto_drink_uses_potion_action_worker_when_available(self):
         controller = self.make_controller([True, True])
         controller.potion_action_worker = Mock()
+        controller.potion_action_worker.submit.return_value = True
 
         with (
             patch("maple_star.controller.tap_hotkey") as tap_hotkey,
@@ -2934,8 +3008,16 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         ):
             controller._maybe_drink_hp(100.0, 25.0)
 
-        controller.potion_action_worker.tap.assert_called_once_with("hp", "Delete")
+        action = controller.potion_action_worker.submit.call_args.args[0]
+        self.assertEqual(action, PotionAction("tap", "hp", key_name="Delete", command_id=1))
         tap_hotkey.assert_not_called()
+        self.assertEqual(controller.last_hp_drink_at, -999.0)
+
+        controller.potion_action_worker.drain_results.return_value = [
+            PotionActionResult(action.command_id, "executed", 100.0)
+        ]
+        controller._drain_potion_engine_command_results(100.0)
+
         self.assertEqual(controller.last_hp_drink_at, 100.0)
 
     def test_mp_successful_auto_drink_does_not_log_trigger(self):
@@ -3572,6 +3654,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller = self.make_controller([True] * 4)
         controller.settings.hp_continuous_enabled = True
         controller.potion_action_worker = Mock()
+        controller.potion_action_worker.submit.return_value = True
 
         with (
             patch("maple_star.controller.key_down") as key_down,
@@ -3580,18 +3663,48 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             patch("builtins.print"),
         ):
             controller._maybe_drink_hp(100.0, 25.0)
+            action = controller.potion_action_worker.submit.call_args.args[0]
+            controller.potion_action_worker.drain_results.return_value = [
+                PotionActionResult(action.command_id, "executed", 100.0, held_vk=0x2E)
+            ]
+            controller._drain_potion_engine_command_results(100.0)
             controller._maybe_drink_hp(100.2, 50.0)
 
-        controller.potion_action_worker.hold.assert_called_once_with("hp", 0x2E)
-        controller.potion_action_worker.release.assert_called_once_with("hp", 0x2E)
+        submitted_actions = [call.args[0] for call in controller.potion_action_worker.submit.call_args_list]
+        self.assertEqual(
+            submitted_actions,
+            [
+                PotionAction("hold", "hp", vk_code=0x2E, command_id=1),
+                PotionAction("release", "hp", vk_code=0x2E, command_id=2),
+            ],
+        )
         key_down.assert_not_called()
         key_up.assert_not_called()
         tap_hotkey.assert_not_called()
+
+    def test_release_is_queued_behind_unreported_continuous_hold(self):
+        controller = self.make_controller([True] * 4)
+        controller.settings.hp_continuous_enabled = True
+        controller.potion_action_worker = Mock()
+        controller.potion_action_worker.submit.return_value = True
+
+        controller._maybe_drink_hp(100.0, 25.0)
+        controller._release_potion_key("hp")
+
+        submitted_actions = [call.args[0] for call in controller.potion_action_worker.submit.call_args_list]
+        self.assertEqual(
+            submitted_actions,
+            [
+                PotionAction("hold", "hp", vk_code=0x2E, command_id=1),
+                PotionAction("release", "hp", command_id=2),
+            ],
+        )
 
     def test_hp_continuous_refresh_uses_potion_action_worker_when_available(self):
         controller = self.make_controller([True] * 4)
         controller.settings.hp_continuous_enabled = True
         controller.potion_action_worker = Mock()
+        controller.potion_action_worker.submit.return_value = True
 
         with (
             patch("maple_star.controller.key_down") as key_down,
@@ -3600,11 +3713,21 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             patch("builtins.print"),
         ):
             controller._maybe_drink_hp(100.0, 25.0)
+            first_action = controller.potion_action_worker.submit.call_args.args[0]
+            controller.potion_action_worker.drain_results.return_value = [
+                PotionActionResult(first_action.command_id, "executed", 100.0, held_vk=0x2E)
+            ]
+            controller._drain_potion_engine_command_results(100.0)
             controller._maybe_drink_hp(100.0 + POTION_CONTINUOUS_HOLD_REFRESH_SECONDS, 25.0)
 
-        controller.potion_action_worker.hold.assert_called_once_with("hp", 0x2E)
-        controller.potion_action_worker.refresh_hold.assert_called_once_with("hp", 0x2E)
-        controller.potion_action_worker.release.assert_not_called()
+        submitted_actions = [call.args[0] for call in controller.potion_action_worker.submit.call_args_list]
+        self.assertEqual(
+            submitted_actions,
+            [
+                PotionAction("hold", "hp", vk_code=0x2E, command_id=1),
+                PotionAction("refresh_hold", "hp", vk_code=0x2E, command_id=2),
+            ],
+        )
         key_down.assert_not_called()
         key_up.assert_not_called()
         tap_hotkey.assert_not_called()
@@ -3716,8 +3839,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._transition_pause_reason = Mock(return_value=None)
         controller._capture_bar_percents = Mock(return_value=(80.0, 80.0))
         order = []
-        controller._maybe_drink_hp = Mock(side_effect=lambda now, percent: order.append("hp"))
-        controller._maybe_drink_mp = Mock(side_effect=lambda now, percent: order.append("mp"))
+        controller._update_potion_engine = Mock(side_effect=lambda now, hp, mp: order.append("potion"))
         controller._update_potion_effect_watch_cycles = Mock(
             side_effect=lambda now, hp, mp: order.append("watch")
         )
@@ -3725,7 +3847,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         controller.update(100.0)
 
-        self.assertEqual(order, ["hp", "mp", "watch", "exp"])
+        self.assertEqual(order, ["potion", "watch", "exp"])
 
     def test_update_ignores_transition_false_positive_when_hp_mp_hud_is_readable(self):
         controller = self.make_controller([True])
@@ -3740,8 +3862,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._transition_pause_reason = Mock(return_value="偵測到地圖過場暗幕，暫停自動操作")
         controller._refresh_gameplay_hud_state = Mock(return_value=True)
         controller._capture_bar_percents = Mock(return_value=(0.0, 0.0))
-        controller._maybe_drink_hp = Mock()
-        controller._maybe_drink_mp = Mock()
+        controller._update_potion_engine = Mock()
         controller._update_potion_effect_watch_cycles = Mock()
         controller._stop_experience_ocr_job = Mock()
         controller.experience_tracker = Mock()
@@ -3766,8 +3887,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._sync_registered_control_hotkeys = Mock()
         controller._transition_pause_reason = Mock(return_value=None)
         controller._capture_bar_percents = Mock(return_value=(25.0, 80.0))
-        controller._maybe_drink_hp = Mock()
-        controller._maybe_drink_mp = Mock()
+        controller._update_potion_engine = Mock()
         controller._update_potion_effect_watch_cycles = Mock()
         controller._update_experience_efficiency = Mock()
         controller._defer_experience_for_potion_priority = Mock()
@@ -3805,8 +3925,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._sync_registered_control_hotkeys = Mock()
         controller._transition_pause_reason = Mock(return_value=None)
         controller._capture_bar_percents = Mock(return_value=(96.0, 80.0))
-        controller._maybe_drink_hp = Mock()
-        controller._maybe_drink_mp = Mock()
+        controller._update_potion_engine = Mock()
         controller._update_potion_effect_watch_cycles = Mock()
         controller._update_experience_efficiency = Mock()
         controller._defer_experience_for_potion_priority = Mock()
@@ -4998,7 +5117,14 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         thread_class.assert_called_once()
         self.assertEqual(len(created_threads), 1)
-        self.assertIs(created_threads[0].target, controller._play_lie_detector_alert_sound_blocking)
+        self.assertIs(
+            created_threads[0].target.__self__,
+            controller.media_playback_service,
+        )
+        self.assertEqual(
+            created_threads[0].target.__func__,
+            controller.media_playback_service.play_lie_detector_alert_blocking.__func__,
+        )
         self.assertEqual(created_threads[0].name, "maple-star-lie-detector-alert")
         self.assertTrue(created_threads[0].daemon)
         self.assertTrue(created_threads[0].started)

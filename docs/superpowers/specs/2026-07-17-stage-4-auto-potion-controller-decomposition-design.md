@@ -71,6 +71,7 @@ class ControllerModuleAdapters:
     key_down: Callable[[int], None]
     key_up: Callable[[int], None]
     tap_hotkey: Callable[..., None]
+    save_settings: Callable[..., None]
 
 class RuntimeMediaSink(Protocol):
     def play_media(self, path: Path, alias: str) -> None: ...
@@ -81,7 +82,7 @@ class RuntimeMediaSink(Protocol):
 
 Batch 0由AST與tests產生完整manifest；每個現有patch point必須且只能分類為：
 
-- dynamic adapter：`ctypes.windll`、`threading.Thread`、`time.monotonic`、`time.sleep`、`winsound.Beep`、`winsound.MessageBeep`、`winsound.PlaySound`、`user32`、`key_down`、`key_up`、`tap_hotkey`及manifest找到的其他I/O globals。
+- dynamic adapter：`ctypes.windll`、`threading.Thread`、`time.monotonic`、`time.sleep`、`winsound.Beep`、`winsound.MessageBeep`、`winsound.PlaySound`、`user32`、`key_down`、`key_up`、`tap_hotkey`、`save_settings`及manifest找到的其他I/O globals。
 - controller private shim：tests或production直接patch/call的`_play_*`、`_capture_*`、`_bar_*`、hotkey、potion與EXP methods。
 - canonical re-export：facade constants、helpers、IPC types、signature helpers、`InlineExecutor`與factory symbol；object identity必須相同。
 

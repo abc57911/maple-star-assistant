@@ -3,8 +3,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import queue
 import time
-from concurrent.futures import Future
-from dataclasses import dataclass, fields
+from dataclasses import fields
 from typing import Any, Callable
 
 from ..adapters.debug_logging import log_exception
@@ -13,125 +12,25 @@ from ..adapters.window_target import is_target_window
 from ..constants import DEFAULT_CAPTURE_INTERVAL_SECONDS
 from ..models.experience import ExperienceSnapshot
 from ..models.settings import AutoPotionSettings
+from .runtime_api import (
+    ControlCommand,
+    ControlStatus,
+    ExperienceControl,
+    ExperienceStatus,
+    InlineExecutor,
+    PotionControl,
+    PotionStatus,
+    SettingsUpdated,
+    Shutdown,
+    TargetWindowUpdated,
+    WorkerCrashed,
+    _experience_status_signature,
+    _potion_status_signature,
+    control_status_signature,
+)
 
 STATUS_HEARTBEAT_SECONDS = 1.0
 CONTROL_QUEUE_MAXSIZE = 256
-
-
-@dataclass(frozen=True)
-class SettingsUpdated:
-    settings_payload: dict[str, object]
-
-
-@dataclass(frozen=True)
-class TargetWindowUpdated:
-    hwnd: int
-
-
-@dataclass(frozen=True)
-class PotionControl:
-    enabled: bool
-    scripts_enabled: bool
-    challenge_paused: bool | None = None
-    emergency_stop: bool = False
-    release_all: bool = False
-    generation: int = 0
-
-
-@dataclass(frozen=True)
-class ExperienceControl:
-    enabled: bool
-    reset: bool = False
-    pause: bool = False
-    resume: bool = False
-    generation: int = 0
-
-
-@dataclass(frozen=True)
-class Shutdown:
-    pass
-
-
-@dataclass(frozen=True)
-class PotionStatus:
-    hp_percent: float | None
-    mp_percent: float | None
-    hp_debug: str
-    mp_debug: str
-    status: str
-    action: str
-    notice: str
-    trigger_interval_ms: float | None
-    console_lines: tuple[str, ...]
-    gameplay_hud_active: bool
-    scripts_enabled: bool
-    auto_drink_enabled: bool
-    hp_region: tuple[int, int, int, int] | None = None
-    mp_region: tuple[int, int, int, int] | None = None
-    hp_track_region: tuple[int, int, int, int] | None = None
-    mp_track_region: tuple[int, int, int, int] | None = None
-    media_sound_aliases: tuple[str, ...] = ()
-    potion_action_defer_until: float = 0.0
-    generation: int = 0
-
-
-@dataclass(frozen=True)
-class ControlCommand:
-    scripts_enabled: bool
-    gameplay_hud_active: bool
-    cruise_enabled: bool
-    action_blocked: bool = False
-    potion_action_defer_until: float = 0.0
-    challenge_paused: bool = False
-    release_all: bool = False
-    generation: int = 0
-    benchmark_deadline_interval_seconds: float = 0.0
-
-
-@dataclass(frozen=True)
-class ControlStatus:
-    generation: int
-    heartbeat_at: float
-    worker_state: str
-    cruise_enabled: bool
-    challenge_paused: bool
-    macro_status: str
-    held_keys: str
-    last_action: str
-    notice: str = ""
-    urgent_events: tuple[str, ...] = ()
-    console_lines: tuple[str, ...] = ()
-    timing_sample_count: int = 0
-    timing_p95_lateness_ms: float = 0.0
-    timing_max_lateness_ms: float = 0.0
-    held_vks: tuple[int, ...] = ()
-
-
-@dataclass(frozen=True)
-class ExperienceStatus:
-    snapshot: ExperienceSnapshot
-    status: str
-    debug_event: dict[str, object] | None = None
-    generation: int = 0
-
-
-@dataclass(frozen=True)
-class WorkerCrashed:
-    worker: str
-    message: str
-
-
-class InlineExecutor:
-    def submit(self, fn, *args, **kwargs):
-        future: Future = Future()
-        try:
-            future.set_result(fn(*args, **kwargs))
-        except BaseException as exc:
-            future.set_exception(exc)
-        return future
-
-    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
-        return
 
 
 class HeadlessRuntimeGui:
@@ -222,8 +121,17 @@ class HeadlessRuntimeGui:
 
 
 class RuntimeProcessCoordinator:
-    def __init__(self, settings: AutoPotionSettings, target_hwnd: int = 0) -> None:
+    def __init__(
+        self,
+        settings: AutoPotionSettings,
+        target_hwnd: int = 0,
+        *,
+        potion_worker_target: Callable[..., None],
+        experience_worker_target: Callable[..., None],
+    ) -> None:
         self._ctx = mp.get_context("spawn")
+        self._potion_worker_target = potion_worker_target
+        self._experience_worker_target = experience_worker_target
         self._potion_commands = self._ctx.Queue()
         self._potion_statuses = self._ctx.Queue()
         self._experience_commands = self._ctx.Queue()
@@ -235,7 +143,7 @@ class RuntimeProcessCoordinator:
         self._target_hwnd = int(target_hwnd or 0)
         self._potion_process = self._new_potion_process()
         self._experience_process = self._ctx.Process(
-            target=_run_experience_stats_process,
+            target=self._experience_worker_target,
             args=(self._experience_commands, self._experience_statuses, self._settings_payload, self._target_hwnd),
             name="MapleStarExperienceStats",
             daemon=True,
@@ -249,7 +157,7 @@ class RuntimeProcessCoordinator:
 
     def _new_potion_process(self) -> mp.Process:
         return self._ctx.Process(
-            target=_run_potion_runtime_process,
+            target=self._potion_worker_target,
             args=(self._potion_commands, self._potion_statuses, self._settings_payload, self._target_hwnd),
             name="MapleStarPotionRuntime",
             daemon=True,
@@ -479,124 +387,6 @@ def _is_target_hwnd_active(hwnd: int) -> bool:
     return is_target_window(foreground_hwnd)
 
 
-def _run_potion_runtime_process(command_queue, status_queue, settings_payload: dict[str, object], target_hwnd: int) -> None:
-    controller = None
-    try:
-        from ..controllers.auto_potion_controller import _create_auto_potion_controller
-
-        settings = _settings_from_payload(settings_payload)
-        settings.exp_efficiency_enabled = False
-        target_state = {"hwnd": int(target_hwnd or 0)}
-        gui = HeadlessRuntimeGui(settings)
-        controller = _create_auto_potion_controller(
-            lambda: _is_target_hwnd_active(target_state["hwnd"]),
-            settings=settings,
-            target_window_provider=lambda: target_state["hwnd"],
-            gui=gui,
-            start_control_hotkey_worker=False,
-            start_potion_action_worker=False,
-            experience_executor=InlineExecutor(),
-            runtime_processes_enabled=False,
-            save_settings_on_cleanup=False,
-        )
-        controller._save_settings_when_idle = lambda _now: None
-        controller._play_media_file = lambda _path, alias: gui.queue_media_sound(str(alias))
-        controller._play_toggle_beep = lambda *_args, **_kwargs: None
-        next_status_at = 0.0
-        next_heartbeat_at = 0.0
-        last_status_signature: tuple[object, ...] | None = None
-        generation = 0
-        shutdown = False
-        while not shutdown:
-            for command in _drain_queue(command_queue, 128):
-                if isinstance(command, Shutdown):
-                    shutdown = True
-                    break
-                if isinstance(command, PotionControl):
-                    generation = int(command.generation or 0)
-                _handle_potion_command(controller, gui, target_state, command)
-            now = time.monotonic()
-            if not shutdown:
-                controller.update(now, pump_gui=False)
-                if now >= next_status_at:
-                    status = _potion_status(controller, gui, generation)
-                    signature = _potion_status_signature(status)
-                    urgent = bool(status.notice or status.console_lines or status.media_sound_aliases)
-                    if urgent or signature != last_status_signature or now >= next_heartbeat_at:
-                        status_queue.put(status)
-                        last_status_signature = signature
-                        next_heartbeat_at = now + STATUS_HEARTBEAT_SECONDS
-                    next_status_at = now + 0.10
-            time.sleep(0.01)
-    except Exception as exc:
-        _report_worker_crash(status_queue, "potion", exc)
-    finally:
-        if controller is not None:
-            _run_child_cleanup_step("potion", "release potion keys", controller._release_all_potion_keys)
-            _run_child_cleanup_step("potion", "controller", controller.cleanup)
-
-
-def _run_experience_stats_process(command_queue, status_queue, settings_payload: dict[str, object], target_hwnd: int) -> None:
-    controller = None
-    try:
-        from ..controllers.auto_potion_controller import _create_auto_potion_controller
-
-        settings = _settings_from_payload(settings_payload)
-        target_state = {"hwnd": int(target_hwnd or 0)}
-        gui = HeadlessRuntimeGui(settings)
-        controller = _create_auto_potion_controller(
-            lambda: _is_target_hwnd_active(target_state["hwnd"]),
-            settings=settings,
-            target_window_provider=lambda: target_state["hwnd"],
-            gui=gui,
-            start_control_hotkey_worker=False,
-            start_potion_action_worker=False,
-            experience_executor=InlineExecutor(),
-            runtime_processes_enabled=False,
-            save_settings_on_cleanup=False,
-            experience_only_runtime=True,
-        )
-        controller.auto_drink_enabled = False
-        controller._save_settings_when_idle = lambda _now: None
-        controller._play_media_file = lambda *_args, **_kwargs: None
-        controller._play_toggle_beep = lambda *_args, **_kwargs: None
-        next_status_at = 0.0
-        next_heartbeat_at = 0.0
-        last_status_signature: tuple[object, ...] | None = None
-        generation = 0
-        shutdown = False
-        while not shutdown:
-            for command in _drain_queue(command_queue, 128):
-                if isinstance(command, Shutdown):
-                    shutdown = True
-                    break
-                if isinstance(command, ExperienceControl):
-                    generation = int(command.generation or 0)
-                _handle_experience_command(controller, target_state, command)
-            now = time.monotonic()
-            if not shutdown:
-                controller.update(now, pump_gui=False)
-                if now >= next_status_at:
-                    status = _experience_status(gui, generation)
-                    signature = _experience_status_signature(status)
-                    if signature != last_status_signature or now >= next_heartbeat_at:
-                        status_queue.put(status)
-                        last_status_signature = signature
-                        next_heartbeat_at = now + STATUS_HEARTBEAT_SECONDS
-                    next_status_at = now + 0.20
-            time.sleep(0.01)
-    except Exception as exc:
-        _report_worker_crash(status_queue, "experience", exc)
-    finally:
-        if controller is not None:
-            _run_child_cleanup_step(
-                "experience",
-                "cancel baseline calibration",
-                lambda: controller._cancel_experience_baseline_calibration(close_ui=True),
-            )
-            _run_child_cleanup_step("experience", "controller", controller.cleanup)
-
-
 def _run_child_cleanup_step(worker: str, label: str, action: Callable[[], None]) -> None:
     try:
         action()
@@ -740,107 +530,3 @@ def _potion_status(controller: Any, gui: HeadlessRuntimeGui, generation: int = 0
 
 def _experience_status(gui: HeadlessRuntimeGui, generation: int = 0) -> ExperienceStatus:
     return ExperienceStatus(gui.experience_snapshot, gui.status, generation=int(generation or 0))
-
-
-def _potion_status_signature(status: PotionStatus) -> tuple[object, ...]:
-    return (
-        _rounded_percent(status.hp_percent),
-        _rounded_percent(status.mp_percent),
-        _bar_debug_signature(status.hp_debug),
-        _bar_debug_signature(status.mp_debug),
-        status.status,
-        status.action,
-        status.gameplay_hud_active,
-        status.scripts_enabled,
-        status.auto_drink_enabled,
-        status.hp_region,
-        status.mp_region,
-        status.hp_track_region,
-        status.mp_track_region,
-        round(float(status.potion_action_defer_until or 0.0), 3),
-        int(status.generation or 0),
-    )
-
-
-def _bar_debug_signature(debug: str) -> tuple[str, ...]:
-    parts = [part.strip() for part in str(debug or "").split("|")]
-    return tuple(
-        part
-        for part in parts
-        if part
-        and not _is_percent_fragment(part)
-        and not _is_region_fragment(part)
-        and not part.startswith(("full=", "track=", "f=", "t="))
-    )
-
-
-def _is_percent_fragment(value: str) -> bool:
-    value = value.strip()
-    if not value.endswith("%"):
-        return False
-    try:
-        float(value[:-1])
-    except ValueError:
-        return False
-    return True
-
-
-def _is_region_fragment(value: str) -> bool:
-    parts = [part.strip() for part in value.split(",")]
-    if len(parts) != 4:
-        return False
-    try:
-        for part in parts:
-            int(part)
-    except ValueError:
-        return False
-    return True
-
-
-def _experience_status_signature(status: ExperienceStatus) -> tuple[object, ...]:
-    snapshot = status.snapshot
-    return (
-        snapshot.current_exp,
-        _rounded_percent(snapshot.current_percent),
-        snapshot.exp_10m_gain,
-        _rounded_float(snapshot.xp_per_5m),
-        _rounded_float(snapshot.xp_per_10m),
-        _rounded_float(snapshot.xp_per_hour),
-        _rounded_float(snapshot.eta_seconds),
-        _rounded_float(snapshot.elapsed_seconds),
-        snapshot.sample_count,
-        snapshot.sample_attempt_count,
-        snapshot.sample_accept_count,
-        _rounded_float(snapshot.sample_accept_rate),
-        _rounded_float(snapshot.rate_confidence),
-        snapshot.ocr_attempt_count,
-        snapshot.ocr_success_count,
-        _rounded_float(snapshot.ocr_success_rate),
-        snapshot.status,
-        status.status,
-        int(status.generation or 0),
-    )
-
-
-def control_status_signature(status: ControlStatus) -> tuple[object, ...]:
-    return (
-        int(status.generation),
-        status.worker_state,
-        bool(status.cruise_enabled),
-        bool(status.challenge_paused),
-        status.macro_status,
-        status.held_keys,
-        tuple(status.held_vks),
-        status.last_action,
-        int(status.timing_sample_count),
-        round(float(status.timing_p95_lateness_ms), 3),
-        round(float(status.timing_max_lateness_ms), 3),
-    )
-
-
-def _rounded_percent(value: float | None) -> float | None:
-    return None if value is None else round(float(value), 2)
-
-
-def _rounded_float(value: float | None) -> float | None:
-    return None if value is None else round(float(value), 3)
