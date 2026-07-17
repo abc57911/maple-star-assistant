@@ -7,12 +7,14 @@ from maple_star.services.minimap_cruise import (
     LEFT_DIRECTION_VK,
     MINIMAP_CRUISE_CONFIRM_TURN_INTERVAL_SECONDS,
     MINIMAP_CRUISE_DETECT_INTERVAL_SECONDS,
+    MINIMAP_CRUISE_FOREGROUND_RESUME_DELAY_SECONDS,
     MINIMAP_CRUISE_LIE_DETECTOR_ALERT_INTERVAL_SECONDS,
     MINIMAP_CRUISE_PRE_BOUNDARY_SKILL_HOLD_SECONDS,
     MINIMAP_CRUISE_RED_PLAYER_ALERT_AFTER_SECONDS,
     MINIMAP_CRUISE_RED_PLAYER_ALERT_INTERVAL_SECONDS,
     MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS,
     MINIMAP_CRUISE_STATIONARY_SKILL_POST_DELAY_SECONDS,
+    MINIMAP_CRUISE_STATIONARY_TRACKING_DELAY_SECONDS,
     MINIMAP_CRUISE_STATIONARY_TURN_SECONDS,
     MINIMAP_CRUISE_TURN_AFTER_ATTACK_RELEASE_DELAY_SECONDS,
     MINIMAP_CRUISE_TURN_KEY_HOLD_SECONDS,
@@ -264,7 +266,8 @@ class MinimapCruiseTests(unittest.TestCase):
         runtime.update(102.0)
         runtime.update(103.0)
 
-        self.assertEqual(events, [("tap", 0x56), ("down", 0x43), ("tap", 0x56)])
+        self.assertEqual(events, [("tap", 0x56), ("down", 0x43)])
+        self.assertEqual(runtime.periodic_key_next_at[1], 104.0)
 
     def test_periodic_key_countdown_continues_while_target_is_not_foreground(self):
         target_active = True
@@ -285,7 +288,45 @@ class MinimapCruiseTests(unittest.TestCase):
         target_active = True
         runtime.update(102.0)
 
+        self.assertEqual(events, [("down", 0x43), ("up", 0x43)])
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_SUSPENDED)
+
+        resume_at = 102.0 + MINIMAP_CRUISE_FOREGROUND_RESUME_DELAY_SECONDS
+        runtime.update(resume_at - 0.001)
+
+        self.assertEqual(events, [("down", 0x43), ("up", 0x43)])
+
+        runtime.update(resume_at)
+
         self.assertEqual(events, [("down", 0x43), ("up", 0x43), ("tap", 0x56), ("down", 0x43)])
+
+    def test_target_must_remain_foreground_for_full_resume_delay(self):
+        target_active = True
+        runtime, events, _statuses, _alerts = self.make_runtime([120, 124])
+        runtime.toggle(100.0)
+        runtime.update(100.0)
+
+        target_active = False
+        runtime.is_target_window_active = lambda: target_active
+        runtime.update(101.0)
+
+        target_active = True
+        runtime.update(102.0)
+        target_active = False
+        runtime.update(102.1)
+        target_active = True
+        runtime.update(102.2)
+        resume_at = 102.2 + MINIMAP_CRUISE_FOREGROUND_RESUME_DELAY_SECONDS
+        runtime.update(resume_at - 0.001)
+
+        self.assertEqual(events, [("down", 0x43), ("up", 0x43)])
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_SUSPENDED)
+
+        runtime.update(resume_at)
+
+        self.assertEqual(events, [("down", 0x43), ("up", 0x43), ("down", 0x43)])
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
+        self.assertEqual(runtime.stationary_started_at, resume_at)
 
     def test_periodic_keys_wait_while_potion_action_has_priority(self):
         defer_potion = True
@@ -326,16 +367,18 @@ class MinimapCruiseTests(unittest.TestCase):
             ],
         )
 
-    def test_stationary_skill_resumes_attack_immediately_but_starts_tracking_after_post_delay(self):
-        runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 150, 150, 150])
+    def test_stationary_skill_resumes_attack_before_tracking_delay_ends(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 150, 150, 150, 150, 150])
         runtime.settings.minimap_cruise_stationary_skill_key = "V"
         self.assertEqual(MINIMAP_CRUISE_STATIONARY_SKILL_POST_DELAY_SECONDS, 0.2)
+        self.assertEqual(MINIMAP_CRUISE_STATIONARY_TRACKING_DELAY_SECONDS, 0.5)
 
         runtime.toggle(100.0)
         runtime.update(100.0)
         skill_started_at = 100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
         skill_ended_at = skill_started_at + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS
         post_delay_ended_at = skill_ended_at + MINIMAP_CRUISE_STATIONARY_SKILL_POST_DELAY_SECONDS
+        tracking_delay_ended_at = skill_ended_at + MINIMAP_CRUISE_STATIONARY_TRACKING_DELAY_SECONDS
         runtime.update(skill_started_at)
 
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STATIONARY_SKILL)
@@ -349,8 +392,9 @@ class MinimapCruiseTests(unittest.TestCase):
 
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STATIONARY_SKILL)
         self.assertEqual(runtime.stationary_skill_held_vk, 0)
-        self.assertEqual(runtime.attack_held_vk, 0x43)
+        self.assertEqual(runtime.attack_held_vk, 0)
         self.assertEqual(runtime.stationary_skill_post_delay_until, post_delay_ended_at)
+        self.assertEqual(runtime.stationary_tracking_delay_until, tracking_delay_ended_at)
         self.assertIsNone(runtime.stationary_x)
         self.assertIsNone(runtime.stationary_started_at)
         self.assertEqual(
@@ -360,7 +404,6 @@ class MinimapCruiseTests(unittest.TestCase):
                 ("up", 0x43),
                 ("down", 0x56),
                 ("up", 0x56),
-                ("down", 0x43),
             ],
         )
 
@@ -374,10 +417,24 @@ class MinimapCruiseTests(unittest.TestCase):
 
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
         self.assertIsNone(runtime.stationary_skill_post_delay_until)
-        self.assertEqual(runtime.stationary_x, 150)
-        self.assertEqual(runtime.stationary_started_at, post_delay_ended_at)
+        self.assertEqual(runtime.attack_held_vk, 0x43)
+        self.assertIsNone(runtime.stationary_x)
+        self.assertIsNone(runtime.stationary_started_at)
+        self.assertEqual(events[-1], ("down", 0x43))
 
-        runtime.update(post_delay_ended_at + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS - 0.001)
+        runtime.update(tracking_delay_ended_at - 0.001)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
+        self.assertEqual(runtime.turn_direction_vk, 0)
+        self.assertIsNone(runtime.stationary_started_at)
+
+        runtime.update(tracking_delay_ended_at)
+
+        self.assertIsNone(runtime.stationary_tracking_delay_until)
+        self.assertEqual(runtime.stationary_x, 150)
+        self.assertEqual(runtime.stationary_started_at, tracking_delay_ended_at)
+
+        runtime.update(tracking_delay_ended_at + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS - 0.001)
 
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
         self.assertEqual(runtime.turn_direction_vk, 0)
@@ -467,18 +524,19 @@ class MinimapCruiseTests(unittest.TestCase):
         runtime.update(skill_started_at)
         runtime.update(skill_ended_at)
 
-        self.assertEqual(runtime.attack_held_vk, 0x43)
-        self.assertEqual(events[-1], ("down", 0x43))
+        self.assertEqual(runtime.attack_held_vk, 0)
+        self.assertEqual(events[-1], ("up", 0x56))
 
         runtime.update(skill_ended_at + MINIMAP_CRUISE_STATIONARY_SKILL_POST_DELAY_SECONDS)
 
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_TURNING)
         self.assertEqual(runtime.attack_held_vk, 0)
         self.assertEqual(runtime.turn_direction_vk, LEFT_DIRECTION_VK)
-        self.assertEqual(events[-2:], [("up", 0x43), ("down", LEFT_DIRECTION_VK)])
+        self.assertIsNone(runtime.stationary_tracking_delay_until)
+        self.assertEqual(events[-2:], [("up", 0x56), ("down", LEFT_DIRECTION_VK)])
 
     def test_stationary_skill_uses_post_delay_position_when_returning_in_bounds(self):
-        runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 205, 190])
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 205, 190, 190])
         runtime.settings.minimap_cruise_stationary_skill_key = "V"
 
         runtime.toggle(100.0)
@@ -486,6 +544,7 @@ class MinimapCruiseTests(unittest.TestCase):
         skill_started_at = 100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
         skill_ended_at = skill_started_at + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS
         post_delay_ended_at = skill_ended_at + MINIMAP_CRUISE_STATIONARY_SKILL_POST_DELAY_SECONDS
+        tracking_delay_ended_at = skill_ended_at + MINIMAP_CRUISE_STATIONARY_TRACKING_DELAY_SECONDS
         runtime.update(skill_started_at)
         runtime.update(skill_ended_at)
 
@@ -497,9 +556,14 @@ class MinimapCruiseTests(unittest.TestCase):
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
         self.assertEqual(runtime.attack_held_vk, 0x43)
         self.assertEqual(runtime.turn_direction_vk, 0)
-        self.assertEqual(runtime.stationary_x, 190)
-        self.assertEqual(runtime.stationary_started_at, post_delay_ended_at)
+        self.assertIsNone(runtime.stationary_x)
+        self.assertIsNone(runtime.stationary_started_at)
         self.assertEqual(events[-1], ("down", 0x43))
+
+        runtime.update(tracking_delay_ended_at)
+
+        self.assertEqual(runtime.stationary_x, 190)
+        self.assertEqual(runtime.stationary_started_at, tracking_delay_ended_at)
 
     def test_stationary_skill_suspends_when_release_position_is_missing(self):
         runtime, events, statuses, _alerts = self.make_runtime([150, 150, None])
@@ -533,8 +597,9 @@ class MinimapCruiseTests(unittest.TestCase):
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_SUSPENDED)
         self.assertEqual(runtime.attack_held_vk, 0)
         self.assertIsNone(runtime.stationary_skill_post_delay_until)
+        self.assertIsNone(runtime.stationary_tracking_delay_until)
         self.assertEqual(statuses[-1], "小地圖巡航：找不到角色點")
-        self.assertEqual(events[-2:], [("down", 0x43), ("up", 0x43)])
+        self.assertEqual(events[-2:], [("down", 0x56), ("up", 0x56)])
 
     def test_stop_during_stationary_skill_post_delay_clears_deadline(self):
         runtime, events, _statuses, _alerts = self.make_runtime([150, 150, 150])
@@ -547,13 +612,15 @@ class MinimapCruiseTests(unittest.TestCase):
         runtime.update(skill_started_at + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS)
 
         self.assertIsNotNone(runtime.stationary_skill_post_delay_until)
-        self.assertEqual(runtime.attack_held_vk, 0x43)
+        self.assertIsNotNone(runtime.stationary_tracking_delay_until)
+        self.assertEqual(runtime.attack_held_vk, 0)
 
         runtime.stop()
 
         self.assertIsNone(runtime.stationary_skill_post_delay_until)
+        self.assertIsNone(runtime.stationary_tracking_delay_until)
         self.assertEqual(runtime.attack_held_vk, 0)
-        self.assertEqual(events[-1], ("up", 0x43))
+        self.assertEqual(events[-1], ("up", 0x56))
 
     def test_lie_detector_during_stationary_skill_post_delay_clears_deadline(self):
         loaded = load_lie_detector_bomb_template()
@@ -578,7 +645,8 @@ class MinimapCruiseTests(unittest.TestCase):
         runtime.update(skill_ended_at)
 
         self.assertIsNotNone(runtime.stationary_skill_post_delay_until)
-        self.assertEqual(runtime.attack_held_vk, 0x43)
+        self.assertIsNotNone(runtime.stationary_tracking_delay_until)
+        self.assertEqual(runtime.attack_held_vk, 0)
 
         alert_at = skill_ended_at + 0.1
         runtime.next_lie_detector_check_at = alert_at
@@ -587,119 +655,93 @@ class MinimapCruiseTests(unittest.TestCase):
         self.assertTrue(runtime.enabled)
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_LIE_DETECTOR)
         self.assertIsNone(runtime.stationary_skill_post_delay_until)
+        self.assertIsNone(runtime.stationary_tracking_delay_until)
         self.assertEqual(runtime.attack_held_vk, 0)
-        self.assertEqual(events[-1], ("up", 0x43))
+        self.assertEqual(events[-1], ("up", 0x56))
         self.assertEqual(alerts, [alert_at])
 
-    def test_stationary_tracking_restarts_after_one_pixel_forward_progress(self):
-        runtime, events, _statuses, _alerts = self.make_runtime([150, 151, 151, 151])
+    def test_stationary_tracking_uses_skill_when_forward_progress_does_not_exceed_threshold(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 151, 153])
+        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+        runtime.settings.minimap_cruise_stationary_min_forward_pixels = 3
 
         runtime.toggle(100.0)
         runtime.update(100.0)
-        runtime.update(100.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS - 0.001)
-        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
-        self.assertEqual(events, [("down", 0x43)])
+        runtime.update(100.2)
+        runtime.update(101.0)
 
-        runtime.update(
-            100.0
-            + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS
-            + MINIMAP_CRUISE_DETECT_INTERVAL_SECONDS
-        )
-
-        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
-        self.assertEqual(runtime.turn_direction_vk, 0)
-        self.assertEqual(events, [("down", 0x43)])
-
-        runtime.update(102.0)
-
-        self.assertEqual(runtime.current_direction, "left")
-        self.assertEqual(runtime.turn_direction_vk, LEFT_DIRECTION_VK)
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STATIONARY_SKILL)
         self.assertEqual(
             events,
             [
                 ("down", 0x43),
                 ("up", 0x43),
-                ("down", LEFT_DIRECTION_VK),
+                ("down", 0x56),
             ],
         )
 
-    def test_stationary_tracking_treats_rightward_bounce_progress_as_movement(self):
-        runtime, events, _statuses, _alerts = self.make_runtime([150, 151, 150, 151, 150])
+    def test_stationary_tracking_restarts_after_forward_progress_exceeds_threshold(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 151, 154, 154, 154])
+        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+        runtime.settings.minimap_cruise_stationary_min_forward_pixels = 3
 
         runtime.toggle(100.0)
         runtime.update(100.0)
         runtime.update(100.2)
-        runtime.update(100.4)
-        runtime.update(100.6)
-        runtime.update(101.3)
+        runtime.update(101.0)
+        runtime.update(101.999)
 
         self.assertEqual(runtime.current_direction, "right")
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
-        self.assertEqual(runtime.turn_direction_vk, 0)
+        self.assertEqual(runtime.stationary_started_at, 101.0)
         self.assertEqual(events, [("down", 0x43)])
 
-    def test_stationary_tracking_treats_leftward_bounce_progress_as_movement(self):
-        runtime, events, _statuses, _alerts = self.make_runtime([160, 159, 160, 159, 160])
+        runtime.update(102.2)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STATIONARY_SKILL)
+        self.assertEqual(events[-2:], [("up", 0x43), ("down", 0x56)])
+
+    def test_stationary_tracking_rightward_knockback_resets_timer(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([150, 152, 150, 150, 150])
+        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+        runtime.settings.minimap_cruise_stationary_min_forward_pixels = 3
 
         runtime.toggle(100.0)
         runtime.update(100.0)
         runtime.update(100.2)
         runtime.update(100.4)
-        runtime.update(100.6)
-        runtime.update(101.3)
+        runtime.update(101.0)
 
-        self.assertEqual(runtime.current_direction, "left")
+        self.assertEqual(runtime.current_direction, "right")
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
-        self.assertEqual(runtime.turn_direction_vk, 0)
+        self.assertEqual(runtime.stationary_started_at, 100.4)
         self.assertEqual(events, [("down", 0x43)])
 
-    def test_stationary_tracking_does_not_count_only_backward_movement_as_progress(self):
-        runtime, events, _statuses, _alerts = self.make_runtime([150, 149, 148])
+        runtime.update(101.4)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STATIONARY_SKILL)
+        self.assertEqual(events[-2:], [("up", 0x43), ("down", 0x56)])
+
+    def test_stationary_tracking_leftward_knockback_resets_timer(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([160, 158, 160, 160, 160])
+        runtime.settings.minimap_cruise_stationary_skill_key = "V"
+        runtime.settings.minimap_cruise_stationary_min_forward_pixels = 3
 
         runtime.toggle(100.0)
         runtime.update(100.0)
         runtime.update(100.2)
+        runtime.update(100.4)
         runtime.update(101.0)
 
         self.assertEqual(runtime.current_direction, "left")
-        self.assertEqual(runtime.turn_direction_vk, LEFT_DIRECTION_VK)
-        self.assertEqual(
-            events,
-            [
-                ("down", 0x43),
-                ("up", 0x43),
-                ("down", LEFT_DIRECTION_VK),
-            ],
-        )
-
-    def test_stationary_tracking_restarts_after_larger_forward_progress(self):
-        runtime, events, _statuses, _alerts = self.make_runtime([150, 153, 153, 153])
-
-        runtime.toggle(100.0)
-        runtime.update(100.0)
-        runtime.update(101.0)
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
+        self.assertEqual(runtime.stationary_started_at, 100.4)
         self.assertEqual(events, [("down", 0x43)])
 
-        runtime.update(101.0 + MINIMAP_CRUISE_STATIONARY_TURN_SECONDS - 0.001)
+        runtime.update(101.4)
 
-        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_ATTACKING)
-        self.assertEqual(runtime.turn_direction_vk, 0)
-        self.assertEqual(runtime.stationary_x, 153)
-        self.assertEqual(events, [("down", 0x43)])
-
-        runtime.update(103.0)
-
-        self.assertEqual(runtime.current_direction, "left")
-        self.assertEqual(runtime.turn_direction_vk, LEFT_DIRECTION_VK)
-        self.assertEqual(
-            events,
-            [
-                ("down", 0x43),
-                ("up", 0x43),
-                ("down", LEFT_DIRECTION_VK),
-            ],
-        )
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STATIONARY_SKILL)
+        self.assertEqual(events[-2:], [("up", 0x43), ("down", 0x56)])
 
     def test_reaching_right_boundary_releases_attack_holds_left_before_resuming_attack(self):
         runtime, events, _statuses, _alerts = self.make_runtime([199])

@@ -47,9 +47,11 @@ from ..models.settings import (
     COMBO_SCRIPT_REPEATING_JUMP_SKILL,
     COMBO_SCRIPT_SINGLE_JUMP_SKILL,
     MINIMAP_CRUISE_MAX_PRE_BOUNDARY_SKILL_DISTANCE,
+    MINIMAP_CRUISE_MAX_STATIONARY_MIN_FORWARD_PIXELS,
     MINIMAP_CRUISE_MAX_ALERT_VOLUME_PERCENT,
     MINIMAP_CRUISE_MAX_PERIODIC_KEY_INTERVAL_SECONDS,
     MINIMAP_CRUISE_MIN_PRE_BOUNDARY_SKILL_DISTANCE,
+    MINIMAP_CRUISE_MIN_STATIONARY_MIN_FORWARD_PIXELS,
     MINIMAP_CRUISE_MIN_ALERT_VOLUME_PERCENT,
     MINIMAP_CRUISE_MIN_PERIODIC_KEY_INTERVAL_SECONDS,
     copy_setting_values,
@@ -368,6 +370,9 @@ class AutoPotionSettingsGui:
             value=f"{settings.minimap_cruise_pre_boundary_distance:g}"
         )
         self.minimap_cruise_stationary_skill_key = tk.StringVar(value=settings.minimap_cruise_stationary_skill_key)
+        self.minimap_cruise_stationary_min_forward_pixels = tk.StringVar(
+            value=f"{settings.minimap_cruise_stationary_min_forward_pixels:g}"
+        )
         self.minimap_cruise_lie_detector_alert_volume = tk.StringVar(
             value=f"{settings.minimap_cruise_lie_detector_alert_volume_percent:g}"
         )
@@ -982,6 +987,14 @@ class AutoPotionSettingsGui:
                 "巡航原地位移技",
             ),
         )
+        self._label(skill_frame, "1秒前進門檻").grid(row=1, column=3, sticky="w", padx=(8, 4), pady=6)
+        self._entry(
+            skill_frame,
+            self.minimap_cruise_stationary_min_forward_pixels,
+            width=56,
+            justify="center",
+        ).grid(row=1, column=4, sticky="w", padx=(0, 4), pady=6)
+        self._label(skill_frame, "px").grid(row=1, column=5, sticky="w", padx=(0, 8), pady=6)
 
         periodic_section, _periodic_header, periodic_frame = self._build_section(
             parent,
@@ -2550,6 +2563,9 @@ class AutoPotionSettingsGui:
         self.minimap_cruise_pre_boundary_skill_key.set(self.settings.minimap_cruise_pre_boundary_skill_key)
         self.minimap_cruise_pre_boundary_distance.set(f"{self.settings.minimap_cruise_pre_boundary_distance:g}")
         self.minimap_cruise_stationary_skill_key.set(self.settings.minimap_cruise_stationary_skill_key)
+        self.minimap_cruise_stationary_min_forward_pixels.set(
+            f"{self.settings.minimap_cruise_stationary_min_forward_pixels:g}"
+        )
         periodic_enabled = (
             self.settings.minimap_cruise_periodic_key_1_enabled,
             self.settings.minimap_cruise_periodic_key_2_enabled,
@@ -3109,6 +3125,20 @@ class AutoPotionSettingsGui:
         minimap_stationary_skill_key = getattr(self, "minimap_cruise_stationary_skill_key", None)
         if minimap_stationary_skill_key is not None:
             self.settings.minimap_cruise_stationary_skill_key = minimap_stationary_skill_key.get().strip()
+        minimap_stationary_min_forward_pixels = getattr(
+            self,
+            "minimap_cruise_stationary_min_forward_pixels",
+            None,
+        )
+        if minimap_stationary_min_forward_pixels is not None:
+            min_forward_pixels = self._read_int_text(
+                minimap_stationary_min_forward_pixels,
+                self.settings.minimap_cruise_stationary_min_forward_pixels,
+                MINIMAP_CRUISE_MIN_STATIONARY_MIN_FORWARD_PIXELS,
+                MINIMAP_CRUISE_MAX_STATIONARY_MIN_FORWARD_PIXELS,
+            )
+            self.settings.minimap_cruise_stationary_min_forward_pixels = min_forward_pixels
+            minimap_stationary_min_forward_pixels.set(str(min_forward_pixels))
         minimap_lie_detector_alert_volume = getattr(self, "minimap_cruise_lie_detector_alert_volume", None)
         if minimap_lie_detector_alert_volume is not None:
             volume = self._read_int_text(

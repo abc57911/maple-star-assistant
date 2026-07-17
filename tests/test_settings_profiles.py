@@ -12,6 +12,7 @@ from maple_star.constants import (
 from maple_star.settings import (
     AutoPotionSettings,
     MINIMAP_CRUISE_DEFAULT_LIE_DETECTOR_ALERT_VOLUME_PERCENT,
+    MINIMAP_CRUISE_DEFAULT_STATIONARY_MIN_FORWARD_PIXELS,
     load_settings,
 )
 
@@ -50,6 +51,10 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertFalse(settings.minimap_cruise_pre_boundary_skill_enabled)
         self.assertEqual(settings.minimap_cruise_pre_boundary_skill_key, "")
         self.assertEqual(settings.minimap_cruise_pre_boundary_distance, 20)
+        self.assertEqual(
+            settings.minimap_cruise_stationary_min_forward_pixels,
+            MINIMAP_CRUISE_DEFAULT_STATIONARY_MIN_FORWARD_PIXELS,
+        )
         self.assertEqual(
             settings.minimap_cruise_lie_detector_alert_volume_percent,
             MINIMAP_CRUISE_DEFAULT_LIE_DETECTOR_ALERT_VOLUME_PERCENT,
@@ -97,6 +102,10 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertFalse(saved["minimap_cruise_pre_boundary_skill_enabled"])
         self.assertEqual(saved["minimap_cruise_pre_boundary_skill_key"], "")
         self.assertEqual(saved["minimap_cruise_pre_boundary_distance"], 20)
+        self.assertEqual(
+            saved["minimap_cruise_stationary_min_forward_pixels"],
+            MINIMAP_CRUISE_DEFAULT_STATIONARY_MIN_FORWARD_PIXELS,
+        )
         self.assertEqual(
             saved["minimap_cruise_lie_detector_alert_volume_percent"],
             MINIMAP_CRUISE_DEFAULT_LIE_DETECTOR_ALERT_VOLUME_PERCENT,
@@ -234,6 +243,7 @@ class SettingsProfileTests(unittest.TestCase):
                         "minimap_cruise_pre_boundary_skill_key": "V",
                         "minimap_cruise_pre_boundary_distance": 999,
                         "minimap_cruise_stationary_skill_key": "B",
+                        "minimap_cruise_stationary_min_forward_pixels": 999,
                         "minimap_cruise_lie_detector_alert_volume_percent": 150,
                         "minimap_cruise_periodic_key_1_enabled": True,
                         "minimap_cruise_periodic_key_1": "A",
@@ -261,6 +271,7 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(settings.minimap_cruise_pre_boundary_skill_key, "V")
         self.assertEqual(settings.minimap_cruise_pre_boundary_distance, 500)
         self.assertEqual(settings.minimap_cruise_stationary_skill_key, "B")
+        self.assertEqual(settings.minimap_cruise_stationary_min_forward_pixels, 500)
         self.assertEqual(settings.minimap_cruise_lie_detector_alert_volume_percent, 100)
         self.assertTrue(settings.minimap_cruise_periodic_key_1_enabled)
         self.assertEqual(settings.minimap_cruise_periodic_key_1, "A")
@@ -288,6 +299,7 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(saved["minimap_cruise_pre_boundary_skill_key"], "V")
         self.assertEqual(saved["minimap_cruise_pre_boundary_distance"], 500)
         self.assertEqual(saved["minimap_cruise_stationary_skill_key"], "B")
+        self.assertEqual(saved["minimap_cruise_stationary_min_forward_pixels"], 500)
         self.assertEqual(saved["minimap_cruise_lie_detector_alert_volume_percent"], 100)
         self.assertTrue(saved["minimap_cruise_periodic_key_1_enabled"])
         self.assertEqual(saved["minimap_cruise_periodic_key_1"], "A")
@@ -311,6 +323,7 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertNotIn("minimap_cruise_pre_boundary_skill_key", saved["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_pre_boundary_distance", saved["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_stationary_skill_key", saved["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_stationary_min_forward_pixels", saved["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_lie_detector_alert_volume_percent", saved["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_periodic_key_1_enabled", saved["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_periodic_key_1", saved["profiles"]["Default"])
@@ -397,6 +410,7 @@ class SettingsProfileTests(unittest.TestCase):
             minimap_cruise_pre_boundary_skill_key="V",
             minimap_cruise_pre_boundary_distance=24,
             minimap_cruise_stationary_skill_key="B",
+            minimap_cruise_stationary_min_forward_pixels=7,
             minimap_cruise_lie_detector_alert_volume_percent=35,
             minimap_cruise_periodic_key_1_enabled=True,
             minimap_cruise_periodic_key_1="A",
@@ -443,6 +457,7 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertEqual(payload["minimap_cruise_pre_boundary_skill_key"], "V")
         self.assertEqual(payload["minimap_cruise_pre_boundary_distance"], 24)
         self.assertEqual(payload["minimap_cruise_stationary_skill_key"], "B")
+        self.assertEqual(payload["minimap_cruise_stationary_min_forward_pixels"], 7)
         self.assertEqual(payload["minimap_cruise_lie_detector_alert_volume_percent"], 35)
         self.assertTrue(payload["minimap_cruise_periodic_key_1_enabled"])
         self.assertEqual(payload["minimap_cruise_periodic_key_1"], "A")
@@ -490,6 +505,7 @@ class SettingsProfileTests(unittest.TestCase):
         self.assertNotIn("minimap_cruise_pre_boundary_skill_key", payload["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_pre_boundary_distance", payload["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_stationary_skill_key", payload["profiles"]["Default"])
+        self.assertNotIn("minimap_cruise_stationary_min_forward_pixels", payload["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_periodic_key_1_enabled", payload["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_periodic_key_1", payload["profiles"]["Default"])
         self.assertNotIn("minimap_cruise_periodic_key_1_interval_seconds", payload["profiles"]["Default"])

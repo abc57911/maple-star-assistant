@@ -32,6 +32,8 @@ MINIMAP_CRUISE_RED_PLAYER_ALERT_INTERVAL_SECONDS = 1.0
 MINIMAP_CRUISE_PRE_BOUNDARY_SKILL_HOLD_SECONDS = 2.0
 MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS = 0.8
 MINIMAP_CRUISE_STATIONARY_SKILL_POST_DELAY_SECONDS = 0.2
+MINIMAP_CRUISE_STATIONARY_TRACKING_DELAY_SECONDS = 0.5
+MINIMAP_CRUISE_FOREGROUND_RESUME_DELAY_SECONDS = 0.2
 MINIMAP_CRUISE_OUT_OF_BOUNDS_RECOVERY_INTERVAL_SECONDS = 0.5
 MINIMAP_CRUISE_RECOVERY_STUCK_CONFIRMATIONS = 2
 MINIMAP_CRUISE_PERIODIC_KEY_TAP_SPACING_SECONDS = 1.0
@@ -83,6 +85,7 @@ class MinimapCruiseRuntime:
     next_detect_at: float = 0.0
     last_detected_x: int | None = None
     stationary_x: int | None = None
+    stationary_last_x: int | None = None
     stationary_started_at: float | None = None
     consecutive_detection_failures: int = 0
     last_message: str = ""
@@ -105,6 +108,8 @@ class MinimapCruiseRuntime:
     stationary_skill_held_vk: int = 0
     stationary_skill_key_up_at: float | None = None
     stationary_skill_post_delay_until: float | None = None
+    stationary_tracking_delay_until: float | None = None
+    foreground_resume_at: float | None = None
     recovery_boundary: str | None = None
     recovery_last_x: int | None = None
     recovery_direction_vk: int = 0
@@ -141,6 +146,7 @@ class MinimapCruiseRuntime:
         self.red_player_present_since = None
         self.red_player_alert_active = False
         self.pre_boundary_skill_triggered_boundary = None
+        self.foreground_resume_at = None
         self._reset_periodic_key_schedule(now)
         self._reset_stationary_tracking()
         self.consecutive_detection_failures = 0
@@ -161,6 +167,7 @@ class MinimapCruiseRuntime:
         self._cancel_recovery()
         self._release_attack_key()
         self._reset_stationary_tracking()
+        self.foreground_resume_at = None
         self.next_lie_detector_alert_at = 0.0
         self.pre_boundary_skill_triggered_boundary = None
         self._clear_periodic_key_schedule()
@@ -178,6 +185,9 @@ class MinimapCruiseRuntime:
 
         if not self._can_send_actions():
             self._suspend("小地圖巡航暫停")
+            return
+
+        if self.status == MINIMAP_CRUISE_STATUS_SUSPENDED and not self._foreground_is_stable_for_resume(now):
             return
 
         self._update_red_player_alert(now)
@@ -301,9 +311,20 @@ class MinimapCruiseRuntime:
         self._cancel_recovery()
         self._release_attack_key()
         self._reset_stationary_tracking()
+        self.foreground_resume_at = None
         self.status = MINIMAP_CRUISE_STATUS_SUSPENDED
         self.last_message = message
         self._report_status(message)
+
+    def _foreground_is_stable_for_resume(self, now: float) -> bool:
+        if self.foreground_resume_at is None:
+            self.foreground_resume_at = now + MINIMAP_CRUISE_FOREGROUND_RESUME_DELAY_SECONDS
+            return False
+        if now + 1e-9 < self.foreground_resume_at:
+            return False
+        self.foreground_resume_at = None
+        self.next_detect_at = now
+        return True
 
     def _block_for_lie_detector(self, now: float) -> None:
         if not self.lie_detector_challenge_active:
@@ -763,8 +784,9 @@ class MinimapCruiseRuntime:
             self.stationary_skill_post_delay_until = (
                 now + MINIMAP_CRUISE_STATIONARY_SKILL_POST_DELAY_SECONDS
             )
-            if self._direction_toward_bounds_if_outside(character_x) is None:
-                self._hold_attack_key()
+            self.stationary_tracking_delay_until = (
+                now + MINIMAP_CRUISE_STATIONARY_TRACKING_DELAY_SECONDS
+            )
             return
 
         if self.stationary_skill_post_delay_until is None:
@@ -785,7 +807,6 @@ class MinimapCruiseRuntime:
             )
             return
 
-        self._update_stationary_tracking(character_x, now)
         if not self._hold_attack_key():
             return
         self.status = MINIMAP_CRUISE_STATUS_ATTACKING
@@ -814,6 +835,7 @@ class MinimapCruiseRuntime:
     def _cancel_stationary_skill(self) -> None:
         self._release_stationary_skill_key()
         self.stationary_skill_post_delay_until = None
+        self.stationary_tracking_delay_until = None
 
     def _release_stationary_skill_key(self) -> None:
         held_vk = self.stationary_skill_held_vk
@@ -891,18 +913,42 @@ class MinimapCruiseRuntime:
         self.recovery_stuck_confirmations = 0
 
     def _update_stationary_tracking(self, character_x: int, now: float) -> None:
-        previous_x = self.stationary_x
-        self.stationary_x = character_x
-        if previous_x is None:
+        if self.stationary_tracking_delay_until is not None:
+            if now + 1e-9 < self.stationary_tracking_delay_until:
+                self.next_detect_at = min(self.next_detect_at, self.stationary_tracking_delay_until)
+                return
+            self.stationary_tracking_delay_until = None
+
+        anchor_x = self.stationary_x
+        previous_x = self.stationary_last_x
+        self.stationary_last_x = character_x
+        if anchor_x is None or previous_x is None:
+            self.stationary_x = character_x
             self.stationary_started_at = now
             return
 
-        displacement = character_x - previous_x
-        moving_forward = displacement > 0 if self.current_direction == "right" else displacement < 0
-        if moving_forward:
+        adjacent_displacement = character_x - previous_x
+        knocked_backward = (
+            adjacent_displacement < 0
+            if self.current_direction == "right"
+            else adjacent_displacement > 0
+        )
+        if knocked_backward:
+            self.stationary_x = character_x
+            self.stationary_started_at = now
+            return
+
+        forward_progress = (
+            character_x - anchor_x
+            if self.current_direction == "right"
+            else anchor_x - character_x
+        )
+        if forward_progress > self.settings.minimap_cruise_stationary_min_forward_pixels:
+            self.stationary_x = character_x
             self.stationary_started_at = now
             return
         if self.stationary_started_at is None:
+            self.stationary_x = character_x
             self.stationary_started_at = now
 
     def _stationary_too_long(self, now: float) -> bool:
@@ -914,7 +960,9 @@ class MinimapCruiseRuntime:
 
     def _reset_stationary_tracking(self) -> None:
         self.stationary_x = None
+        self.stationary_last_x = None
         self.stationary_started_at = None
+        self.stationary_tracking_delay_until = None
 
     def _begin_turn(self, next_direction: str, boundary: str | None, now: float) -> None:
         self._reset_stationary_tracking()
