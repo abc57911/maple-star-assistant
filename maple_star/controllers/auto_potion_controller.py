@@ -7591,52 +7591,113 @@ class AutoPotionController:
         return origin.x, origin.y, client_width, client_height
 
     def cleanup(self) -> None:
-        self._release_pickup_key()
-        self._release_all_potion_keys()
-        runtime = getattr(self, "runtime_processes", None)
-        if runtime is not None:
-            runtime.stop()
-            self.runtime_processes = None
-        self._unregister_toggle_hotkey()
-        worker = getattr(self, "control_hotkey_worker", None)
-        if worker is not None:
-            worker.stop()
-        potion_worker = getattr(self, "potion_action_worker", None)
-        if potion_worker is not None:
-            potion_worker.stop()
-        mouse_observer = getattr(self, "mouse_activity_observer", None)
-        if mouse_observer is not None:
-            stop_mouse_observer = getattr(mouse_observer, "stop", None)
-            if callable(stop_mouse_observer):
-                stop_mouse_observer()
-            self.mouse_activity_observer = None
-        self._close_media_files()
-        direct_capture_context = getattr(self, "direct_bar_capture_context", None)
-        if direct_capture_context is not None:
-            try:
-                direct_capture_context.close()
-            except Exception:
-                pass
-        try:
-            self.experience_ocr_executor.shutdown(wait=False, cancel_futures=True)
-        except Exception:
-            pass
-        if getattr(self, "save_settings_on_cleanup", True):
-            try:
-                save_settings(self.settings)
-            except Exception as exc:
-                print(f"儲存設定失敗：{exc}")
-        try:
-            self.sct.close()
-        except Exception:
-            pass
-        if not self.gui.closed:
-            self.gui.close()
-        if self.original_stdout is not None:
-            sys.stdout = self.original_stdout
-        if self.original_stderr is not None:
-            sys.stderr = self.original_stderr
+        if getattr(self, "_cleanup_in_progress", False) or getattr(self, "_cleanup_completed", False):
+            return
+        self._cleanup_in_progress = True
+        completed_steps = getattr(self, "_cleanup_completed_steps", set())
+        self._cleanup_completed_steps = completed_steps
 
+        def stop_runtime_processes() -> None:
+            runtime = getattr(self, "runtime_processes", None)
+            if runtime is not None:
+                runtime.stop()
+                self.runtime_processes = None
+
+        def stop_control_hotkey_worker() -> None:
+            worker = getattr(self, "control_hotkey_worker", None)
+            if worker is not None:
+                worker.stop()
+
+        def stop_potion_action_worker() -> None:
+            worker = getattr(self, "potion_action_worker", None)
+            if worker is not None:
+                worker.stop()
+
+        def stop_mouse_activity_observer() -> None:
+            observer = getattr(self, "mouse_activity_observer", None)
+            stop = getattr(observer, "stop", None)
+            if callable(stop):
+                stop()
+            self.mouse_activity_observer = None
+
+        def close_direct_capture() -> None:
+            context = getattr(self, "direct_bar_capture_context", None)
+            if context is not None:
+                context.close()
+
+        def shutdown_experience_executor() -> None:
+            executor = getattr(self, "experience_ocr_executor", None)
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+        def save_current_settings() -> None:
+            if (
+                getattr(self, "_initialization_completed", True)
+                and getattr(self, "save_settings_on_cleanup", True)
+                and hasattr(self, "settings")
+            ):
+                save_settings(self.settings)
+
+        def close_mss_capture() -> None:
+            capture = getattr(self, "sct", None)
+            if capture is not None:
+                capture.close()
+
+        def close_gui() -> None:
+            gui = getattr(self, "gui", None)
+            if gui is not None and not gui.closed:
+                gui.close()
+
+        def restore_stdout() -> None:
+            original_stdout = getattr(self, "original_stdout", None)
+            if original_stdout is not None:
+                sys.stdout = original_stdout
+
+        def restore_stderr() -> None:
+            original_stderr = getattr(self, "original_stderr", None)
+            if original_stderr is not None:
+                sys.stderr = original_stderr
+
+        steps = (
+            ("release pickup key", self._release_pickup_key),
+            ("release potion keys", self._release_all_potion_keys),
+            ("stop runtime processes", stop_runtime_processes),
+            ("unregister toggle hotkey", self._unregister_toggle_hotkey),
+            ("stop control hotkey worker", stop_control_hotkey_worker),
+            ("stop potion action worker", stop_potion_action_worker),
+            ("stop mouse observer", stop_mouse_activity_observer),
+            ("close media files", self._close_media_files),
+            ("close direct capture", close_direct_capture),
+            ("shutdown experience executor", shutdown_experience_executor),
+            ("save settings", save_current_settings),
+            ("close MSS capture", close_mss_capture),
+            ("close GUI", close_gui),
+            ("restore stdout", restore_stdout),
+            ("restore stderr", restore_stderr),
+        )
+        try:
+            for label, action in steps:
+                if label in completed_steps:
+                    continue
+                try:
+                    action()
+                except Exception as exc:
+                    self._log_cleanup_failure(label, exc)
+                else:
+                    completed_steps.add(label)
+            self._cleanup_completed = len(completed_steps) == len(steps)
+        finally:
+            self._cleanup_in_progress = False
+
+    @staticmethod
+    def _log_cleanup_failure(label: str, exc: Exception) -> None:
+        try:
+            log_exception(f"AutoPotionController cleanup failed: {label}")
+        except Exception:
+            try:
+                print(f"AutoPotionController cleanup failed: {label}: {exc}")
+            except Exception:
+                return
     def _close_media_files(self) -> None:
         alias_paths = getattr(self, "_media_alias_paths", None)
         if not isinstance(alias_paths, dict) or not alias_paths:
@@ -7648,3 +7709,15 @@ class AutoPotionController:
                 self._close_media_alias(winmm, buffer, alias)
         except Exception:
             alias_paths.clear()
+
+
+def _create_auto_potion_controller(*args, **kwargs) -> AutoPotionController:
+    controller = AutoPotionController.__new__(AutoPotionController)
+    controller._initialization_completed = False
+    try:
+        controller.__init__(*args, **kwargs)
+    except BaseException:
+        controller.cleanup()
+        raise
+    controller._initialization_completed = True
+    return controller

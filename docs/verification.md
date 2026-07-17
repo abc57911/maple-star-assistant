@@ -37,6 +37,24 @@ python tools\verify.py ocr-slow
 
 日常不執行 `full` 或 `ocr-slow`；只在上述情境使用。
 
+## Release artifact OCR
+
+調整 PyInstaller、PaddleOCR / PaddleX 收集規則或 release dependencies 後，必須先打包，再直接驗證 ZIP 內 EXE：
+
+```powershell
+.\build_release.bat
+python tools\verify_release_ocr.py release\MapleStar.zip
+```
+
+此 gate 不是 import smoke：它會先確認 mobile det/rec cache 的必要檔案完整，再解壓 ZIP、封鎖外部 provider endpoint/proxy、啟動 `MapleStar.exe`、初始化 production `PaddleExperienceTextReader`，並實際執行 Paddle predict。固定 fixture 預期為 `current_exp=3796880`、`percent=99.08`；cache 不完整時直接失敗，不在驗證期間下載。
+
+重建 release venv 時使用 lock，不從日常 range requirements 重新 resolve：
+
+```powershell
+python -m venv .venv-release
+.\.venv-release\Scripts\python.exe -m pip install -r requirements-release-lock.txt
+```
+
 ## 筆電效能專項
 
 完成 control runtime 或 GUI 架構變更後，在目標筆電執行：

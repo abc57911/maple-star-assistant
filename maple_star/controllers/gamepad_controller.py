@@ -12,7 +12,7 @@ from typing import Callable
 
 import numpy as np
 
-from .auto_potion_controller import AutoPotionController
+from .auto_potion_controller import AutoPotionController, _create_auto_potion_controller
 from ..constants import MINIMAP_PLAYER_ALERT_BEEP_PATTERN
 from ..adapters.debug_logging import log_telegram_reply
 from ..adapters.win_input import (
@@ -115,6 +115,14 @@ def effective_hold_jump_attack_interval_seconds(slot: dict[str, object]) -> floa
     configured_interval = max(0.0, float(slot["jump_interval_seconds"]))
     attack_hold_seconds = max(0.0, float(slot.get("attack_hold_seconds", DEFAULT_ATTACK_KEY_HOLD_SECONDS)))
     return max(attack_hold_seconds + 0.01, configured_interval)
+
+
+def _parse_configured_macro_key(name: str, key: str, label: str) -> int | None:
+    try:
+        return parse_vk_key(key)
+    except ValueError as exc:
+        print(f"{name} function {label} 設定錯誤：{exc}")
+        return None
 
 
 def key_down(vk_code: int) -> None:
@@ -228,7 +236,7 @@ class RBJumpSlashMacro:
         if self.active and self.next_c_at is not None and now >= self.next_c_at:
             if is_target_window_active():
                 slot = self._slot()
-                skill_vk = self._parse_configured_key(str(slot["skill_key"]), "技能鍵")
+                skill_vk = _parse_configured_macro_key(self.name, str(slot["skill_key"]), "技能鍵")
                 if skill_vk is None:
                     self.stop()
                     return
@@ -299,7 +307,7 @@ class RBJumpSlashMacro:
             return None
 
         slot = self._slot()
-        jump_vk = self._parse_configured_key(str(slot["jump_key"]), "跳躍鍵")
+        jump_vk = _parse_configured_macro_key(self.name, str(slot["jump_key"]), "跳躍鍵")
         if jump_vk is None:
             return None
 
@@ -313,13 +321,6 @@ class RBJumpSlashMacro:
             now + skill_delay,
             now + jump_interval,
         )
-
-    def _parse_configured_key(self, key: str, label: str) -> int | None:
-        try:
-            return parse_vk_key(key)
-        except ValueError as exc:
-            print(f"{self.name} function {label} 設定錯誤：{exc}")
-            return None
 
     def _slot(self) -> dict[str, object]:
         return self.settings.combo_slot(self.slot_id)
@@ -378,7 +379,7 @@ class LBJumpSkillMacro:
             return
 
         slot = self._slot()
-        jump_vk = self._parse_configured_key(str(slot["jump_key"]), "跳躍鍵")
+        jump_vk = _parse_configured_macro_key(self.name, str(slot["jump_key"]), "跳躍鍵")
         if jump_vk is None:
             return
 
@@ -412,7 +413,7 @@ class LBJumpSkillMacro:
                 return
 
             slot = self._slot()
-            skill_vk = self._parse_configured_key(str(slot["skill_key"]), "技能鍵")
+            skill_vk = _parse_configured_macro_key(self.name, str(slot["skill_key"]), "技能鍵")
             if skill_vk is None:
                 self.stop()
                 return
@@ -457,13 +458,6 @@ class LBJumpSkillMacro:
             state.append("待技能")
         return f"{self.name}({', '.join(state) or 'active'})"
 
-    def _parse_configured_key(self, key: str, label: str) -> int | None:
-        try:
-            return parse_vk_key(key)
-        except ValueError as exc:
-            print(f"{self.name} function {label} 設定錯誤：{exc}")
-            return None
-
     def _slot(self) -> dict[str, object]:
         return self.settings.combo_slot(self.slot_id)
 
@@ -499,8 +493,8 @@ class HoldJumpAttackLoopMacro:
             return
 
         slot = self._slot()
-        jump_vk = self._parse_configured_key(str(slot["jump_key"]), "跳躍鍵")
-        attack_vk = self._parse_configured_key(str(slot["attack_key"]), "攻擊鍵")
+        jump_vk = _parse_configured_macro_key(self.name, str(slot["jump_key"]), "跳躍鍵")
+        attack_vk = _parse_configured_macro_key(self.name, str(slot["attack_key"]), "攻擊鍵")
         if jump_vk is None or attack_vk is None:
             return
         if jump_vk == attack_vk:
@@ -631,7 +625,7 @@ class HoldJumpAttackLoopMacro:
 
     def _start_attack_hold(self, now: float) -> None:
         slot = self._slot()
-        attack_vk = self._parse_configured_key(str(slot["attack_key"]), "攻擊鍵")
+        attack_vk = _parse_configured_macro_key(self.name, str(slot["attack_key"]), "攻擊鍵")
         if attack_vk is None:
             self.stop()
             return
@@ -641,13 +635,6 @@ class HoldJumpAttackLoopMacro:
         self.held_attack_vk = attack_vk
         self.attack_up_at = now + attack_hold_seconds
         self.next_attack_at = now + effective_hold_jump_attack_interval_seconds(slot)
-
-    def _parse_configured_key(self, key: str, label: str) -> int | None:
-        try:
-            return parse_vk_key(key)
-        except ValueError as exc:
-            print(f"{self.name} function {label} 設定錯誤：{exc}")
-            return None
 
     def _slot(self) -> dict[str, object]:
         return self.settings.combo_slot(self.slot_id)
@@ -1056,7 +1043,7 @@ def run_control_runtime_process(
         sys.stderr = original_stderr
 
 
-def main() -> None:
+def _run_main(cleanup_actions: dict[str, Callable[[], None]]) -> None:
     startup_marker = os.environ.get("MAPLE_STAR_STARTUP_BENCHMARK_OUTPUT", "").strip()
     if startup_marker:
         from ..views.settings_gui import AutoPotionSettingsGui
@@ -1067,14 +1054,16 @@ def main() -> None:
         benchmark_gui.root.destroy()
         return
 
-    auto_potion = AutoPotionController(is_target_window_active, target_window_provider=find_target_window)
+    auto_potion = _create_auto_potion_controller(
+        is_target_window_active,
+        target_window_provider=find_target_window,
+    )
+    cleanup_actions["auto-potion controller"] = auto_potion.cleanup
     auto_potion.install_console_redirect()
     controller_worker: ControllerEventWorker | None = start_controller_event_worker(POLL_INTERVAL_SECONDS)
-    # Macro bindings live exclusively in the control process.  These empty
-    # compatibility containers remain for helper-level tests only.
-    all_button_bindings: tuple[ControllerButtonBinding, ...] = ()
-    controller_button_bindings: dict[int, tuple[ControllerButtonBinding, ...]] = {}
-    current_controller_button_settings: tuple[tuple[str, object], ...] | None = None
+    cleanup_actions["controller event worker"] = lambda: (
+        stop_controller_event_worker(controller_worker) if controller_worker is not None else None
+    )
     key_capture_actions_were_blocked = False
     controller_worker_dead_reported = False
     telegram_reply_listener: TelegramReplyListener | None = None
@@ -1151,6 +1140,8 @@ def main() -> None:
         telegram_reply_listener = None
         print("Telegram 回覆監聽已停止")
 
+    cleanup_actions["Telegram reply listener"] = stop_telegram_reply_listener
+
     def process_telegram_replies() -> None:
         if telegram_reply_listener is None:
             return
@@ -1210,6 +1201,12 @@ def main() -> None:
             runtime.send_control(command)
         last_control_command_signature = signature
 
+    cleanup_actions["request control key release"] = lambda: (
+        send_control_state(force=True, release_all=True)
+        if getattr(auto_potion, "runtime_processes", None) is not None
+        else None
+    )
+
     def release_parent_known_control_keys() -> None:
         nonlocal control_held_vks, control_held_keys
         possible_vks = set(control_held_vks)
@@ -1242,6 +1239,8 @@ def main() -> None:
                 print(f"主程序釋放按鍵 {key_display_name(vk_code)} 失敗：{exc}")
         control_held_vks = ()
         control_held_keys = "--"
+
+    cleanup_actions["release parent-known control keys"] = release_parent_known_control_keys
 
     def drain_control_statuses() -> None:
         nonlocal control_cruise_enabled, control_macro_status, control_held_keys, control_held_vks
@@ -1290,38 +1289,6 @@ def main() -> None:
                 report_missing=not telegram_reply_config_error_reported,
             )
 
-    def sync_controller_button_bindings() -> None:
-        nonlocal all_button_bindings, controller_button_bindings, current_controller_button_settings
-        auto_potion.settings.normalize_combo_slots()
-        new_settings = tuple(
-            (f"{slot_id}:{key}", value)
-            for slot_id in COMBO_SLOT_IDS
-            for key, value in auto_potion.settings.combo_slots[slot_id].items()
-        )
-        if current_controller_button_settings == new_settings:
-            return
-
-        if current_controller_button_settings is not None:
-            stop_all_bindings("組合設定已變更，停止目前巨集並重建綁定")
-
-        all_button_bindings = build_combo_script_bindings(auto_potion.settings)
-        controller_button_bindings = build_controller_button_bindings(
-            auto_potion.settings,
-            all_button_bindings,
-        )
-        current_controller_button_settings = new_settings
-
-    def update_active_bindings() -> None:
-        if auto_potion.is_key_capture_blocking_actions():
-            return
-        now = time.perf_counter()
-        for binding in all_button_bindings:
-            if not auto_potion.can_run_actions():
-                continue
-            if not is_controller_binding_enabled(auto_potion.settings, binding):
-                continue
-            binding.update(now)
-
     def stop_all_bindings(reason: str) -> None:
         nonlocal control_cruise_enabled, control_generation
         print(reason)
@@ -1330,22 +1297,6 @@ def main() -> None:
         send_control_state(force=True, release_all=True)
         release_parent_known_control_keys()
         stop_telegram_reply_listener()
-
-    def any_combo_enabled() -> bool:
-        auto_potion.settings.normalize_combo_slots()
-        return any(bool(auto_potion.settings.combo_slots[slot_id]["enabled"]) for slot_id in COMBO_SLOT_IDS)
-
-    def ensure_controller_worker_state() -> None:
-        nonlocal controller_worker, controller_worker_dead_reported
-        if not any_combo_enabled():
-            if controller_worker is not None:
-                stop_controller_event_worker(controller_worker)
-                controller_worker = None
-                controller_worker_dead_reported = False
-            return
-        if controller_worker is None:
-            controller_worker = start_controller_event_worker(POLL_INTERVAL_SECONDS)
-            controller_worker_dead_reported = False
 
     def macro_status_text() -> str:
         return control_macro_status
@@ -1370,81 +1321,6 @@ def main() -> None:
             return
         last_runtime_info_refreshed_at = now
         refresh_runtime_info()
-
-    def next_binding_deadline_at() -> float | None:
-        if auto_potion.is_key_capture_blocking_actions():
-            return None
-        deadlines: list[float] = []
-        for binding in all_button_bindings:
-            if not auto_potion.can_run_actions():
-                continue
-            if not is_controller_binding_enabled(auto_potion.settings, binding):
-                continue
-            deadline = binding.next_deadline_at()
-            if deadline is not None:
-                deadlines.append(deadline)
-        if not deadlines:
-            return None
-        return min(deadlines)
-
-    def process_controller_events() -> None:
-        if controller_worker is None:
-            return
-        for _ in range(128):
-            try:
-                event_type, event_value, event_text = controller_worker.event_queue.get_nowait()
-            except queue.Empty:
-                return
-
-            if event_type == EVENT_STATUS:
-                if event_text:
-                    print(event_text)
-
-            elif event_type == EVENT_ERROR:
-                if event_text:
-                    print(event_text)
-
-            elif event_type == EVENT_DEVICE_ADDED:
-                print(f"[C{event_value}] 已連線：{event_text}")
-
-            elif event_type == EVENT_DEVICE_REMOVED:
-                print(f"[C{event_value}] 已斷線：{event_text or 'unknown'}")
-                for binding in all_button_bindings:
-                    binding.stop()
-
-            elif event_type == EVENT_BUTTON_DOWN and isinstance(event_value, int):
-                button_bindings = controller_button_bindings.get(event_value, ())
-                if not button_bindings:
-                    continue
-                binding = first_enabled_controller_binding(
-                    button_bindings,
-                    auto_potion.settings,
-                )
-                if binding is None:
-                    continue
-                if auto_potion.is_key_capture_blocking_actions():
-                    binding.stop()
-                    continue
-                if not auto_potion.scripts_enabled:
-                    print(f"忽略 {button_name(event_value)}：總開關已關閉")
-                    continue
-                if not auto_potion.gameplay_hud_active:
-                    print(f"忽略 {button_name(event_value)}：未偵測到遊戲 HUD")
-                    continue
-                binding.on_button_down()
-
-            elif event_type == EVENT_BUTTON_UP and isinstance(event_value, int):
-                button_bindings = controller_button_bindings.get(event_value, ())
-                for binding in button_bindings:
-                    if auto_potion.is_key_capture_blocking_actions():
-                        binding.stop()
-                        continue
-                    if not auto_potion.can_run_actions():
-                        binding.stop()
-                        continue
-                    if not is_controller_binding_enabled(auto_potion.settings, binding):
-                        continue
-                    binding.on_button_up()
 
     def report_controller_worker_if_dead() -> None:
         nonlocal controller_worker_dead_reported
@@ -1503,20 +1379,35 @@ def main() -> None:
             if not auto_potion.is_closed():
                 auto_potion.gui.root.after(next_loop_delay_ms(), loop_step)
 
+    auto_potion.gui.root.after(0, loop_step)
+    auto_potion.gui.root.mainloop()
+
+
+def main() -> None:
+    cleanup_actions: dict[str, Callable[[], None]] = {}
     try:
-        auto_potion.gui.root.after(0, loop_step)
-        auto_potion.gui.root.mainloop()
+        _run_main(cleanup_actions)
     finally:
-        if getattr(auto_potion, "runtime_processes", None) is not None:
-            try:
-                send_control_state(force=True, release_all=True)
-            except Exception:
-                pass
-        release_parent_known_control_keys()
-        auto_potion.cleanup()
-        stop_telegram_reply_listener()
-        if controller_worker is not None:
-            stop_controller_event_worker(controller_worker)
+        for label in (
+            "request control key release",
+            "release parent-known control keys",
+            "auto-potion controller",
+            "Telegram reply listener",
+            "controller event worker",
+        ):
+            action = cleanup_actions.get(label)
+            if action is not None:
+                _run_shutdown_step(label, action)
+
+
+def _run_shutdown_step(label: str, action: Callable[[], None]) -> None:
+    try:
+        action()
+    except Exception as exc:
+        try:
+            print(f"主程序 cleanup 失敗（{label}）：{exc}")
+        except Exception:
+            return
 
 
 if __name__ == "__main__":

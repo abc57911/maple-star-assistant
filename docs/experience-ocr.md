@@ -9,16 +9,13 @@
 - Pixel OCR 不應以 EXP 位數作為可信條件；可信度應來自 glyph confidence、候選衝突、括號內百分比文字與 bar hint guard。
 - EXP 百分比以 UI 括號內文字為主，綠條估算只做 guard，不用來改寫百分比。
 
-## learning mode
-- Runtime 已停用 Pixel OCR learning pending bundle 寫入，不再要求使用者日常人工校正。
-- GUI 不提供 `OCR學習` / 校正入口；日常穩定性應依賴 Pixel OCR、Paddle fallback、OCR continuity guard 與 tracker rejection。
-- `tools/experience_ocr_learning.py` 與 `maple_star.services.experience_ocr_learning` 僅保留作為開發者離線維護 fixture/template 的工具。
-- 只有使用 `tools/experience_ocr_learning.py promote` 後，並通過 fixture validation 的 fixture/template 才可提交。
-- 若開發者手動套用後 Pixel validation 仍失敗，必須回滾新增 fixture，避免同一張不適合的 ROI 反覆污染 template。
-- `EXP OCR 模糊數字候選不一致`、`ocr_continuity_rejected`、`tracker_rejected` 與 glyph ambiguity case 不得自動套用，避免把綠底誤讀學成 template。
-- 既有 pending case 若需保留，只作為診斷證據；`tools/experience_ocr_learning.py dedupe` 可清理既有重複 pending case，`delete` 可刪單筆 pending case。
-- Pixel OCR runtime template 需放在 package 內可打包資料或 module，不得依賴 `tests/fixtures` 才能辨識。
-- `auto-promote` 必須保守：只有高 confidence、足夠 gap、matching attempts 合理且 validation 成功的 case 才能 promote；validation 失敗需 rollback。
+## Fixture 與 template 維護邊界
+- Runtime、GUI 與開發工具都不再建立、檢視、promote 或 dedupe OCR learning pending bundle。
+- 程式不再讀寫 `%LOCALAPPDATA%\MapleStar\experience_ocr_pending`；既有資料不主動搬移或刪除。
+- 日常穩定性依賴 Pixel OCR、Paddle fallback、OCR continuity guard 與 tracker rejection，不要求使用者人工校正。
+- `tests/fixtures/experience_ocr/` 的 82 個樣本與 manifest 繼續作為 regression truth，不是 runtime 資料來源。
+- `maple_star/models/experience_pixel_templates.py` 繼續作為 package 內 runtime template；目前不提供自動 promotion 或 regeneration CLI。
+- 若未來需要修改 fixture 或 template，應建立獨立 migration、固定來源與 expected reading，並通過 fixture、Paddle fallback 與 full gate；不可由 runtime failure 自動學習。
 
 ## PaddleOCR fallback
 - PaddleOCR fallback 主要語言為繁體中文，模型設定預設使用 `chinese_cht` 與 PP-OCRv5 mobile det/rec。

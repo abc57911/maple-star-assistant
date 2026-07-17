@@ -38,7 +38,9 @@ python tools/verify.py ocr-slow
 - 編譯檢查 `main.py`、`main.pyw`、`maple_gamepad_macro.py`、`auto_potion.py` 與 `maple_star` package。
 - 以 `main.pyw` 作為 PyInstaller GUI 入口，產出無 console 視窗的主程式。
 - 使用 `--windowed --onedir --name MapleStar`。
-- 保留 CustomTkinter 資源、PaddleOCR / Paddle / PaddleX hidden import / collect-all。
+- 保留 CustomTkinter 資源與 PaddleOCR / Paddle / PaddleX hidden import；不要恢復無界 `collect-all`。
+- 只具名加入 Paddle runtime 必要的 `mklml.dll` 與 PaddleX `OCR.yaml`。
+- 排除未使用的 `Crypto`、`hf_xet`，並在壓縮前移除 OpenCV videoio FFmpeg DLL；本專案不支援 PDF、影音檔或替代 model hoster 的行為不得由此推論。
 - 保留 PaddleX `ocr-core` 需要的 metadata：`imagesize`、`opencv-contrib-python`、`pyclipper`、`pypdfium2`、`python-bidi`、`shapely`。
 - 以 `RELEASE_README.txt` 複製成 ZIP 內的 `README.txt`；若 runtime 行為改變，release 前必須同步檢查這份說明。
 
@@ -46,6 +48,7 @@ python tools/verify.py ocr-slow
 
 ```powershell
 .\build_release.bat
+python tools\verify_release_ocr.py release\MapleStar.zip
 ```
 
 打包後必須驗證：
@@ -56,6 +59,8 @@ python tools/verify.py ocr-slow
 - ZIP 內 `README.txt` 不應描述已移除的 GUI 功能，例如使用者可見的 EXP OCR learning / 校正入口。
 - 可從解壓後資料夾啟動 `MapleStar.exe`，並確認主 GUI 是 MapleStar 主程式，不是 debug 入口或 console 入口。
 - 若調整 PaddleOCR、PaddleX、PyInstaller 或 requirements，打包後需用打包產物或等效 smoke test 驗證 `PaddleOCR(...)` 初始化成功；不能只檢查 ZIP 內是否有 `paddleocr` 目錄。
+- `tools\verify_release_ocr.py` 會解壓 ZIP、在 warmed model cache 與 no-download 環境啟動 EXE，並要求 production Paddle predict 讀出固定 fixture 的 `3796880 / 99.08%`；timeout 為 120 秒。
+- 可重現 release dependency lock 位於 `requirements-release-lock.txt`；`build_release.bat` 缺套件時也只從此 lock 安裝。更新 lock 後必須重跑 build、artifact smoke、full 與 ocr-slow。
 - PyInstaller 可能列出 `lxml`、serving、TensorRT、GPU 或 doc parser 相關 warning；只要 `paddlex[ocr-core]` 依賴可用且 `PaddleOCR(...)` 初始化通過，這些選配 warning 不應視為 EXP OCR 發行阻斷。
 - 本機打包後再次確認 `git status --short`。
 

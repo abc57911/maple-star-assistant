@@ -5,7 +5,7 @@ import queue
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass, fields
-from typing import Any
+from typing import Any, Callable
 
 from ..adapters.debug_logging import log_exception
 from ..adapters.win_input import foreground_window_handle, is_valid_window, is_window_minimized, window_ancestor_handles
@@ -241,6 +241,7 @@ class RuntimeProcessCoordinator:
             daemon=True,
         )
         self._started = False
+        self._stopped = False
         self._control_process: mp.Process | None = None
         self._pending_control_command: ControlCommand | None = None
         self._pending_control_settings: SettingsUpdated | None = None
@@ -257,9 +258,15 @@ class RuntimeProcessCoordinator:
     def start(self) -> None:
         if self._started:
             return
-        self._potion_process.start()
-        self._experience_process.start()
+        if self._stopped:
+            raise RuntimeError("runtime processes already stopped")
         self._started = True
+        try:
+            self._potion_process.start()
+            self._experience_process.start()
+        except BaseException:
+            self.stop()
+            raise
 
     def start_control(self, worker_target, *worker_args: object) -> None:
         if self._control_process is not None:
@@ -381,23 +388,64 @@ class RuntimeProcessCoordinator:
         self._potion_process.start()
 
     def stop(self, timeout: float = 1.0) -> None:
-        if not self._started:
+        if getattr(self, "_stopped", False):
             return
-        self._potion_commands.put(PotionControl(False, False, emergency_stop=True, release_all=True))
-        self._potion_commands.put(Shutdown())
-        self._experience_commands.put(ExperienceControl(False, pause=True))
-        self._experience_commands.put(Shutdown())
+        self._stopped = True
+        self._started = False
+        cleanup_steps = (
+            (
+                "request potion key release",
+                lambda: self._potion_commands.put(
+                    PotionControl(False, False, emergency_stop=True, release_all=True)
+                ),
+            ),
+            ("shutdown potion runtime", lambda: self._potion_commands.put(Shutdown())),
+            (
+                "pause experience runtime",
+                lambda: self._experience_commands.put(ExperienceControl(False, pause=True)),
+            ),
+            ("shutdown experience runtime", lambda: self._experience_commands.put(Shutdown())),
+        )
+        for label, action in cleanup_steps:
+            _run_coordinator_cleanup_step(label, action)
         if self._control_process is not None:
-            self._control_release_event.set()
-            self._put_control_command(Shutdown(), required=True)
+            _run_coordinator_cleanup_step("signal control key release", self._control_release_event.set)
+            _run_coordinator_cleanup_step(
+                "shutdown control runtime",
+                lambda: self._put_control_command(Shutdown(), required=True),
+            )
         processes = [self._potion_process, self._experience_process]
         if self._control_process is not None:
             processes.append(self._control_process)
         for process in processes:
-            process.join(timeout=timeout)
-            if process.is_alive():
-                process.terminate()
-                process.join(timeout=timeout)
+            _stop_owned_process(process, timeout)
+
+
+def _run_coordinator_cleanup_step(label: str, action: Callable[[], object]) -> None:
+    try:
+        action()
+    except Exception:
+        try:
+            log_exception(f"RuntimeProcessCoordinator cleanup failed: {label}")
+        except Exception:
+            return
+
+
+def _stop_owned_process(process, timeout: float) -> None:
+    name = getattr(process, "name", "unknown")
+    _run_coordinator_cleanup_step(f"join {name}", lambda: process.join(timeout=timeout))
+    try:
+        alive = process.is_alive()
+    except Exception:
+        try:
+            log_exception(f"RuntimeProcessCoordinator cleanup failed: inspect {name}")
+        except Exception:
+            pass
+        return
+    if not alive:
+        return
+    _run_coordinator_cleanup_step(f"terminate {name}", process.terminate)
+    _run_coordinator_cleanup_step(f"join terminated {name}", lambda: process.join(timeout=timeout))
 
 
 def _drain_queue(source, limit: int) -> list[object]:
@@ -432,14 +480,15 @@ def _is_target_hwnd_active(hwnd: int) -> bool:
 
 
 def _run_potion_runtime_process(command_queue, status_queue, settings_payload: dict[str, object], target_hwnd: int) -> None:
+    controller = None
     try:
-        from ..controllers.auto_potion_controller import AutoPotionController
+        from ..controllers.auto_potion_controller import _create_auto_potion_controller
 
         settings = _settings_from_payload(settings_payload)
         settings.exp_efficiency_enabled = False
         target_state = {"hwnd": int(target_hwnd or 0)}
         gui = HeadlessRuntimeGui(settings)
-        controller = AutoPotionController(
+        controller = _create_auto_potion_controller(
             lambda: _is_target_hwnd_active(target_state["hwnd"]),
             settings=settings,
             target_window_provider=lambda: target_state["hwnd"],
@@ -453,7 +502,6 @@ def _run_potion_runtime_process(command_queue, status_queue, settings_payload: d
         controller._save_settings_when_idle = lambda _now: None
         controller._play_media_file = lambda _path, alias: gui.queue_media_sound(str(alias))
         controller._play_toggle_beep = lambda *_args, **_kwargs: None
-        _install_potion_console_recorder(controller, gui)
         next_status_at = 0.0
         next_heartbeat_at = 0.0
         last_status_signature: tuple[object, ...] | None = None
@@ -470,7 +518,7 @@ def _run_potion_runtime_process(command_queue, status_queue, settings_payload: d
             now = time.monotonic()
             if not shutdown:
                 controller.update(now, pump_gui=False)
-                if now >= next_status_at or gui.console_lines:
+                if now >= next_status_at:
                     status = _potion_status(controller, gui, generation)
                     signature = _potion_status_signature(status)
                     urgent = bool(status.notice or status.console_lines or status.media_sound_aliases)
@@ -480,21 +528,23 @@ def _run_potion_runtime_process(command_queue, status_queue, settings_payload: d
                         next_heartbeat_at = now + STATUS_HEARTBEAT_SECONDS
                     next_status_at = now + 0.10
             time.sleep(0.01)
-        controller._release_all_potion_keys()
-        controller.cleanup()
     except Exception as exc:
-        log_exception("PotionRuntime process failed")
-        status_queue.put(WorkerCrashed("potion", str(exc)))
+        _report_worker_crash(status_queue, "potion", exc)
+    finally:
+        if controller is not None:
+            _run_child_cleanup_step("potion", "release potion keys", controller._release_all_potion_keys)
+            _run_child_cleanup_step("potion", "controller", controller.cleanup)
 
 
 def _run_experience_stats_process(command_queue, status_queue, settings_payload: dict[str, object], target_hwnd: int) -> None:
+    controller = None
     try:
-        from ..controllers.auto_potion_controller import AutoPotionController
+        from ..controllers.auto_potion_controller import _create_auto_potion_controller
 
         settings = _settings_from_payload(settings_payload)
         target_state = {"hwnd": int(target_hwnd or 0)}
         gui = HeadlessRuntimeGui(settings)
-        controller = AutoPotionController(
+        controller = _create_auto_potion_controller(
             lambda: _is_target_hwnd_active(target_state["hwnd"]),
             settings=settings,
             target_window_provider=lambda: target_state["hwnd"],
@@ -535,20 +585,40 @@ def _run_experience_stats_process(command_queue, status_queue, settings_payload:
                         next_heartbeat_at = now + STATUS_HEARTBEAT_SECONDS
                     next_status_at = now + 0.20
             time.sleep(0.01)
-        controller._cancel_experience_baseline_calibration(close_ui=True)
-        controller.cleanup()
     except Exception as exc:
-        log_exception("ExperienceStats process failed")
-        status_queue.put(WorkerCrashed("experience", str(exc)))
+        _report_worker_crash(status_queue, "experience", exc)
+    finally:
+        if controller is not None:
+            _run_child_cleanup_step(
+                "experience",
+                "cancel baseline calibration",
+                lambda: controller._cancel_experience_baseline_calibration(close_ui=True),
+            )
+            _run_child_cleanup_step("experience", "controller", controller.cleanup)
 
 
-def _install_potion_console_recorder(controller: Any, gui: HeadlessRuntimeGui) -> None:
-    original = controller._log_potion_key_trigger_interval
+def _run_child_cleanup_step(worker: str, label: str, action: Callable[[], None]) -> None:
+    try:
+        action()
+    except Exception as exc:
+        try:
+            log_exception(f"{worker} runtime cleanup failed: {label}")
+        except Exception:
+            try:
+                print(f"{worker} runtime cleanup failed ({label}): {exc}")
+            except Exception:
+                return
 
-    def record(label: str, key_name: str, previous_at: float, now: float) -> None:
-        original(label, key_name, previous_at, now)
 
-    controller._log_potion_key_trigger_interval = record
+def _report_worker_crash(status_queue, worker: str, exc: Exception) -> None:
+    try:
+        log_exception(f"{worker} runtime process failed")
+    except Exception:
+        pass
+    try:
+        status_queue.put(WorkerCrashed(worker, str(exc)))
+    except Exception:
+        pass
 
 
 def _bar_debug_region(controller: Any, bar_type: str) -> tuple[int, int, int, int] | None:

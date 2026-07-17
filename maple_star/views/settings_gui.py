@@ -61,170 +61,34 @@ from ..models.settings import (
 )
 from ..services.settings_store import load_settings, save_settings
 from ..adapters.win_input import Point, parse_vk_key, user32
+from .gui_theme import *  # noqa: F401,F403
+from .gui_presentation import GuiPresentationMixin
+from .pages.console_page import build_console_page, build_console_text
+from .pages.combo_page import FlowLayout, build_combo_page
+from .pages.contracts import (
+    ComboPageContext,
+    ComboPageRefs,
+    ComboSlotContext,
+    ConsolePageContext,
+    ConsolePageRefs,
+    ConsoleTextRefs,
+    MinimapPageContext,
+    MinimapPageRefs,
+    MonitorControlsContext,
+    MonitorControlsRefs,
+    MonitorPageContext,
+    MonitorPageRefs,
+    PageWidgets,
+    PotionKindContext,
+    PotionPageContext,
+    PotionPageRefs,
+)
+from .pages.minimap_page import build_minimap_page
+from .pages.monitor_page import build_monitor_controls, build_monitor_page
+from .pages.potion_page import build_potion_page
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
-
-FONT_FAMILY = "Noto Sans TC"
-MONO_FONT_FAMILY = "Noto Sans TC"
-CONSOLE_FONT_FAMILY = "Noto Sans TC"
-TAB_FONT_FAMILY = "Microsoft JhengHei UI"
-APP_BG = "#09111f"
-PANEL_BG = "#101b2d"
-PANEL_BG_ALT = "#0d1728"
-PANEL_BORDER = "#243653"
-SECTION_HEADER_BG = "#172943"
-SECTION_HEADER_BORDER = "#355579"
-HEADER_TEXT = "#e5f2ff"
-BODY_TEXT = "#d6e3f0"
-BUTTON_TEXT = "#f8fbff"
-MUTED_TEXT = "#8da2b8"
-ACCENT_BLUE = "#2f8cff"
-ACCENT_GREEN = "#18b981"
-HP_RED = "#ff5b6e"
-MP_BLUE = "#45a3ff"
-WARNING_YELLOW = "#f6c44f"
-VK_LBUTTON = 0x01
-ASYNC_KEY_DOWN_MASK = 0x8000
-MINIMAP_BOUNDARY_POLL_MS = 20
-BUTTON_BG = "#2d81ff"
-BUTTON_HOVER = "#4d9aff"
-BUTTON_BORDER = "#6ba5df"
-SECONDARY_BUTTON_BG = "#2b5f91"
-SECONDARY_BUTTON_HOVER = "#3475b3"
-ENTRY_BG = "#0b1424"
-CONSOLE_BG = "#050b14"
-CONSOLE_TEXT = "#b8f7d4"
-NOTICE_BG = "#f97316"
-NOTICE_TEXT = "#111827"
-INFO_ICON_BG = "#153a63"
-INFO_ICON_HOVER = "#1e5c95"
-TOOLTIP_BG = "#0f2138"
-TOOLTIP_BORDER = "#3c648d"
-HOTKEY_ENTRY_WIDTH = 72
-PROFILE_COMBO_WIDTH = 138
-PERCENT_ENTRY_WIDTH = 46
-POTION_KEY_ENTRY_WIDTH = 76
-COMBO_KEY_ENTRY_WIDTH = 58
-SECONDS_ENTRY_WIDTH = 46
-CONTROLLER_COMBO_WIDTH = 100
-COMBO_COMPACT_KEY_ENTRY_WIDTH = 44
-COMBO_COMPACT_SECONDS_ENTRY_WIDTH = 50
-COMBO_COMPACT_CONTROLLER_WIDTH = 76
-COMBO_SCRIPT_COMBO_WIDTH = 128
-COMBO_SCRIPT_LABEL_TO_ID = {label: script_id for script_id, label in COMBO_SCRIPT_LABELS.items()}
-COMBO_SCRIPT_LABEL_VALUES = tuple(COMBO_SCRIPT_LABELS[script_id] for script_id in COMBO_SCRIPT_LABELS)
-LEFT_PANEL_MAX_WIDTH = 720
-COMPACT_PANEL_WIDTH = 520
-CONSOLE_MIN_WIDTH = 416
-CONSOLE_MIN_BODY_HEIGHT = 120
-CONSOLE_PAGE_MIN_HEIGHT = 420
-CONSOLE_HEADER_BODY_RESERVED_HEIGHT = 54
-WINDOW_CONTENT_VERTICAL_PADDING = 64
-EXP_PANEL_WIDTH = 420
-DETECTION_PANEL_WIDTH = 292
-MONITOR_PANEL_HEIGHT = 204
-WINDOW_COLLAPSED_MIN_WIDTH = LEFT_PANEL_MAX_WIDTH + 32
-WINDOW_EXPANDED_MIN_WIDTH = WINDOW_COLLAPSED_MIN_WIDTH
-WINDOW_MIN_WIDTH = WINDOW_EXPANDED_MIN_WIDTH
-WINDOW_MIN_HEIGHT = 500
-WINDOW_DEFAULT_WIDTH = 1240
-WINDOW_DEFAULT_HEIGHT = 620
-WINDOW_COLLAPSED_WIDTH = WINDOW_COLLAPSED_MIN_WIDTH
-COMPACT_WINDOW_MIN_WIDTH = COMPACT_PANEL_WIDTH + 24
-COMPACT_WINDOW_MIN_HEIGHT = 228
-COMPACT_WINDOW_WIDTH = COMPACT_WINDOW_MIN_WIDTH
-COMPACT_WINDOW_HEIGHT = COMPACT_WINDOW_MIN_HEIGHT
-MINIMIZED_WINDOW_POSITION_SENTINEL = -30000
-WINDOW_POSITION_VISIBILITY_MARGIN = 80
-SM_XVIRTUALSCREEN = 76
-SM_YVIRTUALSCREEN = 77
-SM_CXVIRTUALSCREEN = 78
-SM_CYVIRTUALSCREEN = 79
-SECTION_RADIUS = 10
-CONTROL_RADIUS = 7
-SECTION_PAD_X = 12
-SECTION_PAD_Y = 10
-UI_FONT = (FONT_FAMILY, 14)
-SMALL_FONT = (FONT_FAMILY, 13)
-BUTTON_FONT = (FONT_FAMILY, 15, "bold")
-TITLE_FONT = (FONT_FAMILY, 14, "bold")
-MONO_FONT = (MONO_FONT_FAMILY, 13)
-EXP_FONT = (FONT_FAMILY, 15)
-EXP_MONO_FONT = (MONO_FONT_FAMILY, 14)
-CONSOLE_FONT = (CONSOLE_FONT_FAMILY, 15)
-TAB_FONT = (TAB_FONT_FAMILY, 13, "bold")
-WINDOW_INTERACTION_GRACE_SECONDS = 0.12
-RESIZE_SETTLE_DELAY_MS = 140
-CONSOLE_FLUSH_DELAY_MS = 50
-RESTORE_REPAINT_GRACE_SECONDS = 0.22
-TOGGLE_NOTICE_VERTICAL_RATIO = 0.45
-TOGGLE_NOTICE_EDGE_PADDING = 16
-FLOW_GAP_X = 8
-FLOW_GAP_Y = 4
-
-
-class FlowLayout:
-    def __init__(self, parent: tk.Misc, *, gap_x: int = FLOW_GAP_X, gap_y: int = FLOW_GAP_Y) -> None:
-        self.frame = ctk.CTkFrame(parent, fg_color="transparent")
-        self.gap_x = gap_x
-        self.gap_y = gap_y
-        self.items: list[dict[str, object]] = []
-        self.frame.bind("<Configure>", lambda _event: self.layout(), add="+")
-
-    def add(self, widget: tk.Misc, min_width: int) -> None:
-        self.items.append(
-            {
-                "widget": widget,
-                "min_width": min_width,
-                "visible": True,
-                "last_layout": None,
-            }
-        )
-        self.layout()
-
-    def set_visible(self, widget: tk.Misc, visible: bool) -> None:
-        changed = False
-        for item in self.items:
-            if item["widget"] is widget and item["visible"] != visible:
-                item["visible"] = visible
-                changed = True
-        if changed:
-            self.layout()
-
-    def layout(self) -> None:
-        width = max(1, self.frame.winfo_width())
-        row = 0
-        column = 0
-        row_width = 0
-        for item in self.items:
-            widget = item["widget"]
-            min_width = int(item["min_width"])
-            if not isinstance(widget, tk.Misc):
-                continue
-            if not item["visible"]:
-                if item.get("last_layout") is not None:
-                    widget.grid_remove()
-                    item["last_layout"] = None
-                continue
-            next_width = min_width if column == 0 else row_width + self.gap_x + min_width
-            if column > 0 and next_width > width:
-                row += 1
-                column = 0
-                row_width = 0
-            desired_layout = (row, column)
-            if item.get("last_layout") != desired_layout:
-                widget.grid(
-                    row=row,
-                    column=column,
-                    sticky="w",
-                    padx=(0, self.gap_x),
-                    pady=(0, self.gap_y),
-                )
-                item["last_layout"] = desired_layout
-            row_width = min_width if column == 0 else row_width + self.gap_x + min_width
-            column += 1
-
 
 class GuiConsoleWriter:
     def __init__(self, gui: AutoPotionSettingsGui, original: object | None = None) -> None:
@@ -249,7 +113,7 @@ class GuiConsoleWriter:
                 pass
 
 
-class AutoPotionSettingsGui:
+class AutoPotionSettingsGui(GuiPresentationMixin):
     def __init__(self, settings: AutoPotionSettings) -> None:
         self.settings = settings
         self.closed = False
@@ -308,6 +172,13 @@ class AutoPotionSettingsGui:
         self.console_scrollbar: ctk.CTkScrollbar | None = None
         self.console: tk.Text | None = None
         self.console_placeholder: ctk.CTkLabel | None = None
+        self.console_page_refs: ConsolePageRefs | None = None
+        self.console_text_refs: ConsoleTextRefs | None = None
+        self.potion_page_refs: PotionPageRefs | None = None
+        self.minimap_page_refs: MinimapPageRefs | None = None
+        self.combo_page_refs: ComboPageRefs | None = None
+        self.monitor_page_refs: MonitorPageRefs | None = None
+        self.monitor_controls_refs: MonitorControlsRefs | None = None
         self.console_collapsed = False
         self.console_resize_after_id: str | None = None
         self.console_height_after_id: str | None = None
@@ -489,72 +360,42 @@ class AutoPotionSettingsGui:
         monitor_page = self.page_frames["監控"]
         monitor_page.grid(row=0, column=0, sticky="nsew")
 
-        monitor_frame = ctk.CTkFrame(monitor_page, fg_color="transparent")
-        self.monitor_frame = monitor_frame
-        monitor_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        monitor_frame.columnconfigure(0, weight=3, uniform="monitor")
-        monitor_frame.columnconfigure(1, weight=2, uniform="monitor")
-
-        exp_section, exp_title, exp_frame = self._build_section(monitor_frame, "", row=0, column=0, sticky="nsew", padx=(0, 8), pady=0)
-        self.exp_section = exp_section
-        self._checkbox(exp_title, "", self.exp_efficiency_enabled, width=20).grid(row=0, column=0, sticky="w", padx=(8, 0), pady=4)
-        exp_title_label = self._title_label(exp_title, "經驗計算")
-        exp_title_label.grid(row=0, column=1, sticky="w", padx=(2, 0), pady=4)
-        self._bind_checkbox_label(exp_title_label, self.exp_efficiency_enabled)
-        exp_actions = ctk.CTkFrame(exp_title, fg_color="transparent")
-        exp_actions.grid(row=0, column=99, sticky="e", padx=(8, 8), pady=4)
-        self._button(exp_actions, "重置", self.reset_experience_statistics, width=64).grid(row=0, column=0, sticky="w", padx=(0, 6))
-        self.panel_mode_button = self._button(exp_actions, "經驗模式", self.toggle_compact_experience_mode, width=82)
-        self.panel_mode_button.grid(row=0, column=1, sticky="w", padx=(0, 6))
-        self.topmost_button = self._button(exp_actions, "置頂", self.toggle_window_topmost, width=76)
-        self.topmost_button.grid(row=0, column=2, sticky="w")
-        exp_frame.columnconfigure(0, weight=1)
-        self._label(exp_frame, textvariable=self.exp_current_status, font=EXP_MONO_FONT, color=ACCENT_GREEN).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(4, 0))
-        self._label(exp_frame, textvariable=self.exp_eta_status, color=WARNING_YELLOW, font=EXP_FONT).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(0, 2))
-        exp_rate_frame = ctk.CTkFrame(exp_frame, fg_color="transparent")
-        exp_rate_frame.grid(row=2, column=0, sticky="ew", padx=(0, 8), pady=(0, 2))
-        for column in range(3):
-            exp_rate_frame.columnconfigure(column, weight=1, uniform="exp_rate")
-        self._label(exp_rate_frame, textvariable=self.exp_rate_10m_status, font=EXP_MONO_FONT).grid(row=0, column=0, sticky="w")
-        self._label(exp_rate_frame, textvariable=self.exp_rate_1h_status, font=EXP_MONO_FONT).grid(row=0, column=1, sticky="w")
-        self._label(exp_rate_frame, textvariable=self.exp_10m_gain_status, font=EXP_MONO_FONT).grid(row=0, column=2, sticky="w")
-        self._label(exp_frame, textvariable=self.exp_quality_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=3, column=0, sticky="w", padx=(0, 8), pady=(0, 0))
-        self._label(exp_frame, textvariable=self.exp_reader_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=4, column=0, sticky="w", padx=(0, 8), pady=(2, 0))
-
-        detection_section, detection_title, detection_frame = self._build_section(monitor_frame, "", row=0, column=1, sticky="nsew", pady=0)
-        self.detection_section = detection_section
-        self.monitor_responsive_relayout = self._bind_responsive_two_columns(
-            monitor_frame,
-            exp_section,
-            detection_section,
-            active=lambda: not self.compact_experience_mode,
-            wide_weights=(3, 2),
-            wide_uniform="monitor",
+        refs = build_monitor_page(
+            monitor_page,
+            MonitorPageContext(
+                widgets=self._page_widgets(),
+                exp_enabled=self.exp_efficiency_enabled,
+                exp_current_status=self.exp_current_status,
+                exp_eta_status=self.exp_eta_status,
+                exp_rate_10m_status=self.exp_rate_10m_status,
+                exp_rate_1h_status=self.exp_rate_1h_status,
+                exp_10m_gain_status=self.exp_10m_gain_status,
+                exp_quality_status=self.exp_quality_status,
+                exp_reader_status=self.exp_reader_status,
+                hp_detection_status=self.hp_detection_status,
+                mp_detection_status=self.mp_detection_status,
+                runtime_script_status=self.runtime_script_status,
+                runtime_foreground_status=self.runtime_foreground_status,
+                runtime_status_message=self.runtime_status_message,
+                reset_experience=self.reset_experience_statistics,
+                toggle_compact_mode=self.toggle_compact_experience_mode,
+                toggle_topmost=self.toggle_window_topmost,
+                refresh_bar_preview=self.refresh_bar_preview,
+                toggle_console=self.toggle_console_collapsed,
+                bind_checkbox_label=self._bind_checkbox_label,
+                monitor_is_active=lambda: not self.compact_experience_mode,
+            ),
         )
-        self._title_label(detection_title, "偵測診斷").grid(row=0, column=0, sticky="w", padx=(8, 0), pady=4)
-        self._button(detection_title, "刷新預覽", self.refresh_bar_preview, width=82).grid(row=0, column=1, sticky="w", padx=(8, 0), pady=4)
-        detection_frame.columnconfigure(0, weight=1)
-        self._label(detection_frame, textvariable=self.hp_detection_status, color=HP_RED, font=SMALL_FONT).grid(row=0, column=0, sticky="w", pady=(4, 2))
-        self.bar_preview_labels["hp"] = self._label(detection_frame, "尚未刷新預覽", color=MUTED_TEXT)
-        self.bar_preview_labels["hp"].grid(row=1, column=0, sticky="w", pady=(0, 6))
-        self._label(detection_frame, textvariable=self.mp_detection_status, color=MP_BLUE, font=SMALL_FONT).grid(row=2, column=0, sticky="w", pady=(2, 2))
-        self.bar_preview_labels["mp"] = self._label(detection_frame, "尚未刷新預覽", color=MUTED_TEXT)
-        self.bar_preview_labels["mp"].grid(row=3, column=0, sticky="w", pady=(0, 6))
-
-        runtime_frame = ctk.CTkFrame(monitor_page, fg_color=PANEL_BG_ALT, corner_radius=SECTION_RADIUS, border_width=1, border_color=PANEL_BORDER)
-        runtime_frame.grid(row=3, column=0, sticky="ew", pady=(8, 6))
-        for column in range(3):
-            runtime_frame.columnconfigure(column, weight=1)
-        self._label(runtime_frame, textvariable=self.runtime_script_status, color=ACCENT_GREEN).grid(row=0, column=0, sticky="w", padx=(10, 12), pady=8)
-        self._label(runtime_frame, textvariable=self.runtime_foreground_status).grid(row=0, column=1, sticky="w", padx=(0, 12), pady=8)
-        self._label(runtime_frame, textvariable=self.runtime_status_message, color=WARNING_YELLOW).grid(row=0, column=2, sticky="w", padx=(0, 12), pady=8)
-        self.console_restore_button = self._button(runtime_frame, "Console ›", self.toggle_console_collapsed, width=92)
-        self.console_restore_button.grid(row=0, column=3, sticky="e", padx=(0, 10), pady=8)
-        self.console_restore_button.grid_remove()
-        self.full_panel_widgets = [
-            detection_section,
-            runtime_frame,
-        ]
+        self.monitor_page_refs = refs
+        self.monitor_frame = refs.monitor_frame
+        self.exp_section = refs.exp_section
+        self.detection_section = refs.detection_section
+        self.bar_preview_labels.update(refs.bar_preview_labels)
+        self.monitor_responsive_relayout = refs.monitor_responsive_relayout
+        self.panel_mode_button = refs.panel_mode_button
+        self.topmost_button = refs.topmost_button
+        self.console_restore_button = refs.console_restore_button
+        self.full_panel_widgets = list(refs.full_panel_widgets)
 
         self.root.bind("<Configure>", self._on_root_configure, add="+")
         self.set_window_topmost(settings.window_topmost)
@@ -570,59 +411,50 @@ class AutoPotionSettingsGui:
         page = self.page_frames.get("監控")
         if page is None or self.profile_select is not None or self.closed:
             return
-        hotkey_section, _header, hotkeys = self._build_section(page, "全域熱鍵", row=0, pady=(0, 0))
-        for column in range(10):
-            hotkeys.columnconfigure(column, weight=0)
-        hotkeys.columnconfigure(10, weight=1)
-
-        def key_entry(row: int, column: int, label: str, variable: tk.StringVar, capture_label: str) -> None:
-            self._label(hotkeys, label).grid(row=row, column=column, sticky="w", padx=(0, 4), pady=6)
-            entry = self._entry(hotkeys, variable, width=HOTKEY_ENTRY_WIDTH, justify="center")
-            entry.grid(row=row, column=column + 1, sticky="w", padx=(0, 8), pady=6)
-            entry.bind(
-                "<Button-1>",
-                lambda event: self._start_key_detection_from_entry(event, variable, capture_label),
+        existing_children = set(page.winfo_children())
+        previous_full_panel_widgets = list(self.full_panel_widgets)
+        try:
+            refs = build_monitor_controls(
+                page,
+                MonitorControlsContext(
+                widgets=self._page_widgets(),
+                active_profile=self.active_profile,
+                toggle_hotkey=self.toggle_hotkey,
+                emergency_stop_hotkey=self.emergency_stop_hotkey,
+                experience_toggle_hotkey=self.experience_toggle_hotkey,
+                experience_reset_hotkey=self.experience_reset_hotkey,
+                character_stat_hotkey=self.character_stat_hotkey,
+                pickup_toggle_hotkey=self.pickup_toggle_hotkey,
+                pickup_key=self.pickup_key,
+                pickup_enabled=self.pickup_enabled,
+                detect_key=self._start_key_detection_from_entry,
+                toggle_pickup=self._toggle_pickup_enabled_from_checkbox,
+                profile_names=self.settings.profile_names,
+                switch_profile=self._switch_profile,
+                create_profile=self.create_profile,
+                delete_profile=self.delete_profile,
+                import_settings=self.import_settings,
+                export_settings=self.export_settings,
+                ),
             )
-
-        key_entry(0, 0, "自動喝水", self.toggle_hotkey, "自動喝水熱鍵")
-        key_entry(0, 4, "總開關", self.emergency_stop_hotkey, "總開關熱鍵")
-        key_entry(0, 7, "經驗統計", self.experience_toggle_hotkey, "經驗統計熱鍵")
-        key_entry(1, 7, "重置統計", self.experience_reset_hotkey, "重置統計熱鍵")
-        key_entry(1, 9, "能力值", self.character_stat_hotkey, "能力值快捷鍵")
-        key_entry(1, 0, "拾取", self.pickup_toggle_hotkey, "拾取熱鍵")
-        self._checkbox(
-            hotkeys,
-            "自動拾取",
-            self.pickup_enabled,
-            width=86,
-            command=self._toggle_pickup_enabled_from_checkbox,
-        ).grid(row=1, column=2, sticky="w", padx=(0, 8), pady=(0, 6))
-        key_entry(1, 4, "拾取鍵", self.pickup_key, "拾取鍵")
-
-        profile_section, _header, profile = self._build_section(page, "設定檔", row=1)
-        for column in range(7):
-            profile.columnconfigure(column, weight=0)
-        profile.columnconfigure(2, weight=1)
-        self._label(profile, "目前").grid(row=0, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
-        self.profile_select = self._combo(
-            profile,
-            textvariable=self.active_profile,
-            values=self.settings.profile_names(),
-            width=PROFILE_COMBO_WIDTH,
-            command=lambda _value: self._switch_profile(),
-        )
-        self.profile_select.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=(0, 4))
-        self.profile_select.bind("<<ComboboxSelected>>", self._switch_profile)
-        self._button(profile, "新增", self.create_profile, width=64).grid(row=0, column=3, sticky="w", padx=(0, 4), pady=(0, 4))
-        self._button(profile, "刪除", self.delete_profile, width=64).grid(row=0, column=4, sticky="w", padx=(0, 4), pady=(0, 4))
-        self._button(profile, "匯入", self.import_settings, width=64).grid(row=0, column=5, sticky="w", padx=(0, 4), pady=(0, 4))
-        self._button(profile, "匯出", self.export_settings, width=64).grid(row=0, column=6, sticky="w", pady=(0, 4))
-        self.full_panel_widgets[:0] = [hotkey_section, profile_section]
-        if self.compact_experience_mode:
-            hotkey_section.grid_remove()
-            profile_section.grid_remove()
-        else:
-            self.root.after_idle(self._sync_full_window_height_to_left_panel)
+            self.monitor_controls_refs = refs
+            self.profile_select = refs.profile_select
+            self.full_panel_widgets[:0] = list(refs.full_panel_widgets)
+            if self.compact_experience_mode:
+                refs.hotkey_section.grid_remove()
+                refs.profile_section.grid_remove()
+            else:
+                self.root.after_idle(self._sync_full_window_height_to_left_panel)
+        except Exception:
+            for child in page.winfo_children():
+                if child not in existing_children:
+                    child.destroy()
+            self.monitor_controls_refs = None
+            self.profile_select = None
+            self.full_panel_widgets[:] = previous_full_panel_widgets
+            if not self.closed:
+                self.monitor_controls_after_id = self.root.after(250, self._build_monitor_controls)
+            raise
 
     def show_page(self, page_name: str) -> None:
         if page_name not in {"監控", "自動喝水", "小地圖巡航", "手把組合", "Console"}:
@@ -691,10 +523,10 @@ class AutoPotionSettingsGui:
         self.page_build_after_id = None
         if self.closed or self.active_page != page_name:
             return
+        self._ensure_page_built(page_name)
         placeholder = self.page_placeholders.pop(page_name, None)
         if placeholder is not None:
             placeholder.destroy()
-        self._ensure_page_built(page_name)
         self.root.after_idle(self._sync_full_window_height_to_left_panel)
 
     def _ensure_page_built(self, page_name: str) -> None:
@@ -710,373 +542,191 @@ class AutoPotionSettingsGui:
             builder(self.page_frames[page_name])
         self.page_built.add(page_name)
 
-    def _bind_responsive_two_columns(
-        self,
-        container: ctk.CTkFrame,
-        first: ctk.CTkFrame,
-        second: ctk.CTkFrame,
-        *,
-        breakpoint: int = 900,
-        active: Callable[[], bool] | None = None,
-        wide_weights: tuple[int, int] = (1, 1),
-        wide_uniform: str = "",
-    ) -> Callable[[], None]:
-        layout_state = {"narrow": None}
-
-        def layout(_event: tk.Event | None = None) -> None:
-            try:
-                if active is not None and not active():
-                    layout_state["narrow"] = None
-                    return
-                narrow = int(container.winfo_width()) < breakpoint
-                if layout_state["narrow"] == narrow:
-                    return
-                layout_state["narrow"] = narrow
-                if narrow:
-                    container.columnconfigure(0, weight=1, uniform="")
-                    container.columnconfigure(1, weight=0, uniform="")
-                    first.grid_configure(row=0, column=0, sticky="ew", padx=0, pady=(0, 4))
-                    second.grid_configure(row=1, column=0, sticky="ew", padx=0, pady=(4, 0))
-                else:
-                    container.columnconfigure(0, weight=wide_weights[0], uniform=wide_uniform)
-                    container.columnconfigure(1, weight=wide_weights[1], uniform=wide_uniform)
-                    first.grid_configure(row=0, column=0, sticky="nsew", padx=(0, 4), pady=0)
-                    second.grid_configure(row=0, column=1, sticky="nsew", padx=(4, 0), pady=0)
-            except tk.TclError:
-                return
-
-        def relayout() -> None:
-            layout_state["narrow"] = None
-            layout()
-
-        container.bind("<Configure>", layout, add="+")
-        self.root.after_idle(relayout)
-        return relayout
+    def _page_widgets(self) -> PageWidgets:
+        return PageWidgets(
+            section=self._build_section,
+            title_label=self._title_label,
+            label=self._label,
+            entry=self._entry,
+            checkbox=self._checkbox,
+            button=self._button,
+            responsive_columns=self._bind_responsive_two_columns,
+            combo=self._combo,
+        )
 
     def _build_potion_page(self, page: ctk.CTkFrame) -> None:
-        header = ctk.CTkFrame(
-            page,
-            fg_color=SECTION_HEADER_BG,
-            corner_radius=CONTROL_RADIUS,
-            border_width=1,
-            border_color=SECTION_HEADER_BORDER,
+        existing_children = set(page.winfo_children())
+        context = PotionPageContext(
+            widgets=self._page_widgets(),
+            auto_drink_enabled=self.auto_drink_enabled,
+            hp=PotionKindContext(
+                "HP／紅水",
+                "紅水",
+                self.hp_enabled,
+                self.hp_threshold,
+                self.hp_threshold_text,
+                self.hp_key,
+                self.hp_cooldown,
+                self.hp_continuous_enabled,
+                self.hp_continuous_stop_margin,
+                self.hp_current,
+            ),
+            mp=PotionKindContext(
+                "MP／藍水",
+                "藍水",
+                self.mp_enabled,
+                self.mp_threshold,
+                self.mp_threshold_text,
+                self.mp_key,
+                self.mp_cooldown,
+                self.mp_continuous_enabled,
+                self.mp_continuous_stop_margin,
+                self.mp_current,
+            ),
+            toggle_auto_drink=self._toggle_auto_drink_enabled_from_checkbox,
+            detect_key=self._start_key_detection_from_entry,
+            apply_percent=self._apply_percent_text,
         )
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        header.columnconfigure(99, weight=1)
-        self._title_label(header, "藥水監控").grid(row=0, column=0, sticky="w", padx=8, pady=4)
-        self._checkbox(
-            header,
-            "自動喝水",
-            self.auto_drink_enabled,
-            width=88,
-            command=self._toggle_auto_drink_enabled_from_checkbox,
-        ).grid(row=0, column=98, sticky="e", padx=(8, 8), pady=4)
-        cards = ctk.CTkFrame(page, fg_color="transparent")
-        cards.grid(row=1, column=0, sticky="ew")
-        cards.columnconfigure(0, weight=1, uniform="potion")
-        cards.columnconfigure(1, weight=1, uniform="potion")
-        hp_card = self._build_potion_card(
-            cards,
-            0,
-            "HP／紅水",
-            "紅水",
-            self.hp_enabled,
-            self.hp_threshold,
-            self.hp_threshold_text,
-            self.hp_key,
-            self.hp_cooldown,
-            self.hp_continuous_enabled,
-            self.hp_continuous_stop_margin,
-            self.hp_current,
-        )
-        mp_card = self._build_potion_card(
-            cards,
-            1,
-            "MP／藍水",
-            "藍水",
-            self.mp_enabled,
-            self.mp_threshold,
-            self.mp_threshold_text,
-            self.mp_key,
-            self.mp_cooldown,
-            self.mp_continuous_enabled,
-            self.mp_continuous_stop_margin,
-            self.mp_current,
-        )
-        self._bind_responsive_two_columns(cards, hp_card, mp_card)
+        try:
+            refs = build_potion_page(page, context)
+        except Exception:
+            for child in page.winfo_children():
+                if child not in existing_children:
+                    child.destroy()
+            raise
+        self.potion_page_refs = refs
 
-    def _build_potion_card(
-        self,
-        parent: ctk.CTkFrame,
-        column: int,
-        title: str,
-        capture_label: str,
-        enabled_var: tk.BooleanVar,
-        threshold_var: tk.DoubleVar,
-        threshold_text: tk.StringVar,
-        key_var: tk.StringVar,
-        cooldown_var: tk.StringVar,
-        continuous_var: tk.BooleanVar,
-        continuous_stop_margin_var: tk.StringVar,
-        current_var: tk.StringVar,
-    ) -> ctk.CTkFrame:
-        section, header, body = self._build_section(
-            parent,
-            "",
-            row=0,
-            column=column,
-            sticky="nsew",
-            padx=(0, 4) if column == 0 else (4, 0),
-            pady=0,
-        )
-        self._checkbox(header, title, enabled_var, width=112).grid(
-            row=0,
-            column=0,
-            sticky="w",
-            padx=8,
-            pady=4,
-        )
-        self._label(header, textvariable=current_var, font=MONO_FONT).grid(
-            row=0,
-            column=99,
-            sticky="e",
-            padx=8,
-            pady=4,
-        )
-        body.columnconfigure(1, weight=1)
-        self._label(body, "觸發門檻").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
-        scale = ctk.CTkSlider(
-            body,
-            from_=1,
-            to=100,
-            variable=threshold_var,
-            command=lambda value, text=threshold_text: text.set(f"{float(value):.0f}"),
-            height=18,
-            fg_color=ENTRY_BG,
-            progress_color=ACCENT_BLUE,
-            button_color=ACCENT_BLUE,
-            button_hover_color=BUTTON_HOVER,
-        )
-        scale.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=4)
-        threshold_entry = self._entry(body, threshold_text, width=PERCENT_ENTRY_WIDTH)
-        threshold_entry.grid(row=0, column=2, sticky="w", padx=(0, 4), pady=4)
-        self._label(body, "%").grid(row=0, column=3, sticky="w", pady=4)
-
-        self._label(body, "按鍵").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        key_entry = self._entry(body, key_var, width=POTION_KEY_ENTRY_WIDTH, justify="center")
-        key_entry.grid(row=1, column=1, sticky="w", padx=(0, 12), pady=4)
-        key_entry.bind(
-            "<Button-1>",
-            lambda event, var=key_var, name=capture_label: self._start_key_detection_from_entry(event, var, name),
-        )
-        cooldown = ctk.CTkFrame(body, fg_color="transparent")
-        cooldown.grid(row=1, column=2, columnspan=2, sticky="e", pady=4)
-        self._label(cooldown, "冷卻").grid(row=0, column=0, sticky="w", padx=(0, 4))
-        self._entry(cooldown, cooldown_var, width=SECONDS_ENTRY_WIDTH).grid(row=0, column=1, sticky="w", padx=(0, 4))
-        self._label(cooldown, "秒").grid(row=0, column=2, sticky="w")
-
-        continuous = ctk.CTkFrame(body, fg_color="transparent")
-        continuous.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
-        self._checkbox(continuous, "連續補充", continuous_var, width=94).grid(row=0, column=0, sticky="w")
-        self._label(continuous, "停止誤差").grid(row=0, column=1, sticky="w", padx=(12, 4))
-        self._entry(continuous, continuous_stop_margin_var, width=PERCENT_ENTRY_WIDTH).grid(
-            row=0,
-            column=2,
-            sticky="w",
-            padx=(0, 4),
-        )
-        self._label(continuous, "%").grid(row=0, column=3, sticky="w")
-
-        threshold_entry.bind(
-            "<Return>",
-            lambda _event, var=threshold_var, text=threshold_text: self._apply_percent_text(var, text),
-        )
-        threshold_entry.bind(
-            "<FocusOut>",
-            lambda _event, var=threshold_var, text=threshold_text: self._apply_percent_text(var, text),
-        )
-        return section
 
     def _build_minimap_page(self, page: ctk.CTkFrame) -> None:
-        section, header, body = self._build_section(page, "", row=0, sticky="ew", pady=(0, 0))
-        self.minimap_cruise_section = section
-        self.minimap_cruise_body = body
-        self.minimap_cruise_title_label = self._title_label(header, "小地圖巡航")
-        self.minimap_cruise_title_label.grid(row=0, column=0, sticky="w", padx=8, pady=4)
-        header.bind("<Button-1>", lambda _event: self.toggle_minimap_cruise_group_collapsed())
-        self.minimap_cruise_title_label.bind(
-            "<Button-1>",
-            lambda _event: self.toggle_minimap_cruise_group_collapsed(),
+        existing_children = set(page.winfo_children())
+        context = MinimapPageContext(
+            widgets=self._page_widgets(),
+            toggle_hotkey=self.minimap_cruise_toggle_hotkey,
+            attack_key=self.minimap_cruise_attack_key,
+            boundary_status=self.minimap_cruise_boundary_status,
+            detect_key=self._start_key_detection_from_entry,
+            setup_boundary=self.start_minimap_cruise_boundary_setup,
+            open_extra_settings=self.open_minimap_cruise_extra_settings,
+            toggle_collapsed=self.toggle_minimap_cruise_group_collapsed,
         )
-        body.columnconfigure(0, weight=1)
-        body.columnconfigure(1, weight=1)
-        primary = ctk.CTkFrame(body, fg_color="transparent")
-        actions = ctk.CTkFrame(body, fg_color="transparent")
-        primary.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        actions.grid(row=0, column=1, sticky="ew", padx=(8, 0))
-        self._label(primary, "啟停").grid(row=0, column=0, sticky="w", padx=(0, 4), pady=6)
-        toggle_entry = self._entry(
-            primary,
-            self.minimap_cruise_toggle_hotkey,
-            width=HOTKEY_ENTRY_WIDTH,
-            justify="center",
-            placeholder_text="自訂",
-        )
-        toggle_entry.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=6)
-        toggle_entry.bind(
-            "<Button-1>",
-            lambda event: self._start_key_detection_from_entry(
-                event,
-                self.minimap_cruise_toggle_hotkey,
-                "巡航啟停熱鍵",
-            ),
-        )
-        self._label(primary, "攻擊鍵").grid(row=0, column=2, sticky="w", padx=(8, 4), pady=6)
-        attack_entry = self._entry(
-            primary,
-            self.minimap_cruise_attack_key,
-            width=HOTKEY_ENTRY_WIDTH,
-            justify="center",
-        )
-        attack_entry.grid(row=0, column=3, sticky="w", padx=(0, 8), pady=6)
-        attack_entry.bind(
-            "<Button-1>",
-            lambda event: self._start_key_detection_from_entry(
-                event,
-                self.minimap_cruise_attack_key,
-                "巡航攻擊鍵",
-            ),
-        )
-        self._button(actions, "設定邊界", self.start_minimap_cruise_boundary_setup, width=88).grid(
-            row=0,
-            column=0,
-            sticky="w",
-            padx=(8, 8),
-            pady=6,
-        )
-        self._button(actions, "進階設定", self.open_minimap_cruise_extra_settings, width=88).grid(
-            row=0,
-            column=1,
-            sticky="w",
-            padx=(0, 8),
-            pady=6,
-        )
-        self._label(actions, textvariable=self.minimap_cruise_boundary_status, color=MUTED_TEXT).grid(
-            row=1,
-            column=0,
-            columnspan=2,
-            sticky="w",
-            padx=(0, 8),
-            pady=6,
-        )
-        self._bind_responsive_two_columns(body, primary, actions)
-        self.set_minimap_cruise_group_collapsed(self.minimap_cruise_group_collapsed)
+        try:
+            refs = build_minimap_page(page, context)
+            self.minimap_page_refs = refs
+            self.minimap_cruise_section = refs.section
+            self.minimap_cruise_body = refs.body
+            self.minimap_cruise_title_label = refs.title_label
+            self.set_minimap_cruise_group_collapsed(self.minimap_cruise_group_collapsed)
+        except Exception:
+            for child in page.winfo_children():
+                if child not in existing_children:
+                    child.destroy()
+            self.minimap_page_refs = None
+            self.minimap_cruise_section = None
+            self.minimap_cruise_body = None
+            self.minimap_cruise_title_label = None
+            raise
 
     def _build_combo_page(self, page: ctk.CTkFrame) -> None:
-        section, header, body = self._build_section(page, "", row=0, sticky="ew", pady=(0, 0))
-        self.combo_group_section = section
-        self.combo_group_body = body
-        self.combo_group_title_label = self._title_label(header, "組合設定")
-        self.combo_group_title_label.grid(row=0, column=0, sticky="w", padx=8, pady=4)
-        header.bind("<Button-1>", lambda _event: self.toggle_combo_group_collapsed())
-        self.combo_group_title_label.bind("<Button-1>", lambda _event: self.toggle_combo_group_collapsed())
-        body.columnconfigure(0, weight=1)
-        combos = ctk.CTkFrame(body, fg_color="transparent")
-        combos.grid(row=0, column=0, sticky="ew")
-        combos.columnconfigure(0, weight=1, uniform="combo")
-        combos.columnconfigure(1, weight=1, uniform="combo")
-        combo_a = ctk.CTkFrame(
-            combos,
-            fg_color=PANEL_BG_ALT,
-            corner_radius=CONTROL_RADIUS,
-            border_width=1,
-            border_color=PANEL_BORDER,
+        existing_children = set(page.winfo_children())
+
+        context = ComboPageContext(
+            widgets=self._page_widgets(),
+            slot_a=ComboSlotContext(
+                "A",
+                self.rb_enabled,
+                self.rb_controller_button,
+                self.combo_a_script,
+                self.rb_jump_key,
+                self.rb_skill_key,
+                self.rb_attack_key,
+                self.rb_attack_start_delay,
+                self.rb_attack_hold,
+                self.rb_skill_delay,
+                self.rb_jump_interval,
+                self._combo_a_description,
+            ),
+            slot_b=ComboSlotContext(
+                "B",
+                self.lb_enabled,
+                self.lb_controller_button,
+                self.combo_b_script,
+                self.lb_jump_key,
+                self.lb_skill_key,
+                self.lb_attack_key,
+                self.lb_attack_start_delay,
+                self.lb_attack_hold,
+                self.lb_skill_delay,
+                self.lb_jump_interval,
+                self._combo_b_description,
+            ),
+            toggle_collapsed=self.toggle_combo_group_collapsed,
+            bind_checkbox_label=self._bind_checkbox_label,
+            info_icon=self._info_icon,
+            detect_key=self._start_key_detection_from_entry,
+            script_changed=self._on_combo_script_changed,
+            step_seconds=self._step_seconds,
         )
-        combo_b = ctk.CTkFrame(
-            combos,
-            fg_color=PANEL_BG_ALT,
-            corner_radius=CONTROL_RADIUS,
-            border_width=1,
-            border_color=PANEL_BORDER,
-        )
-        combo_a.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
-        combo_b.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
-        combo_a.columnconfigure(0, weight=1)
-        combo_b.columnconfigure(0, weight=1)
-        self._build_combo_slot_row(
-            combo_a,
-            0,
-            "A",
-            self.rb_enabled,
-            self.rb_controller_button,
-            self.combo_a_script,
-            self.rb_jump_key,
-            self.rb_skill_key,
-            self.rb_attack_key,
-            self.rb_attack_start_delay,
-            self.rb_attack_hold,
-            self.rb_skill_delay,
-            self.rb_jump_interval,
-            self._combo_a_description,
-        )
-        self._build_combo_slot_row(
-            combo_b,
-            0,
-            "B",
-            self.lb_enabled,
-            self.lb_controller_button,
-            self.combo_b_script,
-            self.lb_jump_key,
-            self.lb_skill_key,
-            self.lb_attack_key,
-            self.lb_attack_start_delay,
-            self.lb_attack_hold,
-            self.lb_skill_delay,
-            self.lb_jump_interval,
-            self._combo_b_description,
-        )
-        self._bind_responsive_two_columns(
-            combos,
-            combo_a,
-            combo_b,
-            wide_uniform="combo",
-        )
-        self._refresh_combo_script_visibility()
-        self.set_combo_group_collapsed(self.combo_group_collapsed)
+        try:
+            refs = build_combo_page(page, context)
+            self.combo_page_refs = refs
+            self.combo_group_section = refs.section
+            self.combo_group_body = refs.body
+            self.combo_group_title_label = refs.title_label
+            for slot_id, slot_refs in refs.slots.items():
+                self.combo_field_flows[slot_id] = slot_refs.field_flow
+                self.combo_skill_key_fields[slot_id] = slot_refs.skill_key_fields
+                self.combo_attack_key_fields[slot_id] = slot_refs.attack_key_fields
+                self.combo_skill_delay_fields[slot_id] = slot_refs.skill_delay_fields
+                self.combo_attack_start_delay_fields[slot_id] = slot_refs.attack_start_delay_fields
+                self.combo_attack_hold_fields[slot_id] = slot_refs.attack_hold_fields
+                self.combo_jump_interval_fields[slot_id] = slot_refs.jump_interval_fields
+            self._refresh_combo_script_visibility()
+            self.set_combo_group_collapsed(self.combo_group_collapsed)
+        except Exception:
+            for child in page.winfo_children():
+                if child not in existing_children:
+                    child.destroy()
+            self.combo_page_refs = None
+            self.combo_group_section = None
+            self.combo_group_body = None
+            self.combo_group_title_label = None
+            for registry in (
+                self.combo_field_flows,
+                self.combo_skill_key_fields,
+                self.combo_attack_key_fields,
+                self.combo_skill_delay_fields,
+                self.combo_attack_start_delay_fields,
+                self.combo_attack_hold_fields,
+                self.combo_jump_interval_fields,
+            ):
+                registry.pop("A", None)
+                registry.pop("B", None)
+            raise
 
     def _ensure_console_page_built(self) -> None:
         if self.console_section is not None or self.content_frame is None:
             return
-        section, header, body = self._build_section(
-            self.content_frame,
-            "",
-            row=1,
-            column=0,
-            sticky="nsew",
-            padx=0,
-            pady=0,
-        )
-        self.console_section = section
-        section.grid_propagate(False)
-        self.console_title_label = self._title_label(header, "Console")
-        self.console_title_label.grid(row=0, column=0, sticky="w", padx=8, pady=4)
-        self.console_clear_button = self._button(header, "清除", self.clear_console, width=58)
-        self.console_clear_button.grid(row=0, column=98, sticky="e", padx=(8, 0), pady=4)
-        self.console_frame = body
-        body.columnconfigure(0, weight=1)
-        body.rowconfigure(0, weight=1)
-        self.console_container = ctk.CTkFrame(
-            body,
-            height=620,
-            width=CONSOLE_MIN_WIDTH,
-            fg_color=CONSOLE_BG,
-            border_width=1,
-            border_color=BUTTON_BORDER,
-            corner_radius=CONTROL_RADIUS,
-        )
-        self.console_container.grid(row=0, column=0, sticky="nsew")
-        self.console_container.columnconfigure(0, weight=1)
-        self.console_container.rowconfigure(0, weight=1)
+        parent = self.content_frame
+        existing_children = set(parent.winfo_children())
+        try:
+            refs = build_console_page(
+                parent,
+                ConsolePageContext(
+                    widgets=self._page_widgets(),
+                    clear_console=self.clear_console,
+                ),
+            )
+        except Exception:
+            for child in parent.winfo_children():
+                if child not in existing_children:
+                    child.destroy()
+            raise
+        self.console_page_refs = refs
+        self.console_section = refs.section
+        self.console_title_label = refs.title_label
+        self.console_clear_button = refs.clear_button
+        self.console_frame = refs.frame
+        self.console_container = refs.container
 
     def _ensure_console_built(self) -> None:
         if self.console is not None or self.console_container is None:
@@ -1084,38 +734,23 @@ class AutoPotionSettingsGui:
         if self.console_placeholder is not None:
             self.console_placeholder.destroy()
             self.console_placeholder = None
-        self.console = tk.Text(
-            self.console_container,
-            height=1,
-            width=1,
-            state="disabled",
-            wrap="word",
-            bg=CONSOLE_BG,
-            fg=CONSOLE_TEXT,
-            insertbackground=CONSOLE_TEXT,
-            selectbackground=SECONDARY_BUTTON_BG,
-            selectforeground=HEADER_TEXT,
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=0,
-            padx=10,
-            pady=8,
-            font=CONSOLE_FONT,
-        )
-        self.console_scrollbar = ctk.CTkScrollbar(
-            self.console_container,
-            command=self.console.yview,
-            button_color=SECONDARY_BUTTON_BG,
-            button_hover_color=SECONDARY_BUTTON_HOVER,
-        )
-        self.console.configure(yscrollcommand=self.console_scrollbar.set)
-        self.console.grid(row=0, column=0, sticky="nsew", padx=(1, 0), pady=1)
-        self.console_scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 1), pady=1)
+        existing_children = set(self.console_container.winfo_children())
+        try:
+            refs = build_console_text(self.console_container)
+        except Exception:
+            for child in self.console_container.winfo_children():
+                if child not in existing_children:
+                    child.destroy()
+            raise
+        self.console_text_refs = refs
+        self.console = refs.text
+        self.console_scrollbar = refs.scrollbar
         if self.console_pending_text:
             try:
                 self.console_flush_after_id = self.root.after_idle(self._flush_console_buffer)
             except tk.TclError:
                 self.console_flush_after_id = None
+
 
     def _on_root_configure(self, event: tk.Event) -> None:
         if event.widget is not self.root:
@@ -1162,189 +797,6 @@ class AutoPotionSettingsGui:
 
     def toggle_minimap_cruise_group_collapsed(self) -> None:
         self.set_minimap_cruise_group_collapsed(not self.minimap_cruise_group_collapsed)
-
-    def open_minimap_cruise_extra_settings(self) -> None:
-        existing = self.minimap_cruise_extra_settings_window
-        if existing is not None:
-            try:
-                if bool(existing.winfo_exists()):
-                    existing.lift()
-                    existing.focus_set()
-                    return
-            except tk.TclError:
-                self.minimap_cruise_extra_settings_window = None
-
-        window = self._create_auxiliary_window(fg_color=APP_BG)
-        self.minimap_cruise_extra_settings_window = window
-        window.title("巡航進階設定")
-        window.resizable(False, False)
-        window.protocol("WM_DELETE_WINDOW", self.close_minimap_cruise_extra_settings)
-        window.columnconfigure(0, weight=1)
-
-        container = ctk.CTkFrame(window, fg_color="transparent")
-        container.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
-        container.columnconfigure(0, weight=1)
-        self._build_minimap_cruise_extra_settings(container)
-
-        actions = ctk.CTkFrame(container, fg_color="transparent")
-        actions.grid(row=2, column=0, sticky="e", pady=(8, 0))
-        self._button(actions, "關閉", self.close_minimap_cruise_extra_settings, width=74).grid(
-            row=0,
-            column=0,
-            sticky="e",
-        )
-
-        window.update_idletasks()
-        self._prepare_auxiliary_window_for_show(window)
-        x = self.root.winfo_rootx() + 72
-        y = self.root.winfo_rooty() + 72
-        window.geometry(f"+{x}+{y}")
-        window.deiconify()
-        window.lift()
-        window.focus_set()
-
-    def close_minimap_cruise_extra_settings(self) -> None:
-        window = self.minimap_cruise_extra_settings_window
-        self.minimap_cruise_extra_settings_window = None
-        if window is None:
-            return
-        if not self.closed:
-            try:
-                self.apply_to_settings()
-            except tk.TclError:
-                pass
-        try:
-            window.destroy()
-        except tk.TclError:
-            pass
-
-    def _build_minimap_cruise_extra_settings(self, parent: ctk.CTkFrame) -> None:
-        skill_section, _skill_header, skill_frame = self._build_section(
-            parent,
-            "邊界技能",
-            row=0,
-            pady=(0, 0),
-        )
-        skill_section.grid_propagate(False)
-        skill_section.configure(width=610, height=126)
-        for column in range(9):
-            skill_frame.columnconfigure(column, weight=0)
-        skill_frame.columnconfigure(9, weight=1)
-        self._checkbox(
-            skill_frame,
-            "邊界前技能",
-            self.minimap_cruise_pre_boundary_skill_enabled,
-            width=104,
-        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=(0, 8), pady=6)
-        self._label(skill_frame, "技能鍵").grid(row=0, column=2, sticky="w", padx=(8, 4), pady=6)
-        skill_entry = self._entry(
-            skill_frame,
-            self.minimap_cruise_pre_boundary_skill_key,
-            width=HOTKEY_ENTRY_WIDTH,
-            justify="center",
-            placeholder_text="自訂",
-        )
-        skill_entry.grid(row=0, column=3, sticky="w", padx=(0, 8), pady=6)
-        skill_entry.bind(
-            "<Button-1>",
-            lambda event: self._start_key_detection_from_entry(
-                event,
-                self.minimap_cruise_pre_boundary_skill_key,
-                "巡航邊界前技能鍵",
-            ),
-        )
-        self._label(skill_frame, "距離").grid(row=0, column=4, sticky="w", padx=(8, 4), pady=6)
-        self._entry(
-            skill_frame,
-            self.minimap_cruise_pre_boundary_distance,
-            width=56,
-            justify="center",
-        ).grid(row=0, column=5, sticky="w", padx=(0, 4), pady=6)
-        self._label(skill_frame, "px").grid(row=0, column=6, sticky="w", padx=(0, 8), pady=6)
-        self._label(skill_frame, "測謊音量").grid(row=0, column=7, sticky="w", padx=(8, 4), pady=6)
-        self._entry(
-            skill_frame,
-            self.minimap_cruise_lie_detector_alert_volume,
-            width=48,
-            justify="center",
-        ).grid(row=0, column=8, sticky="w", padx=(0, 4), pady=6)
-        self._label(skill_frame, "%").grid(row=0, column=9, sticky="w", padx=(0, 8), pady=6)
-        self._label(skill_frame, "原地位移技").grid(row=1, column=0, columnspan=2, sticky="w", padx=(0, 8), pady=6)
-        stationary_skill_entry = self._entry(
-            skill_frame,
-            self.minimap_cruise_stationary_skill_key,
-            width=HOTKEY_ENTRY_WIDTH,
-            justify="center",
-            placeholder_text="空白=轉向",
-        )
-        stationary_skill_entry.grid(row=1, column=2, sticky="w", padx=(8, 8), pady=6)
-        stationary_skill_entry.bind(
-            "<Button-1>",
-            lambda event: self._start_key_detection_from_entry(
-                event,
-                self.minimap_cruise_stationary_skill_key,
-                "巡航原地位移技",
-            ),
-        )
-        self._label(skill_frame, "1秒前進門檻").grid(row=1, column=3, sticky="w", padx=(8, 4), pady=6)
-        self._entry(
-            skill_frame,
-            self.minimap_cruise_stationary_min_forward_pixels,
-            width=56,
-            justify="center",
-        ).grid(row=1, column=4, sticky="w", padx=(0, 4), pady=6)
-        self._label(skill_frame, "px").grid(row=1, column=5, sticky="w", padx=(0, 8), pady=6)
-
-        periodic_section, _periodic_header, periodic_frame = self._build_section(
-            parent,
-            "定期熱鍵",
-            row=1,
-            pady=(8, 0),
-        )
-        periodic_section.configure(width=610)
-        for column in range(7):
-            periodic_frame.columnconfigure(column, weight=0)
-        periodic_frame.columnconfigure(7, weight=1)
-        for index, (enabled_var, key_var, interval_var) in enumerate(
-            zip(
-                self.minimap_cruise_periodic_key_enabled_vars,
-                self.minimap_cruise_periodic_key_vars,
-                self.minimap_cruise_periodic_key_interval_vars,
-            ),
-            start=1,
-        ):
-            row = index - 1
-            self._checkbox(
-                periodic_frame,
-                f"定期按鍵{index}",
-                enabled_var,
-                width=104,
-            ).grid(row=row, column=0, columnspan=2, sticky="w", padx=(0, 8), pady=(0, 6))
-            self._label(periodic_frame, "熱鍵").grid(row=row, column=2, sticky="w", padx=(8, 4), pady=(0, 6))
-            periodic_key_entry = self._entry(
-                periodic_frame,
-                key_var,
-                width=HOTKEY_ENTRY_WIDTH,
-                justify="center",
-                placeholder_text="自訂",
-            )
-            periodic_key_entry.grid(row=row, column=3, sticky="w", padx=(0, 8), pady=(0, 6))
-            periodic_key_entry.bind(
-                "<Button-1>",
-                lambda event, var=key_var, slot=index: self._start_key_detection_from_entry(
-                    event,
-                    var,
-                    f"巡航定期按鍵{slot}",
-                ),
-            )
-            self._label(periodic_frame, "間隔").grid(row=row, column=4, sticky="w", padx=(8, 4), pady=(0, 6))
-            self._entry(
-                periodic_frame,
-                interval_var,
-                width=56,
-                justify="center",
-            ).grid(row=row, column=5, sticky="w", padx=(0, 4), pady=(0, 6))
-            self._label(periodic_frame, "秒").grid(row=row, column=6, sticky="w", padx=(0, 8), pady=(0, 6))
 
     def set_minimap_cruise_group_collapsed(self, collapsed: bool) -> None:
         collapsed = bool(collapsed)
@@ -1884,338 +1336,6 @@ class AutoPotionSettingsGui:
         except tk.TclError:
             return
 
-    def _build_section(
-        self,
-        parent: ctk.CTkFrame,
-        title: str,
-        *,
-        row: int,
-        column: int = 0,
-        sticky: str = "ew",
-        padx: int | tuple[int, int] = 0,
-        pady: int | tuple[int, int] = (8, 0),
-    ) -> tuple[ctk.CTkFrame, ctk.CTkFrame, ctk.CTkFrame]:
-        section = ctk.CTkFrame(
-            parent,
-            fg_color=PANEL_BG,
-            corner_radius=SECTION_RADIUS,
-            border_width=1,
-            border_color=PANEL_BORDER,
-        )
-        section.grid(row=row, column=column, sticky=sticky, padx=padx, pady=pady)
-        section.columnconfigure(0, weight=1)
-        section.rowconfigure(1, weight=1)
-
-        header = ctk.CTkFrame(
-            section,
-            fg_color=SECTION_HEADER_BG,
-            corner_radius=CONTROL_RADIUS,
-            border_width=1,
-            border_color=SECTION_HEADER_BORDER,
-        )
-        header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
-        header.columnconfigure(99, weight=1)
-
-        body = ctk.CTkFrame(section, fg_color="transparent")
-        body.grid(row=1, column=0, sticky="nsew", padx=SECTION_PAD_X, pady=(0, SECTION_PAD_Y))
-        body.columnconfigure(0, weight=1)
-
-        if title:
-            self._title_label(header, title).grid(row=0, column=0, sticky="w", padx=8, pady=4)
-
-        return section, header, body
-
-    def _title_label(self, parent: ctk.CTkFrame, text: str) -> ctk.CTkLabel:
-        return ctk.CTkLabel(
-            parent,
-            text=text,
-            text_color=HEADER_TEXT,
-            font=TITLE_FONT,
-            height=24,
-            anchor="w",
-        )
-
-    def _label(
-        self,
-        parent: ctk.CTkFrame | ctk.CTkToplevel,
-        text: str = "",
-        *,
-        textvariable: tk.StringVar | None = None,
-        color: str = BODY_TEXT,
-        font: tuple[str, int] | tuple[str, int, str] = UI_FONT,
-        width: int = 0,
-        anchor: str = "w",
-    ) -> ctk.CTkLabel:
-        return ctk.CTkLabel(
-            parent,
-            text=text,
-            textvariable=textvariable,
-            text_color=color,
-            font=font,
-            width=width,
-            height=24,
-            anchor=anchor,
-        )
-
-    def _button(
-        self,
-        parent: ctk.CTkFrame,
-        text: str,
-        command: Callable[[], object],
-        *,
-        width: int = 74,
-        primary: bool = False,
-    ) -> ctk.CTkButton:
-        fg_color = BUTTON_BG if primary else SECONDARY_BUTTON_BG
-        hover_color = BUTTON_HOVER if primary else SECONDARY_BUTTON_HOVER
-        return ctk.CTkButton(
-            parent,
-            text=text,
-            command=command,
-            width=width,
-            height=32,
-            corner_radius=CONTROL_RADIUS,
-            fg_color=fg_color,
-            hover_color=hover_color,
-            text_color=BUTTON_TEXT,
-            border_width=1,
-            border_color=BUTTON_BORDER,
-            font=BUTTON_FONT,
-        )
-
-    def _entry(
-        self,
-        parent: ctk.CTkFrame,
-        textvariable: tk.StringVar,
-        *,
-        width: int = 82,
-        justify: str = "left",
-        placeholder_text: str = "",
-    ) -> ctk.CTkEntry:
-        return ctk.CTkEntry(
-            parent,
-            textvariable=textvariable,
-            width=width,
-            height=30,
-            corner_radius=CONTROL_RADIUS,
-            fg_color=ENTRY_BG,
-            border_color=PANEL_BORDER,
-            text_color=BODY_TEXT,
-            placeholder_text=placeholder_text,
-            placeholder_text_color=MUTED_TEXT,
-            font=UI_FONT,
-            justify=justify,
-        )
-
-    def _combo(
-        self,
-        parent: ctk.CTkFrame,
-        *,
-        textvariable: tk.StringVar,
-        values: list[str] | tuple[str, ...],
-        width: int = 110,
-        command: Callable[[str], object] | None = None,
-    ) -> ctk.CTkComboBox:
-        return ctk.CTkComboBox(
-            parent,
-            variable=textvariable,
-            values=list(values),
-            command=command,
-            width=width,
-            height=30,
-            state="readonly",
-            corner_radius=CONTROL_RADIUS,
-            fg_color=ENTRY_BG,
-            border_color=PANEL_BORDER,
-            button_color=SECONDARY_BUTTON_BG,
-            button_hover_color=SECONDARY_BUTTON_HOVER,
-            dropdown_fg_color=PANEL_BG_ALT,
-            dropdown_hover_color=SECONDARY_BUTTON_HOVER,
-            dropdown_text_color=BODY_TEXT,
-            text_color=BODY_TEXT,
-            font=UI_FONT,
-            dropdown_font=UI_FONT,
-        )
-
-    def _checkbox(
-        self,
-        parent: ctk.CTkFrame,
-        text: str,
-        variable: tk.BooleanVar,
-        *,
-        width: int = 92,
-        command: Callable[[], None] | None = None,
-    ) -> ctk.CTkCheckBox:
-        return ctk.CTkCheckBox(
-            parent,
-            text=text,
-            variable=variable,
-            command=command or self.apply_to_settings,
-            width=width,
-            height=26,
-            checkbox_width=18,
-            checkbox_height=18,
-            corner_radius=5,
-            border_width=2,
-            border_color=PANEL_BORDER,
-            fg_color=ACCENT_GREEN,
-            hover_color=SECONDARY_BUTTON_HOVER,
-            text_color=BODY_TEXT,
-            font=UI_FONT,
-        )
-
-    def _bind_checkbox_label(
-        self,
-        label: ctk.CTkLabel,
-        variable: tk.BooleanVar,
-        command: Callable[[], None] | None = None,
-    ) -> ctk.CTkLabel:
-        label.configure(cursor="hand2")
-        label.bind("<Button-1>", lambda _event: self._toggle_checkbox_label(variable, command))
-        return label
-
-    def _toggle_checkbox_label(self, variable: tk.BooleanVar, command: Callable[[], None] | None = None) -> str:
-        variable.set(not bool(variable.get()))
-        (command or self.apply_to_settings)()
-        return "break"
-
-    def _info_icon(self, parent: ctk.CTkFrame, text_provider: Callable[[], str]) -> ctk.CTkButton:
-        button = ctk.CTkButton(
-            parent,
-            text="🛈",
-            width=22,
-            height=22,
-            corner_radius=12,
-            fg_color=INFO_ICON_BG,
-            hover_color=INFO_ICON_HOVER,
-            border_width=1,
-            border_color=SECTION_HEADER_BORDER,
-            text_color=HEADER_TEXT,
-            font=(FONT_FAMILY, 15, "bold"),
-        )
-        button.bind("<Enter>", lambda _event, widget=button: self._handle_tooltip_enter(widget, text_provider))
-        button.bind("<Leave>", lambda _event, widget=button: self._schedule_tooltip_hide(widget))
-        return button
-
-    def _handle_tooltip_enter(self, widget: ctk.CTkBaseClass, text_provider: Callable[[], str]) -> None:
-        if self.tooltip_hide_after_id is not None:
-            try:
-                self.root.after_cancel(self.tooltip_hide_after_id)
-            except tk.TclError:
-                pass
-            self.tooltip_hide_after_id = None
-        if self.tooltip_anchor_widget is widget and self.tooltip_window is not None:
-            self._ensure_tooltip_pointer_check()
-            return
-        self._show_tooltip(widget, text_provider())
-
-    def _schedule_tooltip_hide(self, widget: ctk.CTkBaseClass) -> None:
-        if self.tooltip_anchor_widget is not widget:
-            return
-        if self.tooltip_hide_after_id is not None:
-            try:
-                self.root.after_cancel(self.tooltip_hide_after_id)
-            except tk.TclError:
-                pass
-        self.tooltip_hide_after_id = self.root.after(120, self._hide_tooltip_if_pointer_left)
-
-    def _show_tooltip(self, widget: ctk.CTkBaseClass, text: str) -> None:
-        self._hide_tooltip()
-        if self.closed:
-            return
-        tooltip = self._create_auxiliary_window(fg_color=TOOLTIP_BG, overrideredirect=True)
-        self.tooltip_window = tooltip
-        self.tooltip_windows.append(tooltip)
-        self.tooltip_anchor_widget = widget
-        bubble = ctk.CTkFrame(
-            tooltip,
-            fg_color=TOOLTIP_BG,
-            corner_radius=8,
-            border_width=1,
-            border_color=TOOLTIP_BORDER,
-        )
-        bubble.grid(row=0, column=0, sticky="nsew")
-        tooltip_label = ctk.CTkLabel(
-            bubble,
-            text=text,
-            text_color=HEADER_TEXT,
-            fg_color="transparent",
-            font=UI_FONT,
-            justify="left",
-            wraplength=320,
-            anchor="w",
-        )
-        tooltip_label.grid(row=0, column=0, sticky="nsew", padx=12, pady=8)
-        tooltip.update_idletasks()
-        self._prepare_auxiliary_window_for_show(tooltip)
-        x = widget.winfo_rootx() + widget.winfo_width() + 8
-        y = widget.winfo_rooty() - 2
-        tooltip.geometry(f"+{x}+{y}")
-        tooltip.deiconify()
-        self._ensure_tooltip_pointer_check()
-
-    def _hide_tooltip(self) -> None:
-        if self.tooltip_after_id is not None:
-            try:
-                self.root.after_cancel(self.tooltip_after_id)
-            except tk.TclError:
-                pass
-            self.tooltip_after_id = None
-        if self.tooltip_hide_after_id is not None:
-            try:
-                self.root.after_cancel(self.tooltip_hide_after_id)
-            except tk.TclError:
-                pass
-            self.tooltip_hide_after_id = None
-        windows = list(self.tooltip_windows)
-        if self.tooltip_window is not None and self.tooltip_window not in windows:
-            windows.append(self.tooltip_window)
-        for window in windows:
-            try:
-                window.destroy()
-            except tk.TclError:
-                pass
-        self.tooltip_windows.clear()
-        self.tooltip_window = None
-        self.tooltip_anchor_widget = None
-
-    def _hide_tooltip_if_pointer_left(self) -> None:
-        self.tooltip_hide_after_id = None
-        if self.tooltip_anchor_widget is None:
-            self._hide_tooltip()
-            return
-        pointer_x = self.root.winfo_pointerx()
-        pointer_y = self.root.winfo_pointery()
-        if self._point_inside_widget(self.tooltip_anchor_widget, pointer_x, pointer_y):
-            self._ensure_tooltip_pointer_check()
-            return
-        self._hide_tooltip()
-
-    def _ensure_tooltip_pointer_check(self) -> None:
-        if self.tooltip_after_id is None and self.tooltip_window is not None:
-            self.tooltip_after_id = self.root.after(80, self._check_tooltip_pointer)
-
-    def _check_tooltip_pointer(self) -> None:
-        self.tooltip_after_id = None
-        if self.tooltip_window is None or self.tooltip_anchor_widget is None:
-            return
-        pointer_x = self.root.winfo_pointerx()
-        pointer_y = self.root.winfo_pointery()
-        if not self._point_inside_widget(self.tooltip_anchor_widget, pointer_x, pointer_y):
-            self._hide_tooltip()
-            return
-        self.tooltip_after_id = self.root.after(80, self._check_tooltip_pointer)
-
-    def _point_inside_widget(self, widget: tk.Misc, x: int, y: int) -> bool:
-        try:
-            left = widget.winfo_rootx()
-            top = widget.winfo_rooty()
-            right = left + widget.winfo_width()
-            bottom = top + widget.winfo_height()
-        except tk.TclError:
-            return False
-        return left <= x <= right and top <= y <= bottom
-
     def _combo_script_label(self, script_id: str) -> str:
         return COMBO_SCRIPT_LABELS.get(script_id, COMBO_SCRIPT_LABELS[COMBO_SCRIPT_SINGLE_JUMP_SKILL])
 
@@ -2281,252 +1401,6 @@ class AutoPotionSettingsGui:
             f"並在 {skill_delay_var.get()} 秒後按 {skill_key_var.get()}。"
         )
 
-    def _build_row(
-        self,
-        parent: ctk.CTkFrame,
-        row: int,
-        label: str,
-        enabled_var: tk.BooleanVar,
-        threshold_var: tk.DoubleVar,
-        threshold_text: tk.StringVar,
-        key_var: tk.StringVar,
-        cooldown_var: tk.StringVar,
-        continuous_var: tk.BooleanVar,
-        continuous_stop_margin_var: tk.StringVar,
-        current_var: tk.StringVar,
-    ) -> None:
-        self._checkbox(parent, label, enabled_var, width=70).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-        scale = ctk.CTkSlider(
-            parent,
-            from_=1,
-            to=100,
-            variable=threshold_var,
-            command=lambda value, text=threshold_text: text.set(f"{float(value):.0f}"),
-            width=170,
-            height=18,
-            fg_color=ENTRY_BG,
-            progress_color=ACCENT_BLUE,
-            button_color=ACCENT_BLUE,
-            button_hover_color=BUTTON_HOVER,
-        )
-        scale.grid(row=row, column=1, sticky="ew", padx=(0, 8), pady=4)
-        entry = self._entry(parent, threshold_text, width=PERCENT_ENTRY_WIDTH)
-        entry.grid(row=row, column=2, sticky="w", padx=(0, 4), pady=4)
-        self._label(parent, "%").grid(row=row, column=3, sticky="w", padx=(0, 10), pady=4)
-        key_entry = self._entry(parent, key_var, width=POTION_KEY_ENTRY_WIDTH, justify="center")
-        key_entry.grid(row=row, column=4, sticky="w", padx=(0, 8), pady=4)
-        key_entry.bind("<Button-1>", lambda event, var=key_var, name=label: self._start_key_detection_from_entry(event, var, name))
-        self._entry(parent, cooldown_var, width=SECONDS_ENTRY_WIDTH).grid(row=row, column=5, sticky="w", padx=(0, 4), pady=4)
-        self._label(parent, "秒").grid(row=row, column=6, sticky="w", pady=4)
-        self._checkbox(parent, "連續", continuous_var, width=64).grid(row=row, column=7, sticky="w", padx=(10, 0), pady=4)
-        self._label(parent, "誤差").grid(row=row, column=8, sticky="w", padx=(8, 4), pady=4)
-        self._entry(parent, continuous_stop_margin_var, width=PERCENT_ENTRY_WIDTH).grid(row=row, column=9, sticky="w", padx=(0, 4), pady=4)
-        self._label(parent, "%").grid(row=row, column=10, sticky="w", pady=4)
-        self._label(parent, textvariable=current_var, width=82, anchor="e", font=MONO_FONT).grid(row=row, column=11, sticky="e", padx=(12, 0), pady=4)
-
-        entry.bind("<Return>", lambda _event, var=threshold_var, text=threshold_text: self._apply_percent_text(var, text))
-        entry.bind("<FocusOut>", lambda _event, var=threshold_var, text=threshold_text: self._apply_percent_text(var, text))
-
-    def _build_key_entry(
-        self,
-        parent: ctk.CTkFrame,
-        row: int,
-        column: int,
-        label: str,
-        key_var: tk.StringVar,
-        pady: int | tuple[int, int] = 6,
-        compact: bool = False,
-    ) -> tuple[ctk.CTkLabel, ctk.CTkEntry]:
-        label_widget = self._label(parent, label)
-        label_widget.grid(row=row, column=column, sticky="w", padx=(0, 2 if compact else 4), pady=pady)
-        key_entry = self._entry(
-            parent,
-            key_var,
-            width=COMBO_COMPACT_KEY_ENTRY_WIDTH if compact else COMBO_KEY_ENTRY_WIDTH,
-            justify="center",
-        )
-        key_entry.grid(row=row, column=column + 1, sticky="w", padx=(0, 2 if compact else 8), pady=pady)
-        key_entry.bind("<Button-1>", lambda event, var=key_var, name=label: self._start_key_detection_from_entry(event, var, name))
-        return label_widget, key_entry
-
-    def _combo_title_field(
-        self,
-        parent: tk.Misc,
-        slot_id: str,
-        enabled_var: tk.BooleanVar,
-    ) -> ctk.CTkFrame:
-        field = ctk.CTkFrame(parent, fg_color="transparent")
-        self._checkbox(field, "", enabled_var, width=20).grid(row=0, column=0, sticky="w", padx=(0, 0), pady=0)
-        label = self._title_label(field, f"組合{slot_id}")
-        label.grid(row=0, column=1, sticky="w", padx=(2, 0), pady=0)
-        self._bind_checkbox_label(label, enabled_var)
-        return field
-
-    def _combo_key_field(
-        self,
-        parent: tk.Misc,
-        label: str,
-        key_var: tk.StringVar,
-    ) -> ctk.CTkFrame:
-        field = ctk.CTkFrame(parent, fg_color="transparent")
-        self._label(field, label).grid(row=0, column=0, sticky="w", padx=(0, 2), pady=0)
-        key_entry = self._entry(field, key_var, width=COMBO_COMPACT_KEY_ENTRY_WIDTH, justify="center")
-        key_entry.grid(row=0, column=1, sticky="w", padx=0, pady=0)
-        key_entry.bind("<Button-1>", lambda event, var=key_var, name=label: self._start_key_detection_from_entry(event, var, name))
-        return field
-
-    def _combo_controller_field(
-        self,
-        parent: tk.Misc,
-        label: str,
-        button_var: tk.StringVar,
-    ) -> ctk.CTkFrame:
-        field = ctk.CTkFrame(parent, fg_color="transparent")
-        self._label(field, label).grid(row=0, column=0, sticky="w", padx=(0, 2), pady=0)
-        button_select = self._combo(
-            field,
-            textvariable=button_var,
-            values=CONTROLLER_BUTTON_CHOICES,
-            width=COMBO_COMPACT_CONTROLLER_WIDTH,
-        )
-        button_select.grid(row=0, column=1, sticky="w", padx=0, pady=0)
-        return field
-
-    def _combo_script_field(
-        self,
-        parent: tk.Misc,
-        label: str,
-        script_var: tk.StringVar,
-    ) -> ctk.CTkFrame:
-        field = ctk.CTkFrame(parent, fg_color="transparent")
-        self._label(field, label).grid(row=0, column=0, sticky="w", padx=(0, 2), pady=0)
-        script_select = self._combo(
-            field,
-            textvariable=script_var,
-            values=COMBO_SCRIPT_LABEL_VALUES,
-            width=COMBO_SCRIPT_COMBO_WIDTH,
-            command=lambda _value: self._on_combo_script_changed(),
-        )
-        script_select.grid(row=0, column=1, sticky="w", padx=0, pady=0)
-        return field
-
-    def _combo_seconds_field(
-        self,
-        parent: tk.Misc,
-        label: str,
-        value_var: tk.StringVar,
-        minimum: float,
-        maximum: float,
-    ) -> ctk.CTkFrame:
-        field = ctk.CTkFrame(parent, fg_color="transparent")
-        self._label(field, label).grid(row=0, column=0, sticky="w", padx=(0, 2), pady=0)
-        self._build_seconds_stepper(
-            field,
-            0,
-            1,
-            value_var,
-            minimum,
-            maximum,
-            pady=0,
-            columnspan=1,
-            compact=True,
-        )
-        return field
-
-    def _build_combo_slot_row(
-        self,
-        parent: ctk.CTkFrame,
-        row: int,
-        slot_id: str,
-        enabled_var: tk.BooleanVar,
-        trigger_var: tk.StringVar,
-        script_var: tk.StringVar,
-        jump_key_var: tk.StringVar,
-        skill_key_var: tk.StringVar,
-        attack_key_var: tk.StringVar,
-        attack_start_delay_var: tk.StringVar,
-        attack_hold_var: tk.StringVar,
-        skill_delay_var: tk.StringVar,
-        jump_interval_var: tk.StringVar,
-        description_factory: Callable[[], str],
-    ) -> None:
-        row_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        row_frame.grid(row=row, column=0, sticky="ew", pady=(0, 8))
-        row_frame.columnconfigure(0, weight=1)
-
-        header_flow = FlowLayout(row_frame)
-        header_flow.frame.grid(row=0, column=0, sticky="ew", pady=(0, 2))
-        header_flow.add(self._combo_title_field(header_flow.frame, slot_id, enabled_var), 82)
-        header_flow.add(self._combo_controller_field(header_flow.frame, "觸發", trigger_var), 124)
-        header_flow.add(self._combo_script_field(header_flow.frame, "腳本", script_var), 176)
-        info_field = ctk.CTkFrame(header_flow.frame, fg_color="transparent")
-        self._info_icon(info_field, description_factory).grid(row=0, column=0, sticky="w", padx=0, pady=0)
-        header_flow.add(info_field, 28)
-
-        field_flow = FlowLayout(row_frame)
-        field_flow.frame.grid(row=1, column=0, sticky="ew", pady=(2, 0))
-        self.combo_field_flows[slot_id] = field_flow
-
-        jump_field = self._combo_key_field(field_flow.frame, "跳躍", jump_key_var)
-        skill_field = self._combo_key_field(field_flow.frame, "技能", skill_key_var)
-        attack_field = self._combo_key_field(field_flow.frame, "攻擊", attack_key_var)
-        skill_delay_field = self._combo_seconds_field(field_flow.frame, "延遲", skill_delay_var, 0.0, 10.0)
-        attack_start_delay_field = self._combo_seconds_field(
-            field_flow.frame,
-            "起攻",
-            attack_start_delay_var,
-            COMBO_ATTACK_START_DELAY_MIN_SECONDS,
-            COMBO_ATTACK_START_DELAY_MAX_SECONDS,
-        )
-        attack_hold_field = self._combo_seconds_field(
-            field_flow.frame,
-            "按住",
-            attack_hold_var,
-            COMBO_ATTACK_HOLD_MIN_SECONDS,
-            COMBO_ATTACK_HOLD_MAX_SECONDS,
-        )
-        interval_field = self._combo_seconds_field(
-            field_flow.frame,
-            "間隔",
-            jump_interval_var,
-            COMBO_JUMP_INTERVAL_MIN_SECONDS,
-            COMBO_JUMP_INTERVAL_MAX_SECONDS,
-        )
-
-        field_flow.add(jump_field, 88)
-        field_flow.add(skill_field, 88)
-        field_flow.add(attack_field, 88)
-        field_flow.add(skill_delay_field, 142)
-        field_flow.add(attack_start_delay_field, 142)
-        field_flow.add(attack_hold_field, 142)
-        field_flow.add(interval_field, 142)
-
-        self.combo_skill_key_fields[slot_id] = (skill_field,)
-        self.combo_attack_key_fields[slot_id] = (attack_field,)
-        self.combo_skill_delay_fields[slot_id] = (skill_delay_field,)
-        self.combo_attack_start_delay_fields[slot_id] = (attack_start_delay_field,)
-        self.combo_attack_hold_fields[slot_id] = (attack_hold_field,)
-        self.combo_jump_interval_fields[slot_id] = (interval_field,)
-
-    def _build_combo_script_select(
-        self,
-        parent: ctk.CTkFrame,
-        row: int,
-        column: int,
-        label: str,
-        script_var: tk.StringVar,
-        pady: int | tuple[int, int] = 6,
-    ) -> None:
-        self._label(parent, label).grid(row=row, column=column, sticky="w", padx=(0, 2), pady=pady)
-        script_select = self._combo(
-            parent,
-            textvariable=script_var,
-            values=COMBO_SCRIPT_LABEL_VALUES,
-            width=COMBO_SCRIPT_COMBO_WIDTH,
-            command=lambda _value: self._on_combo_script_changed(),
-        )
-        script_select.grid(row=row, column=column + 1, sticky="w", padx=(0, 2), pady=pady)
-
     def _on_combo_script_changed(self) -> None:
         self._refresh_combo_script_visibility()
         self.apply_to_settings()
@@ -2572,61 +1446,6 @@ class AutoPotionSettingsGui:
             if field_flow is not None:
                 field_flow.layout()
 
-    def _build_controller_button_select(
-        self,
-        parent: ctk.CTkFrame,
-        row: int,
-        column: int,
-        label: str,
-        button_var: tk.StringVar,
-        pady: int | tuple[int, int] = 6,
-        compact: bool = False,
-    ) -> None:
-        self._label(parent, label).grid(row=row, column=column, sticky="w", padx=(0, 2 if compact else 4), pady=pady)
-        button_select = self._combo(
-            parent,
-            textvariable=button_var,
-            values=CONTROLLER_BUTTON_CHOICES,
-            width=COMBO_COMPACT_CONTROLLER_WIDTH if compact else CONTROLLER_COMBO_WIDTH,
-        )
-        button_select.grid(row=row, column=column + 1, sticky="w", padx=(0, 2 if compact else 8), pady=pady)
-
-    def _build_seconds_stepper(
-        self,
-        parent: ctk.CTkFrame,
-        row: int,
-        column: int,
-        value_var: tk.StringVar,
-        minimum: float,
-        maximum: float,
-        pady: int | tuple[int, int] = 6,
-        columnspan: int = 6,
-        compact: bool = False,
-    ) -> ctk.CTkFrame:
-        field_group = ctk.CTkFrame(parent, fg_color="transparent")
-        field_group.grid(row=row, column=column, columnspan=columnspan, sticky="w", padx=0, pady=pady)
-        self._entry(
-            field_group,
-            value_var,
-            width=COMBO_COMPACT_SECONDS_ENTRY_WIDTH if compact else SECONDS_ENTRY_WIDTH,
-        ).grid(row=0, column=0, sticky="w", padx=(0, 2), pady=0)
-        self._label(field_group, "秒").grid(row=0, column=1, sticky="w", padx=(0, 1 if compact else 8), pady=0)
-        button_group = ctk.CTkFrame(field_group, fg_color="transparent")
-        button_group.grid(row=0, column=2, sticky="w", padx=(0, 1 if compact else 4), pady=0)
-        self._button(
-            button_group,
-            "-",
-            lambda: self._step_seconds(value_var, -0.01, minimum, maximum),
-            width=22 if compact else 28,
-        ).grid(row=0, column=0, sticky="w", padx=(0, 2 if compact else 8), pady=0)
-        self._button(
-            button_group,
-            "+",
-            lambda: self._step_seconds(value_var, 0.01, minimum, maximum),
-            width=22 if compact else 28,
-        ).grid(row=0, column=1, sticky="w", padx=0, pady=0)
-        return field_group
-
     def _step_seconds(self, value_var: tk.StringVar, delta: float, minimum: float, maximum: float) -> None:
         try:
             current = float(value_var.get())
@@ -2659,6 +1478,12 @@ class AutoPotionSettingsGui:
             except tk.TclError:
                 pass
             self.page_build_after_id = None
+        for placeholder in self.page_placeholders.values():
+            try:
+                placeholder.destroy()
+            except tk.TclError:
+                pass
+        self.page_placeholders.clear()
         if self.console_resize_after_id is not None:
             try:
                 self.root.after_cancel(self.console_resize_after_id)

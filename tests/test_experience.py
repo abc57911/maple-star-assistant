@@ -5,7 +5,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import types
 import unittest
 import warnings
@@ -44,7 +43,6 @@ from maple_star.experience import (
     _structured_pixel_font_text_candidates,
     _suppress_experience_green_bar_background,
     estimate_experience_bar_percent,
-    experience_ocr_learning_pending_dir,
     extract_paddle_text_items,
     format_duration,
     format_eta,
@@ -63,19 +61,11 @@ from maple_star.experience import (
     reading_from_stat_window_text,
     reading_from_tooltip_paddle_result,
     reading_from_tooltip_text,
-    save_experience_ocr_learning_case,
     suppress_subprocess_windows,
 )
 
 
 class ExperienceTests(unittest.TestCase):
-    def setUp(self):
-        self._localappdata_dir = tempfile.TemporaryDirectory()
-        self.addCleanup(self._localappdata_dir.cleanup)
-        self._localappdata_patch = patch.dict(os.environ, {"LOCALAPPDATA": self._localappdata_dir.name}, clear=False)
-        self._localappdata_patch.start()
-        self.addCleanup(self._localappdata_patch.stop)
-
     def test_one_hour_rate_uses_responsive_half_life(self):
         self.assertEqual(EXP_RATE_1H_HALF_LIFE_SECONDS, 600.0)
 
@@ -404,7 +394,7 @@ class ExperienceTests(unittest.TestCase):
 
         self.assertFalse(reading.success)
         self.assertEqual(reading.text, "5858410[12,")
-        reader.read.assert_called_once_with(primary, record_learning=True, continuity_hint=None)
+        reader.read.assert_called_once_with(primary, continuity_hint=None)
 
     def test_paddle_reader_burst_rejects_conflicting_successes_without_consensus(self):
         reader = PaddleExperienceTextReader()
@@ -488,50 +478,6 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(reading.current_exp, 3805756)
         self.assertEqual(reading.percent, 99.31)
         self.assertEqual(reader.read.call_count, 3)
-
-    def test_paddle_reader_burst_paddle_success_does_not_create_learning_case(self):
-        reader = PaddleExperienceTextReader()
-        reader._read_burst_frame = Mock(
-            return_value=ExperienceTextReading(
-                current_exp=4731714,
-                percent=24.91,
-                text="4731714[24.91%]",
-                confidence=0.95,
-                success=True,
-                reason="OK",
-            )
-        )
-        primary = ExperienceOcrImage(np.full((10, 40, 3), 255, dtype=np.uint8), source_id="primary")
-        wide = ExperienceOcrImage(np.full((10, 48, 3), 220, dtype=np.uint8), source_id="wide")
-
-        with patch("maple_star.models.experience.save_experience_ocr_learning_case") as save_case:
-            reading = reader.read_burst_frames([[primary, wide]])
-
-        self.assertEqual(reading.learning_case_id, "")
-        save_case.assert_not_called()
-        reader._read_burst_frame.assert_called_once()
-        self.assertFalse(reader._read_burst_frame.call_args.kwargs["record_learning"])
-
-    def test_paddle_reader_burst_pixel_success_does_not_create_learning_case(self):
-        reader = PaddleExperienceTextReader()
-        reader._read_burst_frame = Mock(
-            return_value=ExperienceTextReading(
-                current_exp=4731714,
-                percent=24.91,
-                text="4731714[24.91%]",
-                confidence=0.98,
-                success=True,
-                reason="OK:Pixel",
-            )
-        )
-        primary = ExperienceOcrImage(np.full((10, 40, 3), 255, dtype=np.uint8), source_id="primary")
-        wide = ExperienceOcrImage(np.full((10, 48, 3), 220, dtype=np.uint8), source_id="wide")
-
-        with patch("maple_star.models.experience.save_experience_ocr_learning_case") as save_case:
-            reading = reader.read_burst_frames([[primary, wide]])
-
-        self.assertEqual(reading.learning_case_id, "")
-        save_case.assert_not_called()
 
     def test_paddle_reader_burst_keeps_single_success_when_other_frames_fail(self):
         reader = PaddleExperienceTextReader()
@@ -787,7 +733,10 @@ class ExperienceTests(unittest.TestCase):
                 return [("5805653[76.98%]", 0.99)]
             return [("5805658[76.98%]", 0.99)]
 
-        with patch("maple_star.models.experience._decode_experience_pixel_font_text_candidates", side_effect=decode_by_green_presence):
+        with patch(
+            "maple_star.services.experience_pixel_ocr._decode_experience_pixel_font_text_candidates",
+            side_effect=decode_by_green_presence,
+        ):
             reading = _read_experience_pixel_font_adaptive(
                 ExperienceOcrImage(image=image, bar_crop_left_ratio=0.44),
                 bar_percent=None,
@@ -805,7 +754,7 @@ class ExperienceTests(unittest.TestCase):
         image[8:20, 118:124, :3] = 245
 
         with patch(
-            "maple_star.models.experience._decode_experience_pixel_font_text_candidates",
+            "maple_star.services.experience_pixel_ocr._decode_experience_pixel_font_text_candidates",
             return_value=[
                 ("5805653[76.98%]", 0.9790),
                 ("5805658[76.98%]", 0.9785),
@@ -1671,20 +1620,54 @@ class ExperienceTests(unittest.TestCase):
             source="pixel",
         )
 
-        with patch("maple_star.models.experience._read_experience_pixel_font_adaptive", return_value=pixel_failure):
+        with patch(
+            "maple_star.services.experience_pixel_ocr._read_experience_pixel_font_adaptive",
+            return_value=pixel_failure,
+        ):
             reading = reader.read(
                 ExperienceOcrImage(
                     image=image,
                     source_id="exp-20260515-017",
                     bar_crop_left_ratio=0.5954063604240283,
                 ),
-                record_learning=False,
             )
 
         self.assertGreater(fake_ocr.calls, 0)
         self.assertTrue(reading.success)
         self.assertEqual(reading.current_exp, 40327237)
         self.assertEqual(reading.percent, 94.32)
+
+    def test_paddle_reader_uses_traditional_chinese_ppocrv5_models(self):
+        captured_kwargs = {}
+
+        class FakePaddleOCR:
+            def __init__(self, **kwargs):
+                captured_kwargs.update(kwargs)
+
+        reader = PaddleExperienceTextReader()
+        self.assertTrue(reader._build_ocr(FakePaddleOCR))
+
+        self.assertNotIn("lang", captured_kwargs)
+        self.assertEqual(captured_kwargs["text_detection_model_name"], PADDLEOCR_DETECTION_MODEL_NAME)
+        self.assertEqual(captured_kwargs["text_recognition_model_name"], PADDLEOCR_RECOGNITION_MODEL_NAME)
+        self.assertFalse(captured_kwargs["use_doc_orientation_classify"])
+        self.assertFalse(captured_kwargs["use_doc_unwarping"])
+        self.assertFalse(captured_kwargs["use_textline_orientation"])
+
+    def test_paddle_reader_legacy_fallback_uses_traditional_chinese_lang(self):
+        calls = []
+
+        class FakePaddleOCR:
+            def __init__(self, **kwargs):
+                calls.append(kwargs)
+                if "text_recognition_model_name" in kwargs:
+                    raise TypeError("unsupported keyword")
+
+        reader = PaddleExperienceTextReader()
+        self.assertTrue(reader._build_ocr(FakePaddleOCR))
+
+        self.assertEqual(calls[-1]["lang"], PADDLEOCR_LANGUAGE)
+        self.assertFalse(calls[-1]["use_angle_cls"])
 
     @unittest.skipUnless(RUN_SLOW_OCR_TESTS, SLOW_OCR_SKIP_REASON)
     def test_pixel_reader_has_no_false_accepts_on_labeled_fixtures(self):
@@ -1696,25 +1679,24 @@ class ExperienceTests(unittest.TestCase):
         reader = PaddleExperienceTextReader()
         reader._read_with_paddle = Mock(return_value=ExperienceTextReading(reason="fallback disabled"))
         false_accepts: list[str] = []
-        with patch("maple_star.models.experience.save_experience_ocr_learning_case", return_value=""):
-            for sample in samples:
-                image = cv2.imread(str(fixture_dir / sample["file"]), cv2.IMREAD_UNCHANGED)
-                self.assertIsNotNone(image, sample["file"])
-                reading = reader.read(ExperienceOcrImage(image=image, source_id=sample["id"]))
-                expected_exp = int(sample["current_exp"])
-                expected_percent = float(sample["percent"])
-                if (
-                    reading.success
-                    and (
-                        reading.current_exp != expected_exp
-                        or reading.percent is None
-                        or round(reading.percent, 2) != round(expected_percent, 2)
-                    )
-                ):
-                    false_accepts.append(
-                        f"{sample['id']}: expected={expected_exp}[{expected_percent:.2f}%] "
-                        f"got={reading.current_exp}[{reading.percent}] text={reading.text!r} reason={reading.reason}"
-                    )
+        for sample in samples:
+            image = cv2.imread(str(fixture_dir / sample["file"]), cv2.IMREAD_UNCHANGED)
+            self.assertIsNotNone(image, sample["file"])
+            reading = reader.read(ExperienceOcrImage(image=image, source_id=sample["id"]))
+            expected_exp = int(sample["current_exp"])
+            expected_percent = float(sample["percent"])
+            if (
+                reading.success
+                and (
+                    reading.current_exp != expected_exp
+                    or reading.percent is None
+                    or round(reading.percent, 2) != round(expected_percent, 2)
+                )
+            ):
+                false_accepts.append(
+                    f"{sample['id']}: expected={expected_exp}[{expected_percent:.2f}%] "
+                    f"got={reading.current_exp}[{reading.percent}] text={reading.text!r} reason={reading.reason}"
+                )
 
         self.assertEqual(false_accepts, [], "\n".join(false_accepts))
 
@@ -1732,7 +1714,7 @@ class ExperienceTests(unittest.TestCase):
 
         self.assertEqual(duplicates, [], "\n".join(duplicates))
 
-    def test_pixel_reader_falls_back_to_paddle_without_learning_case_when_final_success(self):
+    def test_pixel_reader_success_keeps_compatibility_learning_id_empty(self):
         reader = PaddleExperienceTextReader()
         image = np.zeros((24, 160, 3), dtype=np.uint8)
         pixel_conflict = ExperienceTextReading(
@@ -1753,8 +1735,10 @@ class ExperienceTests(unittest.TestCase):
         reader._read_with_paddle = Mock(return_value=paddle_success)
 
         with (
-            patch("maple_star.models.experience._read_experience_pixel_font_adaptive", return_value=pixel_conflict),
-            patch("maple_star.models.experience.save_experience_ocr_learning_case", return_value="exp-unit") as save_case,
+            patch(
+                "maple_star.services.experience_pixel_ocr._read_experience_pixel_font_adaptive",
+                return_value=pixel_conflict,
+            ),
         ):
             reading = reader.read(ExperienceOcrImage(image=image, source_id="unit"))
 
@@ -1762,9 +1746,8 @@ class ExperienceTests(unittest.TestCase):
         self.assertEqual(reading.current_exp, 16593280)
         self.assertEqual(reading.learning_case_id, "")
         reader._read_with_paddle.assert_called_once()
-        save_case.assert_not_called()
 
-    def test_pixel_reader_failure_does_not_create_learning_case(self):
+    def test_pixel_reader_failure_keeps_compatibility_learning_id_empty(self):
         reader = PaddleExperienceTextReader()
         image = np.zeros((24, 160, 3), dtype=np.uint8)
         pixel_failure = ExperienceTextReading(
@@ -1782,14 +1765,15 @@ class ExperienceTests(unittest.TestCase):
         reader._read_with_paddle = Mock(return_value=paddle_failure)
 
         with (
-            patch("maple_star.models.experience._read_experience_pixel_font_adaptive", return_value=pixel_failure),
-            patch("maple_star.models.experience.save_experience_ocr_learning_case", return_value="exp-unit") as save_case,
+            patch(
+                "maple_star.services.experience_pixel_ocr._read_experience_pixel_font_adaptive",
+                return_value=pixel_failure,
+            ),
         ):
             reading = reader.read(ExperienceOcrImage(image=image, source_id="unit"))
 
         self.assertFalse(reading.success)
         self.assertEqual(reading.learning_case_id, "")
-        save_case.assert_not_called()
 
     def test_pixel_reader_rejects_same_percent_low_margin_exp_conflict(self):
         conflict_candidates = [
@@ -2023,1172 +2007,21 @@ class ExperienceTests(unittest.TestCase):
             source="pixel",
         )
 
-        with patch("maple_star.models.experience._read_experience_pixel_font_adaptive", return_value=pixel_failure):
+        with patch(
+            "maple_star.services.experience_pixel_ocr._read_experience_pixel_font_adaptive",
+            return_value=pixel_failure,
+        ):
             reading = reader.read(
                 ExperienceOcrImage(
                     image=np.zeros((35, 214, 4), dtype=np.uint8),
                     bar_crop_left_ratio=0.62,
                     source_id="tight",
                 ),
-                record_learning=False,
             )
 
         reader._read_with_paddle.assert_called_once()
         self.assertTrue(reading.success)
         self.assertEqual(reading.reason, "OK")
-
-    def test_experience_ocr_learning_case_writes_pending_bundle_under_localappdata(self):
-        image = np.full((24, 120, 3), 255, dtype=np.uint8)
-        pixel_reading = ExperienceTextReading(text="--", confidence=0.0, reason="EXP 像素字型解析失敗")
-        paddle_reading = ExperienceTextReading(text="--", confidence=0.0, reason="PaddleOCR 失敗")
-        final_reading = ExperienceTextReading(text="--", confidence=0.0, reason="OCR 失敗")
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            with patch.dict(os.environ, {"LOCALAPPDATA": temp_dir}, clear=False):
-                pending_dir = experience_ocr_learning_pending_dir()
-                self.assertEqual(pending_dir, Path(temp_dir) / "MapleStar" / "experience_ocr_pending")
-                case_id = save_experience_ocr_learning_case(
-                    [[ExperienceOcrImage(image=image, source_id="primary")]],
-                    trigger="unit_failure",
-                    pixel_reading=pixel_reading,
-                    paddle_reading=paddle_reading,
-                    final_reading=final_reading,
-                    bar_percent=12.34,
-                )
-
-                case_dir = pending_dir / case_id
-                metadata = json.loads((case_dir / "metadata.json").read_text(encoding="utf-8"))
-                roi_exists = (case_dir / metadata["frames"][0][0]["file"]).exists()
-
-        self.assertTrue(case_id.startswith("exp-"))
-        self.assertEqual(metadata["trigger"], "unit_failure")
-        self.assertEqual(metadata["bar_percent"], 12.34)
-        self.assertEqual(metadata["frames"][0][0]["source_id"], "primary")
-        self.assertTrue(roi_exists)
-        self.assertIn("attempts", metadata["frames"][0][0])
-        self.assertIn("green_background_ratio", metadata["frames"][0][0])
-        self.assertIn("roi_bar_overlap_detected", metadata["frames"][0][0])
-        self.assertIn("mask_file", metadata["frames"][0][0]["attempts"][0])
-        self.assertIn("green_background_ratio", metadata["frames"][0][0]["attempts"][0])
-        self.assertIn("roi_bar_overlap_detected", metadata["frames"][0][0]["attempts"][0])
-        self.assertIn("segments", metadata["frames"][0][0]["attempts"][0])
-
-    def test_experience_ocr_learning_case_deduplicates_same_reading(self):
-        image = np.full((24, 120, 3), 255, dtype=np.uint8)
-        pixel_reading = ExperienceTextReading(text="4652609[24.4933]", confidence=0.91, reason="EXP 像素字型結構不可信")
-        paddle_reading = ExperienceTextReading(
-            current_exp=4652609,
-            percent=24.49,
-            text="4652609[24.49%]",
-            confidence=0.96,
-            success=True,
-            reason="OK",
-        )
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            with patch.dict(os.environ, {"LOCALAPPDATA": temp_dir}, clear=False):
-                first_id = save_experience_ocr_learning_case(
-                    [[ExperienceOcrImage(image=image, source_id="primary")]],
-                    trigger="pixel_to_paddle_fallback",
-                    pixel_reading=pixel_reading,
-                    paddle_reading=paddle_reading,
-                    final_reading=paddle_reading,
-                )
-                second_id = save_experience_ocr_learning_case(
-                    [[ExperienceOcrImage(image=image.copy(), source_id="primary")]],
-                    trigger="pixel_to_paddle_fallback",
-                    pixel_reading=ExperienceTextReading(
-                        text="4652609[24.49%][.",
-                        confidence=0.88,
-                        reason="EXP 像素字型結構不可信",
-                    ),
-                    paddle_reading=paddle_reading,
-                    final_reading=paddle_reading,
-                )
-                cases = list((experience_ocr_learning_pending_dir()).glob("*/metadata.json"))
-
-        self.assertEqual(second_id, first_id)
-        self.assertEqual(len(cases), 1)
-
-    def test_experience_ocr_learning_case_skips_blank_roi(self):
-        image = np.zeros((24, 120, 3), dtype=np.uint8)
-        final_reading = ExperienceTextReading(text="--", confidence=0.0, reason="OCR 失敗")
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            with patch.dict(os.environ, {"LOCALAPPDATA": temp_dir}, clear=False):
-                case_id = save_experience_ocr_learning_case(
-                    [[ExperienceOcrImage(image=image, source_id="primary")]],
-                    trigger="ocr_failure",
-                    pixel_reading=None,
-                    paddle_reading=None,
-                    final_reading=final_reading,
-                )
-                pending_dir = experience_ocr_learning_pending_dir()
-
-        self.assertEqual(case_id, "")
-        self.assertFalse(pending_dir.exists())
-
-    def test_experience_ocr_learning_case_skips_non_exp_roi(self):
-        image = np.zeros((24, 140, 3), dtype=np.uint8)
-        image[:, :, :3] = (120, 70, 30)
-        image[7:17, 24:116, :3] = (150, 95, 45)
-        image[9:12, 40:104, :3] = (175, 120, 70)
-        final_reading = ExperienceTextReading(text="--", confidence=0.0, reason="EXP 百分比解析失敗")
-
-        case_id = save_experience_ocr_learning_case(
-            [[ExperienceOcrImage(image=image, source_id="primary")]],
-            trigger="ocr_failure",
-            pixel_reading=None,
-            paddle_reading=None,
-            final_reading=final_reading,
-        )
-        pending_dir = experience_ocr_learning_pending_dir()
-
-        self.assertEqual(case_id, "")
-        self.assertFalse(pending_dir.exists())
-
-    def test_experience_ocr_learning_case_keeps_exp_bar_roi_without_ocr_text(self):
-        image = np.zeros((24, 140, 3), dtype=np.uint8)
-        image[:, :, :3] = (28, 28, 28)
-        image[:, :82, :3] = (40, 215, 95)
-        image[8:15, 58:63, :3] = 245
-        image[8:15, 70:75, :3] = 245
-        final_reading = ExperienceTextReading(text="--", confidence=0.0, reason="OCR 失敗")
-
-        case_id = save_experience_ocr_learning_case(
-            [[ExperienceOcrImage(image=image, source_id="primary")]],
-            trigger="ocr_failure",
-            pixel_reading=None,
-            paddle_reading=None,
-            final_reading=final_reading,
-        )
-        pending_dir = experience_ocr_learning_pending_dir()
-
-        self.assertTrue(case_id.startswith("exp-"))
-        self.assertTrue((pending_dir / case_id / "metadata.json").exists())
-
-    def test_learning_service_promotes_pending_case_to_fixture_manifest(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((12, 80, 3), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            pending_root = root / "pending"
-            case_dir = pending_root / "exp-unit"
-            case_dir.mkdir(parents=True)
-            cv2.imwrite(str(case_dir / "roi.png"), image)
-            cv2.imwrite(str(case_dir / "attempt.png"), np.full((12, 80, 3), 128, dtype=np.uint8))
-            (case_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "frames": [
-                            [
-                                {
-                                    "file": "roi.png",
-                                    "bar_crop_left_ratio": 0.62,
-                                    "attempts": [
-                                        {
-                                            "file": "attempt.png",
-                                            "candidates": [
-                                                {"text": "2043879[10.75%]", "confidence": 0.980},
-                                                {"text": "2043870[10.75%]", "confidence": 0.900},
-                                            ],
-                                        }
-                                    ],
-                                }
-                            ]
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            attempt_image = np.full((12, 80, 3), 128, dtype=np.uint8)
-            cv2.imwrite(str(case_dir / "attempt.png"), attempt_image)
-            fixture_dir = root / "fixtures"
-            fixture_dir.mkdir()
-            manifest_path = fixture_dir / "manifest.json"
-            old_fixture = fixture_dir / "exp-unit_ocr_2043000_1074.png"
-            cv2.imwrite(str(old_fixture), np.full((12, 80, 3), 64, dtype=np.uint8))
-            manifest_path.write_text(
-                json.dumps(
-                    {
-                        "samples": [
-                            {
-                                "id": "exp-unit_ocr_2043000_1074",
-                                "file": old_fixture.name,
-                                "current_exp": 2043000,
-                                "percent": 10.74,
-                                "text": "2043000[10.74%]",
-                            }
-                        ]
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-            with (
-                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
-                patch.object(learning_service, "MANIFEST_PATH", manifest_path),
-                patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root),
-            ):
-                result = learning_service.promote_experience_ocr_learning_case(
-                    "exp-unit",
-                    "2043879[10.75%]",
-                )
-
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            promoted_image = cv2.imread(str(fixture_dir / manifest["samples"][0]["file"]), cv2.IMREAD_UNCHANGED)
-
-        self.assertEqual(result["sample_id"], "exp-unit_ocr_2043879_1075")
-        self.assertEqual(len(manifest["samples"]), 1)
-        self.assertEqual(manifest["samples"][0]["current_exp"], 2043879)
-        self.assertEqual(manifest["samples"][0]["percent"], 10.75)
-        self.assertEqual(manifest["samples"][0]["bar_crop_left_ratio"], 0.62)
-        self.assertIsNotNone(promoted_image)
-        self.assertEqual(int(promoted_image[0, 0, 0]), 128)
-        self.assertFalse(old_fixture.exists())
-
-    def test_learning_service_rejects_unbound_default_ocr_text(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((12, 80, 3), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            pending_root = root / "pending"
-            case_dir = pending_root / "exp-unit"
-            case_dir.mkdir(parents=True)
-            cv2.imwrite(str(case_dir / "frame0_roi0_primary.png"), image)
-            cv2.imwrite(str(case_dir / "frame1_roi0_primary.png"), np.full((12, 80, 3), 128, dtype=np.uint8))
-            (case_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "reading_key": "8911037[44.48%]",
-                        "final_reading": {
-                            "text": "8911037[44.48%]",
-                            "reason": "EXP burst 結果不一致",
-                        },
-                        "frames": [
-                            [
-                                {
-                                    "file": "frame0_roi0_primary.png",
-                                    "attempts": [
-                                        {
-                                            "file": "frame0_roi0_primary.png",
-                                            "candidates": [{"text": "8908583[44.47%]"}],
-                                        }
-                                    ],
-                                }
-                            ],
-                            [
-                                {
-                                    "file": "frame1_roi0_primary.png",
-                                    "attempts": [
-                                        {
-                                            "file": "frame1_roi0_primary.png",
-                                            "candidates": [{"text": "8911837[44.40%]"}],
-                                        }
-                                    ],
-                                }
-                            ],
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            fixture_dir = root / "fixtures"
-            fixture_dir.mkdir()
-            manifest_path = fixture_dir / "manifest.json"
-            manifest_path.write_text('{"samples": []}\n', encoding="utf-8")
-
-            with (
-                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
-                patch.object(learning_service, "MANIFEST_PATH", manifest_path),
-                patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root),
-            ):
-                with self.assertRaisesRegex(ValueError, "not tied to a saved OCR candidate"):
-                    learning_service.promote_experience_ocr_learning_case("exp-unit", "8911037[44.48%]")
-                cases = learning_service.list_experience_ocr_learning_cases()
-
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(manifest["samples"], [])
-        self.assertEqual(cases[0]["default_correct_text"], "")
-        self.assertIn("未綁定", cases[0]["source_warning"])
-        self.assertEqual(cases[0]["review_action"], "diagnostic_only")
-        self.assertTrue(str(cases[0]["preview_file"]).endswith("frame0_roi0_primary.png"))
-
-    def test_learning_service_allows_manual_text_from_visible_preview(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((12, 80, 3), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            pending_root = root / "pending"
-            case_dir = pending_root / "exp-unit"
-            case_dir.mkdir(parents=True)
-            cv2.imwrite(str(case_dir / "roi.png"), image)
-            cv2.imwrite(str(case_dir / "attempt.png"), np.full((12, 80, 3), 128, dtype=np.uint8))
-            (case_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "reading_key": "8911037[44.48%]",
-                        "frames": [
-                            [
-                                {
-                                    "file": "roi.png",
-                                    "attempts": [
-                                        {
-                                            "file": "attempt.png",
-                                            "candidates": [{"text": "8908583[44.47%]"}],
-                                        }
-                                    ],
-                                }
-                            ]
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            fixture_dir = root / "fixtures"
-            fixture_dir.mkdir()
-            manifest_path = fixture_dir / "manifest.json"
-            manifest_path.write_text('{"samples": []}\n', encoding="utf-8")
-
-            with (
-                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
-                patch.object(learning_service, "MANIFEST_PATH", manifest_path),
-                patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root),
-            ):
-                result = learning_service.promote_experience_ocr_learning_case("exp-unit", "8908583[44.47%]")
-
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(result["sample_id"], "exp-unit_ocr_8908583_4447")
-        self.assertEqual(manifest["samples"][0]["text"], "8908583[44.47%]")
-
-    def test_learning_service_validation_uses_fixture_bar_crop_left_ratio(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((35, 223, 4), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            fixture_dir = root / "fixtures"
-            fixture_dir.mkdir()
-            image_path = fixture_dir / "sample.png"
-            cv2.imwrite(str(image_path), image)
-            manifest_path = fixture_dir / "manifest.json"
-            manifest_path.write_text(
-                json.dumps(
-                    {
-                        "samples": [
-                            {
-                                "id": "sample",
-                                "file": image_path.name,
-                                "current_exp": 38264102,
-                                "percent": 89.50,
-                                "text": "38264102[89.50%]",
-                                "bar_crop_left_ratio": 0.62,
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            reading = ExperienceTextReading(
-                current_exp=38264102,
-                percent=89.50,
-                text="38264102[89.50%]",
-                confidence=0.98,
-                success=True,
-                reason="OK:Pixel",
-            )
-
-            with (
-                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
-                patch.object(learning_service, "MANIFEST_PATH", manifest_path),
-                patch.object(learning_service.experience_model, "estimate_experience_bar_percent", return_value=None) as estimate,
-                patch.object(learning_service.experience_model, "_read_experience_pixel_font_adaptive", return_value=reading),
-            ):
-                result = learning_service.validate_promoted_experience_fixture("sample")
-
-        self.assertTrue(result["success"])
-        self.assertEqual(estimate.call_args.kwargs["bar_crop_left_ratio"], 0.62)
-
-    def test_learning_service_auto_promotes_trusted_pending_case(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((12, 80, 3), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            pending_root = root / "pending"
-            case_dir = pending_root / "exp-unit"
-            case_dir.mkdir(parents=True)
-            cv2.imwrite(str(case_dir / "roi.png"), image)
-            (case_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "reading_key": "2043879[10.75%]",
-                        "frames": [
-                            [
-                                {
-                                    "file": "roi.png",
-                                    "attempts": [
-                                        {
-                                            "file": "roi.png",
-                                            "candidates": [
-                                                {"text": "2043879[10.75%]", "confidence": 0.980},
-                                                {"text": "2043870[10.75%]", "confidence": 0.900},
-                                            ],
-                                        }
-                                    ],
-                                }
-                            ]
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            fixture_dir = root / "fixtures"
-            fixture_dir.mkdir()
-            manifest_path = fixture_dir / "manifest.json"
-            manifest_path.write_text('{"samples": []}\n', encoding="utf-8")
-
-            with (
-                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
-                patch.object(learning_service, "MANIFEST_PATH", manifest_path),
-                patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root),
-                patch.object(learning_service, "regen_experience_pixel_templates", return_value={"template_count": 1}),
-                patch.object(learning_service, "validate_promoted_experience_fixture", return_value={"success": True}),
-            ):
-                result = learning_service.auto_promote_experience_ocr_learning_cases()
-
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            pending_exists = (pending_root / "exp-unit").exists()
-
-        self.assertEqual([item["id"] for item in result["promoted"]], ["exp-unit"])
-        self.assertEqual(result["skipped"], [])
-        self.assertEqual(result["rolled_back"], [])
-        self.assertEqual(manifest["samples"][0]["text"], "2043879[10.75%]")
-        self.assertFalse(pending_exists)
-
-    def test_learning_service_groups_pending_cases_by_bound_text(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((12, 80, 3), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            pending_root = Path(temp_dir) / "pending"
-            for case_id in ("exp-a", "exp-b"):
-                case_dir = pending_root / case_id
-                case_dir.mkdir(parents=True)
-                cv2.imwrite(str(case_dir / "roi.png"), image)
-                (case_dir / "metadata.json").write_text(
-                    json.dumps(
-                        {
-                            "reading_key": "2043879[10.75%]",
-                            "created_at": case_id,
-                            "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "candidates": [
-                                {"text": "2043879[10.75%]", "confidence": 0.980},
-                                {"text": "2043870[10.75%]", "confidence": 0.900},
-                            ]}]}]],
-                        }
-                    ),
-                    encoding="utf-8",
-                )
-
-            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
-                cases = learning_service.list_experience_ocr_learning_cases()
-
-        self.assertEqual(len(cases), 2)
-        self.assertEqual({case["group_size"] for case in cases}, {2})
-        self.assertEqual(len({case["group_id"] for case in cases}), 1)
-
-    def test_learning_service_auto_promote_skips_low_confidence_gap(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((12, 80, 3), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            pending_root = Path(temp_dir) / "pending"
-            case_dir = pending_root / "exp-low-gap"
-            case_dir.mkdir(parents=True)
-            cv2.imwrite(str(case_dir / "roi.png"), image)
-            (case_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "reading_key": "2043879[10.75%]",
-                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "candidates": [
-                            {"text": "2043879[10.75%]", "confidence": 0.966},
-                            {"text": "2043870[10.75%]", "confidence": 0.964},
-                        ]}]}]],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
-                result = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
-
-        self.assertEqual(result["promotable"], [])
-        self.assertEqual(result["skipped"][0]["id"], "exp-low-gap")
-        self.assertIn("信心", result["skipped"][0]["reason"])
-
-    def test_learning_service_auto_promote_skips_bar_mismatch_candidate(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((12, 80, 3), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            pending_root = Path(temp_dir) / "pending"
-            case_dir = pending_root / "exp-bar-mismatch"
-            case_dir.mkdir(parents=True)
-            cv2.imwrite(str(case_dir / "roi.png"), image)
-            (case_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "reading_key": "2719156[83.84%]",
-                        "frames": [[{"file": "roi.png", "attempts": [
-                            {"file": "roi.png", "bar_percent": 75.53, "candidates": [
-                                {"text": "2719156[83.84%]", "confidence": 0.952},
-                                {"text": "2719136[83.84%]", "confidence": 0.950},
-                            ]},
-                            {"file": "roi.png", "candidates": [
-                                {"text": "2719156[83.84%]", "confidence": 0.952},
-                            ]},
-                        ]}]],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
-                cases = learning_service.list_experience_ocr_learning_cases()
-                result = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
-
-        self.assertEqual(cases[0]["review_action"], "delete_recommended")
-        self.assertIn("綠條", cases[0]["review_reason"])
-        self.assertEqual(result["promotable"], [])
-        self.assertEqual(result["skipped"][0]["id"], "exp-bar-mismatch")
-        self.assertIn("綠條", result["skipped"][0]["reason"])
-
-    def test_learning_service_auto_promote_skips_ambiguous_pixel_failure(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((12, 80, 3), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            pending_root = Path(temp_dir) / "pending"
-            case_dir = pending_root / "exp-ambiguous"
-            case_dir.mkdir(parents=True)
-            cv2.imwrite(str(case_dir / "roi.png"), image)
-            (case_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "id": "exp-ambiguous",
-                        "created_at": "2026-05-14T12:52:51",
-                        "trigger": "ocr_failure",
-                        "reading_key": "35171532[88.77%]",
-                        "final_reading": {
-                            "success": False,
-                            "text": "35171532[88.77%]",
-                            "reason": "EXP OCR 模糊數字候選不一致",
-                        },
-                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "segments": [
-                            {
-                                "file": "seg10.png",
-                                "shape": [41, 23],
-                                "ambiguity": {
-                                    "characters": ["8", "6"],
-                                    "confidence_gap": 0.012,
-                                    "top_confidence": 0.98,
-                                },
-                            }
-                        ], "candidates": [
-                            {"text": "35171532[88.77%]", "confidence": 0.979},
-                            {"text": "35171532[86.77%]", "confidence": 0.971},
-                        ]}]}]],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
-                cases = learning_service.list_experience_ocr_learning_cases()
-                result = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
-
-        self.assertFalse(cases[0]["auto_promote_promotable"])
-        self.assertEqual(cases[0]["glyph_ambiguity_count"], 1)
-        self.assertEqual(cases[0]["review_action"], "diagnostic_only")
-        self.assertEqual(result["promotable"], [])
-        self.assertIn("Pixel glyph", result["skipped"][0]["reason"])
-
-    def test_learning_service_auto_promotes_strong_candidate_despite_glyph_ambiguity(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((12, 80, 3), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            pending_root = Path(temp_dir) / "pending"
-            case_dir = pending_root / "exp-strong"
-            case_dir.mkdir(parents=True)
-            cv2.imwrite(str(case_dir / "roi.png"), image)
-            (case_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "id": "exp-strong",
-                        "created_at": "2026-05-15T03:52:51",
-                        "trigger": "ocr_failure",
-                        "reading_key": "1142804[2.53%]",
-                        "final_reading": {
-                            "success": False,
-                            "text": "1142804[2.53%]",
-                            "reason": "EXP 像素字型信心過低",
-                        },
-                        "frames": [[{"file": "roi.png", "attempts": [
-                            {
-                                "file": f"attempt{index}.png",
-                                "segments": [
-                                    {
-                                        "file": f"seg{index}.png",
-                                        "shape": [41, 23],
-                                        "ambiguity": {
-                                            "characters": ["8", "6"],
-                                            "confidence_gap": 0.012,
-                                            "top_confidence": 0.98,
-                                        },
-                                    }
-                                ],
-                                "candidates": [
-                                    {"text": "1142804[2.53%]", "confidence": 0.934},
-                                    {"text": "1142004[2.53%]", "confidence": 0.870},
-                                ],
-                            }
-                            for index in range(4)
-                        ]}]],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
-                cases = learning_service.list_experience_ocr_learning_cases()
-                result = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
-
-        self.assertTrue(cases[0]["auto_promote_promotable"])
-        self.assertEqual(cases[0]["review_action"], "auto_promote")
-        self.assertEqual([item["id"] for item in result["promotable"]], ["exp-strong"])
-
-    def test_learning_service_marks_unbound_bar_mismatch_case_delete_recommended(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((12, 80, 3), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            pending_root = Path(temp_dir) / "pending"
-            case_dir = pending_root / "exp-unbound"
-            case_dir.mkdir(parents=True)
-            cv2.imwrite(str(case_dir / "roi.png"), image)
-            (case_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "reading_key": "23706141[90.72%]",
-                        "final_reading": {
-                            "success": False,
-                            "text": "23706141[90.72%]",
-                            "reason": "EXP 百分比與綠條不一致",
-                        },
-                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "candidates": [
-                            {"text": "33736141[3073%]", "confidence": 0.861},
-                        ]}]}]],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
-                cases = learning_service.list_experience_ocr_learning_cases()
-
-        self.assertEqual(cases[0]["review_action"], "delete_recommended")
-        self.assertIn("未綁定", cases[0]["review_reason"])
-
-    def test_learning_service_delete_recommended_cases_supports_dry_run(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((12, 80, 3), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            pending_root = Path(temp_dir) / "pending"
-            case_dir = pending_root / "exp-bar-mismatch"
-            case_dir.mkdir(parents=True)
-            cv2.imwrite(str(case_dir / "roi.png"), image)
-            (case_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "reading_key": "2719156[83.84%]",
-                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "bar_percent": 75.53, "candidates": [
-                            {"text": "2719156[83.84%]", "confidence": 0.952},
-                        ]}]}]],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
-                dry_run = learning_service.delete_recommended_experience_ocr_learning_cases(dry_run=True)
-                exists_after_dry_run = case_dir.exists()
-                deleted = learning_service.delete_recommended_experience_ocr_learning_cases()
-                exists_after_delete = case_dir.exists()
-
-        self.assertEqual([item["id"] for item in dry_run], ["exp-bar-mismatch"])
-        self.assertTrue(exists_after_dry_run)
-        self.assertEqual([item["id"] for item in deleted], ["exp-bar-mismatch"])
-        self.assertFalse(exists_after_delete)
-
-    def test_learning_service_auto_promote_skips_untrusted_cases(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((12, 80, 3), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            pending_root = Path(temp_dir) / "pending"
-            bound_dir = pending_root / "exp-bound"
-            bound_dir.mkdir(parents=True)
-            cv2.imwrite(str(bound_dir / "roi.png"), image)
-            (bound_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "reading_key": "2043879[10.75%]",
-                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "candidates": []}]}]],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            empty_dir = pending_root / "exp-empty"
-            empty_dir.mkdir()
-            (empty_dir / "metadata.json").write_text(
-                json.dumps({"frames": [[{"file": "missing.png", "attempts": []}]]}),
-                encoding="utf-8",
-            )
-
-            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
-                result = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
-
-        skipped_ids = {item["id"] for item in result["skipped"]}
-        self.assertEqual(result["promotable"], [])
-        self.assertEqual(skipped_ids, {"exp-bound", "exp-empty"})
-
-    def test_learning_service_false_positive_cases_are_background_diagnostics(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            pending_root = Path(temp_dir) / "pending"
-            case_dir = pending_root / "exp-unit"
-            case_dir.mkdir(parents=True)
-            (case_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "id": "exp-unit",
-                        "created_at": "2026-05-13T18:00:00",
-                        "trigger": "tracker_rejected",
-                        "reading_key": "288900[27.08%]",
-                        "final_reading": {
-                            "success": True,
-                            "text": "288900[27.08%]",
-                            "confidence": 0.98,
-                            "current_exp": 288900,
-                            "percent": 27.08,
-                            "reason": "OK:Pixel",
-                        },
-                        "frames": [[{"file": "roi.png", "attempts": [{"bar_percent": 27.08, "candidates": [
-                            {"text": "288900[27.08%]", "confidence": 0.99},
-                            {"text": "283900[27.08%]", "confidence": 0.97},
-                        ]}]}]],
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-
-            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
-                cases = learning_service.list_experience_ocr_learning_cases()
-                result = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
-
-        self.assertEqual(cases[0]["review_action"], "diagnostic_only")
-        self.assertEqual(cases[0]["review_label"], "背景診斷")
-        self.assertFalse(cases[0]["auto_promote_promotable"])
-        self.assertEqual(result["promotable"], [])
-        self.assertEqual(result["skipped"][0]["reason"], "false-positive case 僅作背景診斷")
-
-    def test_learning_service_sorts_actionable_cases_before_background_diagnostics(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            pending_root = Path(temp_dir) / "pending"
-            diagnostic_dir = pending_root / "exp-diagnostic"
-            diagnostic_dir.mkdir(parents=True)
-            (diagnostic_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "id": "exp-diagnostic",
-                        "created_at": "2026-05-13T18:00:00",
-                        "trigger": "tracker_rejected",
-                        "reading_key": "288900[27.08%]",
-                        "final_reading": {"success": True, "text": "288900[27.08%]", "reason": "OK"},
-                    }
-                ),
-                encoding="utf-8",
-            )
-            manual_dir = pending_root / "exp-manual"
-            manual_dir.mkdir()
-            cv2.imwrite(str(manual_dir / "roi.png"), np.full((12, 80, 3), 255, dtype=np.uint8))
-            (manual_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "id": "exp-manual",
-                        "created_at": "2026-05-13T18:10:00",
-                        "trigger": "ocr_failure",
-                        "reading_key": "288901[27.09%]",
-                        "final_reading": {"success": False, "text": "288901[27.09%]", "reason": "EXP 百分比解析失敗"},
-                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "candidates": [
-                            {"text": "288901[27.09%]", "confidence": 0.950},
-                        ]}]}]],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
-                cases = learning_service.list_experience_ocr_learning_cases()
-
-        self.assertEqual([case["id"] for case in cases], ["exp-manual", "exp-diagnostic"])
-        self.assertEqual(cases[0]["review_action"], "manual_review")
-        self.assertEqual(cases[1]["review_action"], "diagnostic_only")
-
-    def test_learning_service_auto_promote_dry_run_has_no_side_effects(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((12, 80, 3), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            pending_root = root / "pending"
-            case_dir = pending_root / "exp-unit"
-            case_dir.mkdir(parents=True)
-            cv2.imwrite(str(case_dir / "roi.png"), image)
-            (case_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "reading_key": "2043879[10.75%]",
-                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "candidates": [
-                            {"text": "2043879[10.75%]", "confidence": 0.980},
-                            {"text": "2043870[10.75%]", "confidence": 0.900},
-                        ]}]}]],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            fixture_dir = root / "fixtures"
-            fixture_dir.mkdir()
-            manifest_path = fixture_dir / "manifest.json"
-            manifest_path.write_text('{"samples": []}\n', encoding="utf-8")
-
-            with (
-                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
-                patch.object(learning_service, "MANIFEST_PATH", manifest_path),
-                patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root),
-                patch.object(learning_service, "regen_experience_pixel_templates") as regen,
-            ):
-                result = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
-
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            pending_exists = (pending_root / "exp-unit").exists()
-            fixture_files = list(fixture_dir.glob("*.png"))
-
-        self.assertEqual(len(result["promotable"]), 1)
-        self.assertEqual(result["promotable"][0]["id"], "exp-unit")
-        self.assertEqual(result["promotable"][0]["text"], "2043879[10.75%]")
-        self.assertEqual(manifest["samples"], [])
-        self.assertTrue(pending_exists)
-        self.assertEqual(fixture_files, [])
-        regen.assert_not_called()
-
-    def test_learning_service_auto_promote_rolls_back_failed_pixel_validation(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((12, 80, 3), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            pending_root = root / "pending"
-            case_dir = pending_root / "exp-unit"
-            case_dir.mkdir(parents=True)
-            cv2.imwrite(str(case_dir / "roi.png"), image)
-            (case_dir / "metadata.json").write_text(
-                json.dumps(
-                    {
-                        "reading_key": "2043879[10.75%]",
-                        "frames": [[{"file": "roi.png", "attempts": [{"file": "roi.png", "candidates": [
-                            {"text": "2043879[10.75%]", "confidence": 0.980},
-                            {"text": "2043870[10.75%]", "confidence": 0.900},
-                        ]}]}]],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            fixture_dir = root / "fixtures"
-            fixture_dir.mkdir()
-            manifest_path = fixture_dir / "manifest.json"
-            manifest_path.write_text('{"samples": []}\n', encoding="utf-8")
-
-            with (
-                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
-                patch.object(learning_service, "MANIFEST_PATH", manifest_path),
-                patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root),
-                patch.object(learning_service, "regen_experience_pixel_templates", return_value={"template_count": 1}) as regen,
-                patch.object(
-                    learning_service,
-                    "validate_promoted_experience_fixture",
-                    return_value={"success": False, "text": "2043870[10.75%]", "reason": "mismatch"},
-                ),
-            ):
-                result = learning_service.auto_promote_experience_ocr_learning_cases()
-
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            pending_exists = (pending_root / "exp-unit").exists()
-            fixture_files = list(fixture_dir.glob("*.png"))
-            metadata = json.loads((pending_root / "exp-unit" / "metadata.json").read_text(encoding="utf-8"))
-            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
-                cases = learning_service.list_experience_ocr_learning_cases()
-                retry = learning_service.auto_promote_experience_ocr_learning_cases(dry_run=True)
-
-        self.assertEqual(result["promoted"], [])
-        self.assertEqual(result["rolled_back"][0]["id"], "exp-unit")
-        self.assertEqual(result["rolled_back"][0]["read_text"], "2043870[10.75%]")
-        self.assertEqual(metadata["last_promotion_validation"]["read_text"], "2043870[10.75%]")
-        self.assertEqual(cases[0]["review_action"], "delete_recommended")
-        self.assertIn("Pixel validation", cases[0]["review_reason"])
-        self.assertEqual(retry["promotable"], [])
-        self.assertIn("Pixel validation", retry["skipped"][0]["reason"])
-        self.assertEqual(manifest["samples"], [])
-        self.assertTrue(pending_exists)
-        self.assertEqual(fixture_files, [])
-        self.assertEqual(regen.call_count, 2)
-
-    def test_learning_service_dedupes_and_deletes_pending_cases(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            pending_root = Path(temp_dir) / "pending"
-            for case_id in ("exp-a", "exp-b"):
-                case_dir = pending_root / case_id
-                case_dir.mkdir(parents=True)
-                pixel_reason = "EXP 像素字型信心過低" if case_id == "exp-a" else "EXP 像素字型結構不可信"
-                (case_dir / "metadata.json").write_text(
-                    json.dumps(
-                        {
-                            "id": case_id,
-                            "created_at": case_id,
-                            "trigger": "pixel_to_paddle_fallback",
-                            "reading_key": "4652609[24.49%]",
-                            "pixel_reason": pixel_reason,
-                        }
-                    ),
-                    encoding="utf-8",
-                )
-
-            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
-                duplicates = learning_service.dedupe_experience_ocr_learning_cases()
-                kept_exists = (pending_root / "exp-a").exists()
-                removed_exists = (pending_root / "exp-b").exists()
-
-        self.assertEqual(duplicates, [{"id": "exp-b", "duplicate_of": "exp-a"}])
-        self.assertFalse(removed_exists)
-        self.assertTrue(kept_exists)
-
-    def test_learning_service_hides_resolved_fallback_and_tracker_cases(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            pending_root = Path(temp_dir) / "pending"
-            for case_id, trigger, success in (
-                ("exp-fallback", "pixel_to_paddle_fallback", True),
-                ("exp-tracker", "tracker_rejection", True),
-                ("exp-failure", "ocr_failure", False),
-            ):
-                case_dir = pending_root / case_id
-                case_dir.mkdir(parents=True)
-                (case_dir / "metadata.json").write_text(
-                    json.dumps(
-                        {
-                            "id": case_id,
-                            "created_at": case_id,
-                            "trigger": trigger,
-                            "final_reading": {
-                                "success": success,
-                                "text": "4732309[24.91%]",
-                                "reason": "OK" if success else "OCR 失敗",
-                            },
-                        }
-                    ),
-                    encoding="utf-8",
-                )
-
-            with patch.object(learning_service, "experience_ocr_learning_pending_dir", return_value=pending_root):
-                cases = learning_service.list_experience_ocr_learning_cases()
-
-        self.assertEqual([case["id"] for case in cases], ["exp-failure"])
-
-    def test_learning_service_dedupes_fixture_promotions_from_same_case(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            fixture_dir = Path(temp_dir) / "fixtures"
-            fixture_dir.mkdir()
-            old_file = fixture_dir / "exp-unit_ocr_4731672_2491.png"
-            new_file = fixture_dir / "exp-unit_ocr_4731707_2491.png"
-            cv2.imwrite(str(old_file), np.full((8, 20, 3), 64, dtype=np.uint8))
-            cv2.imwrite(str(new_file), np.full((8, 20, 3), 128, dtype=np.uint8))
-            manifest_path = fixture_dir / "manifest.json"
-            manifest_path.write_text(
-                json.dumps(
-                    {
-                        "samples": [
-                            {
-                                "id": "exp-unit_ocr_4731672_2491",
-                                "file": old_file.name,
-                                "current_exp": 4731672,
-                                "percent": 24.91,
-                                "text": "4731672[24.91%]",
-                            },
-                            {
-                                "id": "exp-unit_ocr_4731707_2491",
-                                "file": new_file.name,
-                                "current_exp": 4731707,
-                                "percent": 24.91,
-                                "text": "4731707[24.91%]",
-                            },
-                        ]
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-            with (
-                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
-                patch.object(learning_service, "MANIFEST_PATH", manifest_path),
-            ):
-                removed = learning_service.dedupe_experience_ocr_fixtures_by_case_prefix()
-
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            old_exists = old_file.exists()
-            new_exists = new_file.exists()
-
-        self.assertEqual(
-            removed,
-            [
-                {
-                    "id": "exp-unit_ocr_4731672_2491",
-                    "duplicate_of": "exp-unit_ocr_4731707_2491",
-                    "text": "4731672[24.91%]",
-                }
-            ],
-        )
-        self.assertFalse(old_exists)
-        self.assertTrue(new_exists)
-        self.assertEqual([sample["id"] for sample in manifest["samples"]], ["exp-unit_ocr_4731707_2491"])
-
-    def test_learning_service_removes_failed_promoted_fixture_sample(self):
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            fixture_dir = Path(temp_dir) / "fixtures"
-            fixture_dir.mkdir()
-            fixture_file = fixture_dir / "exp-unit_ocr_4731819_2491.png"
-            cv2.imwrite(str(fixture_file), np.full((8, 20, 3), 64, dtype=np.uint8))
-            manifest_path = fixture_dir / "manifest.json"
-            manifest_path.write_text(
-                json.dumps(
-                    {
-                        "samples": [
-                            {
-                                "id": "exp-unit_ocr_4731819_2491",
-                                "file": fixture_file.name,
-                                "current_exp": 4731819,
-                                "percent": 24.91,
-                                "text": "4731819[24.91%]",
-                            }
-                        ]
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-            with (
-                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
-                patch.object(learning_service, "MANIFEST_PATH", manifest_path),
-            ):
-                removed = learning_service.remove_experience_ocr_fixture_sample("exp-unit_ocr_4731819_2491")
-
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            fixture_exists = fixture_file.exists()
-
-        self.assertTrue(removed)
-        self.assertFalse(fixture_exists)
-        self.assertEqual(manifest["samples"], [])
-
-    def test_learning_service_fixture_pixel_validation_has_no_pending_side_effect(self):
-        from maple_star.models import experience as experience_model
-        from maple_star.services import experience_ocr_learning as learning_service
-
-        image = np.full((12, 80, 3), 255, dtype=np.uint8)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            fixture_dir = Path(temp_dir) / "fixtures"
-            fixture_dir.mkdir()
-            cv2.imwrite(str(fixture_dir / "unit.png"), image)
-            sample = {
-                "id": "unit",
-                "file": "unit.png",
-                "current_exp": 2043879,
-                "percent": 10.75,
-                "text": "2043879[10.75%]",
-            }
-
-            with (
-                patch.object(learning_service, "FIXTURE_DIR", fixture_dir),
-                patch.object(
-                    experience_model,
-                    "save_experience_ocr_learning_case",
-                    side_effect=AssertionError("fixture validation must not create pending cases"),
-                ),
-            ):
-                success = learning_service._fixture_sample_pixel_succeeds(sample)
-
-        self.assertFalse(success)
-
-    def test_paddle_reader_uses_traditional_chinese_ppocrv5_models(self):
-        captured_kwargs = {}
-
-        class FakePaddleOCR:
-            def __init__(self, **kwargs):
-                captured_kwargs.update(kwargs)
-
-        reader = PaddleExperienceTextReader()
-        self.assertTrue(reader._build_ocr(FakePaddleOCR))
-
-        self.assertNotIn("lang", captured_kwargs)
-        self.assertEqual(captured_kwargs["text_detection_model_name"], PADDLEOCR_DETECTION_MODEL_NAME)
-        self.assertEqual(captured_kwargs["text_recognition_model_name"], PADDLEOCR_RECOGNITION_MODEL_NAME)
-        self.assertFalse(captured_kwargs["use_doc_orientation_classify"])
-        self.assertFalse(captured_kwargs["use_doc_unwarping"])
-        self.assertFalse(captured_kwargs["use_textline_orientation"])
-
-    def test_paddle_reader_legacy_fallback_uses_traditional_chinese_lang(self):
-        calls = []
-
-        class FakePaddleOCR:
-            def __init__(self, **kwargs):
-                calls.append(kwargs)
-                if "text_recognition_model_name" in kwargs:
-                    raise TypeError("unsupported keyword")
-
-        reader = PaddleExperienceTextReader()
-        self.assertTrue(reader._build_ocr(FakePaddleOCR))
-
-        self.assertEqual(calls[-1]["lang"], PADDLEOCR_LANGUAGE)
-        self.assertFalse(calls[-1]["use_angle_cls"])
 
     @unittest.skipUnless(RUN_SLOW_OCR_TESTS, SLOW_OCR_SKIP_REASON)
     def test_paddle_fallback_reaches_90_percent_accuracy_on_labeled_fixtures(self):
@@ -3302,7 +2135,10 @@ class ExperienceTests(unittest.TestCase):
         sys.modules["paddleocr"] = fake_module
         try:
             reader = PaddleExperienceTextReader()
-            with patch("maple_star.models.experience.suppress_subprocess_windows", return_value=FakeHiddenContext()):
+            with patch(
+                "maple_star.services.experience_paddle_reader.suppress_subprocess_windows",
+                return_value=FakeHiddenContext(),
+            ):
                 self.assertTrue(reader._ensure_ocr())
         finally:
             if original_module is None:
@@ -3354,8 +2190,8 @@ class ExperienceTests(unittest.TestCase):
         )
 
         with (
-            patch("maple_star.models.experience.reading_from_tooltip_paddle_result", return_value=reading),
-            patch("maple_star.models.experience.log_experience_debug") as log_debug,
+            patch("maple_star.services.experience_text_parsing.reading_from_tooltip_paddle_result", return_value=reading),
+            patch("maple_star.services.experience_paddle_reader.log_experience_debug") as log_debug,
         ):
             result = reader.read_tooltip_exp(image)
 
@@ -3387,10 +2223,10 @@ class ExperienceTests(unittest.TestCase):
 
         with (
             patch(
-                "maple_star.models.experience.reading_from_tooltip_paddle_result",
+                "maple_star.services.experience_text_parsing.reading_from_tooltip_paddle_result",
                 side_effect=[failure] * base_count + [success],
             ),
-            patch("maple_star.models.experience.log_experience_debug"),
+            patch("maple_star.services.experience_paddle_reader.log_experience_debug"),
         ):
             result = reader.read_tooltip_exp(image)
 
@@ -3429,8 +2265,11 @@ class ExperienceTests(unittest.TestCase):
         )
 
         with (
-            patch("maple_star.models.experience.reading_from_tooltip_paddle_result", side_effect=[rejected, accepted]),
-            patch("maple_star.models.experience.log_experience_debug"),
+            patch(
+                "maple_star.services.experience_text_parsing.reading_from_tooltip_paddle_result",
+                side_effect=[rejected, accepted],
+            ),
+            patch("maple_star.services.experience_paddle_reader.log_experience_debug"),
         ):
             result = reader.read_tooltip_exp(image, continuity_hint=hint)
 
@@ -3452,8 +2291,11 @@ class ExperienceTests(unittest.TestCase):
         )
 
         with (
-            patch("maple_star.models.experience.reading_from_tooltip_paddle_result", return_value=failure),
-            patch("maple_star.models.experience.log_experience_debug") as log_debug,
+            patch(
+                "maple_star.services.experience_text_parsing.reading_from_tooltip_paddle_result",
+                return_value=failure,
+            ),
+            patch("maple_star.services.experience_paddle_reader.log_experience_debug") as log_debug,
         ):
             result = reader.read_tooltip_exp(image)
 
