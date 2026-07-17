@@ -14,6 +14,7 @@
 - [全專案 Code Review 與減肥設計](superpowers/specs/2026-07-17-project-slimming-design.md)：開發工具移除、發行包減肥、巨型模組拆分與分批驗證規格。
 - [Stage 3 OCR 與 GUI 拆分設計](superpowers/specs/2026-07-17-stage-3-ocr-gui-decomposition-design.md)：實際 public API manifest、OCR 責任拆分、GUI page builder 與逐批 rollback 規格。
 - [Stage 3 OCR 與 GUI 拆分實作計畫](superpowers/plans/2026-07-17-stage-3-ocr-gui-decomposition-plan.md)：依 facade、OCR leaf/service 與 GUI page builder 分成十批執行與驗證。
+- [Stage 4 AutoPotionController 拆分設計](superpowers/specs/2026-07-17-stage-4-auto-potion-controller-decomposition-design.md)：runtime composition、media、hotkey、HUD、potion 與 EXP capture 的責任、ownership、相容與分批 rollback 規格。
 - [第一階段全專案 Code Review Gate 計畫](superpowers/plans/2026-07-17-project-review-phase-1-plan.md)：全 repository review、baseline、findings 分級與後續階段分流。
 - [2026-07-17 全專案 Code Review](reviews/2026-07-17-project-code-review.md)：全 repository baseline、分級 findings、證據與減肥階段分流。
 - [Stage 3 OCR／GUI 拆分 Baseline](reviews/2026-07-17-stage-3-baseline.md)：拆分前 LOC、fixture 數量與 GUI/control performance 比較基準。
