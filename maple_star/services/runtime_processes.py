@@ -15,6 +15,7 @@ from ..models.experience import ExperienceSnapshot
 from ..models.settings import AutoPotionSettings
 
 STATUS_HEARTBEAT_SECONDS = 1.0
+CONTROL_QUEUE_MAXSIZE = 256
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,38 @@ class PotionStatus:
     media_sound_aliases: tuple[str, ...] = ()
     potion_action_defer_until: float = 0.0
     generation: int = 0
+
+
+@dataclass(frozen=True)
+class ControlCommand:
+    scripts_enabled: bool
+    gameplay_hud_active: bool
+    cruise_enabled: bool
+    action_blocked: bool = False
+    potion_action_defer_until: float = 0.0
+    challenge_paused: bool = False
+    release_all: bool = False
+    generation: int = 0
+    benchmark_deadline_interval_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class ControlStatus:
+    generation: int
+    heartbeat_at: float
+    worker_state: str
+    cruise_enabled: bool
+    challenge_paused: bool
+    macro_status: str
+    held_keys: str
+    last_action: str
+    notice: str = ""
+    urgent_events: tuple[str, ...] = ()
+    console_lines: tuple[str, ...] = ()
+    timing_sample_count: int = 0
+    timing_p95_lateness_ms: float = 0.0
+    timing_max_lateness_ms: float = 0.0
+    held_vks: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -195,6 +228,9 @@ class RuntimeProcessCoordinator:
         self._potion_statuses = self._ctx.Queue()
         self._experience_commands = self._ctx.Queue()
         self._experience_statuses = self._ctx.Queue()
+        self._control_commands = self._ctx.Queue(maxsize=CONTROL_QUEUE_MAXSIZE)
+        self._control_statuses = self._ctx.Queue(maxsize=CONTROL_QUEUE_MAXSIZE)
+        self._control_release_event = self._ctx.Event()
         self._settings_payload = settings.to_json_dict()
         self._target_hwnd = int(target_hwnd or 0)
         self._potion_process = self._new_potion_process()
@@ -205,6 +241,10 @@ class RuntimeProcessCoordinator:
             daemon=True,
         )
         self._started = False
+        self._control_process: mp.Process | None = None
+        self._pending_control_command: ControlCommand | None = None
+        self._pending_control_settings: SettingsUpdated | None = None
+        self._pending_control_target: TargetWindowUpdated | None = None
 
     def _new_potion_process(self) -> mp.Process:
         return self._ctx.Process(
@@ -221,17 +261,41 @@ class RuntimeProcessCoordinator:
         self._experience_process.start()
         self._started = True
 
+    def start_control(self, worker_target, *worker_args: object) -> None:
+        if self._control_process is not None:
+            return
+        self._control_process = self._ctx.Process(
+            target=worker_target,
+            args=(
+                self._control_commands,
+                self._control_statuses,
+                self._settings_payload,
+                self._target_hwnd,
+                self._control_release_event,
+                *worker_args,
+            ),
+            name="MapleStarControlRuntime",
+            daemon=True,
+        )
+        self._control_process.start()
+
     def send_settings(self, settings: AutoPotionSettings) -> None:
         self._settings_payload = settings.to_json_dict()
         command = SettingsUpdated(self._settings_payload)
         self._potion_commands.put(command)
         self._experience_commands.put(command)
+        if self._control_process is not None:
+            self._pending_control_settings = command
+            self._flush_pending_control_messages()
 
     def send_target_window(self, hwnd: int) -> None:
         self._target_hwnd = int(hwnd or 0)
         command = TargetWindowUpdated(self._target_hwnd)
         self._potion_commands.put(command)
         self._experience_commands.put(command)
+        if self._control_process is not None:
+            self._pending_control_target = command
+            self._flush_pending_control_messages()
 
     def send_potion_control(self, command: PotionControl) -> None:
         self._potion_commands.put(command)
@@ -239,17 +303,68 @@ class RuntimeProcessCoordinator:
     def send_experience_control(self, command: ExperienceControl) -> None:
         self._experience_commands.put(command)
 
+    def send_control(self, command: ControlCommand) -> None:
+        self._pending_control_command = command
+        self._flush_pending_control_messages()
+
+    def request_control_release(self, command: ControlCommand) -> None:
+        self._control_release_event.set()
+        self._pending_control_command = None
+        self._pending_control_settings = SettingsUpdated(self._settings_payload)
+        self._pending_control_target = TargetWindowUpdated(self._target_hwnd)
+        if not self._put_control_command(command, required=True):
+            raise RuntimeError("control release command enqueue failed")
+
+    def _flush_pending_control_messages(self) -> None:
+        for attribute in (
+            "_pending_control_settings",
+            "_pending_control_target",
+            "_pending_control_command",
+        ):
+            command = getattr(self, attribute, None)
+            if command is None:
+                continue
+            if not self._put_control_command(command, required=False):
+                return
+            setattr(self, attribute, None)
+
+    def _put_control_command(self, command: object, *, required: bool) -> bool:
+        try:
+            if required:
+                self._control_commands.put(command, timeout=0.25)
+            else:
+                self._control_commands.put_nowait(command)
+            return True
+        except queue.Full:
+            if required:
+                # Release/shutdown commands take precedence over coalescible
+                # settings/state snapshots when the bounded queue is saturated.
+                _drain_queue(self._control_commands, CONTROL_QUEUE_MAXSIZE)
+                try:
+                    self._control_commands.put(command, timeout=0.25)
+                    return True
+                except queue.Full:
+                    return False
+            return False
+
     def drain_potion_statuses(self, limit: int = 64) -> list[object]:
         return _drain_queue(self._potion_statuses, limit)
 
     def drain_experience_statuses(self, limit: int = 64) -> list[object]:
         return _drain_queue(self._experience_statuses, limit)
 
+    def drain_control_statuses(self, limit: int = 64) -> list[object]:
+        self._flush_pending_control_messages()
+        return _drain_queue(self._control_statuses, limit)
+
     def potion_alive(self) -> bool:
         return self._potion_process.is_alive()
 
     def experience_alive(self) -> bool:
         return self._experience_process.is_alive()
+
+    def control_alive(self) -> bool:
+        return self._control_process is not None and self._control_process.is_alive()
 
     def restart_potion(self, settings: AutoPotionSettings, target_hwnd: int = 0, timeout: float = 1.0) -> None:
         self._settings_payload = settings.to_json_dict()
@@ -272,7 +387,13 @@ class RuntimeProcessCoordinator:
         self._potion_commands.put(Shutdown())
         self._experience_commands.put(ExperienceControl(False, pause=True))
         self._experience_commands.put(Shutdown())
-        for process in (self._potion_process, self._experience_process):
+        if self._control_process is not None:
+            self._control_release_event.set()
+            self._put_control_command(Shutdown(), required=True)
+        processes = [self._potion_process, self._experience_process]
+        if self._control_process is not None:
+            processes.append(self._control_process)
+        for process in processes:
             process.join(timeout=timeout)
             if process.is_alive():
                 process.terminate()
@@ -628,6 +749,22 @@ def _experience_status_signature(status: ExperienceStatus) -> tuple[object, ...]
         snapshot.status,
         status.status,
         int(status.generation or 0),
+    )
+
+
+def control_status_signature(status: ControlStatus) -> tuple[object, ...]:
+    return (
+        int(status.generation),
+        status.worker_state,
+        bool(status.cruise_enabled),
+        bool(status.challenge_paused),
+        status.macro_status,
+        status.held_keys,
+        tuple(status.held_vks),
+        status.last_action,
+        int(status.timing_sample_count),
+        round(float(status.timing_p95_lateness_ms), 3),
+        round(float(status.timing_max_lateness_ms), 3),
     )
 
 

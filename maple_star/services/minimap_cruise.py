@@ -13,6 +13,7 @@ from ..models.settings import (
     MINIMAP_CRUISE_DEFAULT_DETECT_BAND_HEIGHT,
     normalize_minimap_cruise_direction,
 )
+from .control_scheduler import next_absolute_deadline
 
 MINIMAP_CRUISE_DETECT_INTERVAL_SECONDS = 0.2
 MINIMAP_CRUISE_STATIONARY_TURN_SECONDS = 1.0
@@ -560,10 +561,11 @@ class MinimapCruiseRuntime:
         )
         if queued[0][1] <= now + 1e-9 and now + 1e-9 >= earliest_allowed:
             _priority, _send_at, index, vk, interval = queued.pop(0)
+            cadence_deadline = self.periodic_key_next_at.get(index, _send_at)
             self.tap_key_func(vk)
             self.last_periodic_key_tap_at = now
             self.periodic_key_pending_taps.pop(index, None)
-            self.periodic_key_next_at[index] = now + interval
+            self.periodic_key_next_at[index] = next_absolute_deadline(cadence_deadline, interval, now)
 
         self._reschedule_periodic_key_taps(queued, now, did_tap=self.last_periodic_key_tap_at == now)
 

@@ -36,3 +36,32 @@ python tools\verify.py ocr-slow
 ```
 
 日常不執行 `full` 或 `ocr-slow`；只在上述情境使用。
+
+## 筆電效能專項
+
+完成 control runtime 或 GUI 架構變更後，在目標筆電執行：
+
+```powershell
+python tools\verify.py performance
+```
+
+此 profile 會：
+
+- 冷啟動 GUI 三次並輸出中位數；若要驗證 30% 改善，可另用 `python tools\benchmark_gui_startup.py --baseline-seconds <舊版秒數>`。
+- 量測五頁切換的可見回應；gate 為 p95 ≤150ms。第一次進入頁面會先呈現載入狀態，再於 event loop 空檔完成 lazy build。
+- 啟動 production control runtime process，使用 fake capture 與 no-op input sink 同時跑手把巨集、小地圖判讀、週期鍵、正式 command/status queue 與 10ms benchmark deadline；預設只跑 10 秒，不會對 Windows 送鍵。gate 為 lateness p95 ≤10ms、最大值 ≤25ms。
+
+短時間開發 smoke 可執行：
+
+```powershell
+python tools\benchmark_control_timing.py --duration 5
+```
+
+打包後的 EXE 冷啟動使用安全 ready-marker 模式，不會啟動 control/potion runtime。執行前先關閉既有 maple-star，並分別帶入舊版與新版 EXE 的中位數：
+
+```powershell
+python tools\benchmark_gui_startup.py --runs 3 --executable .\release\maple-star.exe
+python tools\benchmark_gui_startup.py --runs 3 --executable .\release\maple-star.exe --baseline-seconds <舊版EXE秒數>
+```
+
+效能結果與硬體、電源模式及背景負載相關；正式數據需在相同筆電、相同 Windows 電源模式、相同 Python/EXE 類型下比較。若 gate 失敗，保留 JSON 輸出並先區分 OS scheduling、IPC saturation 或 control runtime 工作超時，不得直接放寬門檻。

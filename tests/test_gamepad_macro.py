@@ -256,6 +256,7 @@ class GamepadMacroTests(unittest.TestCase):
                 ("down", 1),
                 ("down", 1),
                 ("down", 1),
+                ("down", 1),
                 ("down", 2),
                 ("up", 2),
                 ("up", 1),

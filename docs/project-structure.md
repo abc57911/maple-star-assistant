@@ -21,13 +21,14 @@
 
 ## 主要模組職責
 - `maple_star/controllers/auto_potion_controller.py`：自動喝水主流程、HUD/ROI 定位、HP/MP direct bar capture、EXP tooltip/bottom OCR orchestration、hotkey gating 與 cleanup。
-- `maple_star/controllers/gamepad_controller.py`：GUI 主迴圈、SDL controller worker 事件、RB/LB 巨集、runtime info refresh 與 controller binding 同步。
+- `maple_star/controllers/gamepad_controller.py`：GUI orchestration、control runtime entrypoint、RB/LB 巨集 state machine 與 runtime info refresh；實際 deadline 在 control process 執行。
 - `maple_star/models/settings.py`：`settings.json` schema、profile migration、controller button alias、全域 UI 狀態與 profile-scoped potion/macro 設定。
 - `maple_star/models/experience.py`：經驗效率 tracker、Pixel OCR、PaddleOCR fallback、tooltip/stat-window parser、OCR continuity guard 與 learning pending bundle helper。
 - `maple_star/models/experience_pixel_templates.py`：runtime Pixel OCR template；檔案很大，應只由 `tools/experience_ocr_learning.py regen-templates` 或等效流程重建。
 - `maple_star/models/controller_state.py`：controller 間共享的 dataclass，例如 HUD layout、OCR job/burst、potion effect attempt 與 out-of-potion hold。
 - `maple_star/views/settings_gui.py`：CustomTkinter GUI、設定檔 UI、compact experience mode、toggle notice、console trim、狀態文字更新。
-- `maple_star/services/runtime_processes.py`：自動喝水與 EXP runtime 的 multiprocessing coordinator、command/status dataclass、status signature 與 heartbeat。
+- `maple_star/services/runtime_processes.py`：potion、EXP 與 control runtime 的 multiprocessing coordinator、command/status dataclass、bounded queue、status signature 與 heartbeat。
+- `maple_star/services/control_scheduler.py`：control runtime 的絕對 deadline、無 backlog cadence、高解析等待與 lateness 統計。
 - `maple_star/services/potion_action_worker.py`：背景送鍵 worker；key-up 成功後才清除 held state，例外只記錄並保留可重試狀態。
 - `maple_star/services/control_hotkey_worker.py`：全域控制熱鍵 worker；RegisterHotKey 失敗時仍保留 polling fallback。
 - `maple_star/services/gamepad_bindings.py`：設定中的 controller button 名稱轉成 SDL button，並決定目前啟用的 RB/LB binding。
@@ -41,10 +42,11 @@
 - `maple_star/adapters/key_capture.py`：GUI key capture、detectable VK 與顯示名稱。
 
 ## Runtime 流程
-- 主 GUI process 由 `gamepad_controller.main()` 驅動，建立 `AutoPotionSettingsGui`、`AutoPotionController` 與 controller worker。
-- 預設啟用 `RuntimeProcessCoordinator`，將 potion runtime 與 experience runtime 分成兩個 child process；GUI 端只套用 status 與 command。
+- 主 GUI process 由 `gamepad_controller.main()` 驅動，建立 `AutoPotionSettingsGui`、`AutoPotionController` 與 SDL event worker。
+- 預設啟用 `RuntimeProcessCoordinator`，分別管理 potion、experience 與 control child process；GUI 端只送 command、套用去重後的 status，不執行巨集或巡航 deadline。
+- control runtime 消費 SDL event queue，負責手把組合、小地圖巡航、週期鍵與對應 SendInput；自動喝水送鍵仍由 potion runtime 擁有。
 - potion runtime 使用 headless GUI recorder 執行自動喝水流程；experience runtime 使用 `experience_only_runtime=True`，只在 EXP 工作需要 HUD 時刷新 HUD，避免不必要的 HP/MP 擷取。
-- runtime status 以 signature 去重，notice / console lines 視為 urgent；即使狀態不變，也會用 heartbeat 維持 worker 存活可觀測性。
+- runtime status 以 signature 去重，notice / urgent events / console lines 視為 urgent；即使狀態不變，也會用 heartbeat 維持 worker 存活可觀測性。
 - GUI 端套用 runtime status 前也會比對 signature，避免重複 `StringVar.set()` 造成不必要 repaint。
 
 ## 專案資料

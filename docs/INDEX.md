@@ -10,6 +10,7 @@
 - [runtime-compatibility.md](runtime-compatibility.md)：GUI、遊戲視窗、DPI、HP/MP/EXP ROI、loading/fade 與前景切換注意事項。
 - [verification.md](verification.md)：日常、發行前與 PaddleOCR 專項驗證命令。
 - [release.md](release.md)：本機打包、GitHub Releases、ZIP 驗證與失敗處理流程。
+- [緊湊 GUI 版面設計](superpowers/specs/2026-07-17-compact-gui-layout-design.md)：五頁字型、靠左分頁與內容驅動版面規格。
 
 ## 任務對照
 - 查入口、facade、分層或模組職責：先讀 [project-structure.md](project-structure.md)。

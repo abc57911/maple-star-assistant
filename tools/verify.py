@@ -13,6 +13,7 @@ ENTRYPOINTS = ("main.py", "main.pyw", "maple_gamepad_macro.py", "auto_potion.py"
 QUICK_TEST_MODULES = (
     "tests.test_control_hotkey_worker",
     "tests.test_gamepad_macro",
+    "tests.test_control_scheduler",
     "tests.test_minimap_cruise",
     "tests.test_settings_profiles",
     "tests.test_win_input",
@@ -62,14 +63,20 @@ def run_ocr_slow() -> None:
     _run([str(paddle_python), "-m", "pip", "check"])
 
 
+def run_performance() -> None:
+    _run([_python(), "tools/benchmark_gui_startup.py", "--runs", "3"])
+    _run([_python(), "tools/benchmark_gui_latency.py", "--rounds", "5"])
+    _run([_python(), "tools/benchmark_control_timing.py", "--duration", "10"])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="maple-star validation profiles")
     parser.add_argument(
         "profile",
         nargs="?",
-        choices=("quick", "full", "ocr-slow"),
+        choices=("quick", "full", "ocr-slow", "performance"),
         default="quick",
-        help="quick: daily smoke checks; full: all tests with slow OCR fixtures; ocr-slow: PaddleOCR venv checks",
+        help="quick: daily smoke; full: all tests; ocr-slow: PaddleOCR venv; performance: startup and short timing gates",
     )
     args = parser.parse_args()
 
@@ -77,8 +84,10 @@ def main() -> None:
         run_quick()
     elif args.profile == "full":
         run_full()
-    else:
+    elif args.profile == "ocr-slow":
         run_ocr_slow()
+    else:
+        run_performance()
 
 
 if __name__ == "__main__":

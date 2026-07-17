@@ -1,9 +1,11 @@
 import unittest
+import tkinter as tk
 from unittest.mock import Mock, patch
 
-from maple_star.constants import MAX_CONSOLE_LINES
+from maple_star.constants import MAX_CONSOLE_CHARS, MAX_CONSOLE_LINES
 from maple_star.gui import AutoPotionSettingsGui
 from maple_star.settings import AutoPotionSettings
+from maple_star.views.settings_gui import FlowLayout
 
 
 class ToggleNoticePositionTests(unittest.TestCase):
@@ -505,8 +507,8 @@ class ToggleNoticePositionTests(unittest.TestCase):
 
         gui.toggle_combo_group_collapsed()
 
-        gui.root.minsize.assert_called_with(752, 634)
-        gui.root.geometry.assert_called_with("752x634")
+        gui.root.minsize.assert_called_with(752, 674)
+        gui.root.geometry.assert_called_with("752x674")
 
     def test_console_collapse_resizes_window_to_left_panel_height(self):
         gui = self.make_gui()
@@ -531,8 +533,8 @@ class ToggleNoticePositionTests(unittest.TestCase):
         self.assertTrue(gui.settings.console_collapsed)
         gui.console_section.grid_remove.assert_called_once()
         gui.console_restore_button.grid.assert_called_once()
-        gui.root.minsize.assert_called_with(752, 678)
-        gui.root.geometry.assert_called_with("752x678")
+        gui.root.minsize.assert_called_with(752, 718)
+        gui.root.geometry.assert_called_with("752x718")
 
     def test_console_height_sync_shrinks_to_left_panel_requested_height(self):
         gui = self.make_gui()
@@ -554,8 +556,8 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.console_section.configure.assert_called_once_with(height=520)
         gui.console_container.configure.assert_called_once_with(width=416, height=466)
         gui.console_container.grid_configure.assert_called_once_with(sticky="nsew")
-        gui.root.minsize.assert_called_with(1176, 544)
-        gui.root.geometry.assert_called_with("1240x544")
+        gui.root.minsize.assert_called_with(752, 584)
+        gui.root.geometry.assert_called_with("1240x584")
 
     def test_console_height_sync_keeps_left_panel_height_when_left_panel_is_taller(self):
         gui = self.make_gui()
@@ -576,8 +578,8 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.controls_frame.configure.assert_called_once_with(height=820)
         gui.console_section.configure.assert_called_once_with(height=820)
         gui.console_container.configure.assert_called_once_with(width=416, height=766)
-        gui.root.minsize.assert_called_with(1176, 844)
-        gui.root.geometry.assert_called_with("1240x844")
+        gui.root.minsize.assert_called_with(752, 884)
+        gui.root.geometry.assert_called_with("1240x884")
 
     def test_append_console_trims_old_lines_and_disables_text(self):
         gui = self.make_gui()
@@ -637,6 +639,82 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.console.delete.assert_called_once_with("1.0", "end")
         self.assertEqual(gui.console.configure.call_args_list[0].kwargs, {"state": "normal"})
         self.assertEqual(gui.console.configure.call_args_list[-1].kwargs, {"state": "disabled"})
+
+    def test_lazy_page_builder_runs_only_on_first_open(self):
+        gui = self.make_gui()
+        page = Mock()
+        gui.page_frames = {"自動喝水": page}
+        gui.page_built = {"監控"}
+        gui._build_potion_page = Mock()
+        gui._build_minimap_page = Mock()
+        gui._build_combo_page = Mock()
+
+        gui._ensure_page_built("自動喝水")
+        gui._ensure_page_built("自動喝水")
+
+        gui._build_potion_page.assert_called_once_with(page)
+        self.assertIn("自動喝水", gui.page_built)
+
+    def test_responsive_two_column_layout_switches_to_single_column(self):
+        gui = self.make_gui()
+        container = Mock()
+        first = Mock()
+        second = Mock()
+        callbacks = []
+        container.bind.side_effect = lambda _event, callback, add=None: callbacks.append(callback)
+        container.winfo_width.return_value = 1200
+
+        gui._bind_responsive_two_columns(
+            container,
+            first,
+            second,
+            wide_weights=(1, 1),
+            wide_uniform="combo",
+        )
+        callbacks[0]()
+
+        container.columnconfigure.assert_any_call(0, weight=1, uniform="combo")
+        container.columnconfigure.assert_any_call(1, weight=1, uniform="combo")
+        first.grid_configure.assert_called_with(row=0, column=0, sticky="nsew", padx=(0, 4), pady=0)
+        second.grid_configure.assert_called_with(row=0, column=1, sticky="nsew", padx=(4, 0), pady=0)
+
+        container.winfo_width.return_value = 700
+        callbacks[0]()
+
+        container.columnconfigure.assert_any_call(0, weight=1, uniform="")
+        container.columnconfigure.assert_any_call(1, weight=0, uniform="")
+        first.grid_configure.assert_called_with(row=0, column=0, sticky="ew", padx=0, pady=(0, 4))
+        second.grid_configure.assert_called_with(row=1, column=0, sticky="ew", padx=0, pady=(4, 0))
+
+    def test_flow_layout_does_not_regrid_unchanged_items(self):
+        class FakeWidget(tk.Misc):
+            def __init__(self):
+                self.grid = Mock()
+                self.grid_remove = Mock()
+
+        flow = FlowLayout.__new__(FlowLayout)
+        flow.frame = Mock()
+        flow.frame.winfo_width.return_value = 300
+        flow.gap_x = 8
+        flow.gap_y = 4
+        widget = FakeWidget()
+        flow.items = [{"widget": widget, "min_width": 88, "visible": True}]
+
+        flow.layout()
+        flow.layout()
+
+        widget.grid.assert_called_once_with(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
+
+    def test_hidden_console_keeps_bounded_buffer_without_scheduling_repaint(self):
+        gui = self.make_gui()
+        gui.closed = False
+        gui.console = None
+        gui.active_page = "監控"
+
+        gui.append_console("x" * (MAX_CONSOLE_CHARS + 100))
+
+        self.assertEqual(sum(len(part) for part in gui.console_pending_text), MAX_CONSOLE_CHARS)
+        gui.root.after.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ EVENT_DEVICE_ADDED = "device_added"
 EVENT_DEVICE_REMOVED = "device_removed"
 EVENT_BUTTON_DOWN = "button_down"
 EVENT_BUTTON_UP = "button_up"
+EVENT_RELEASE_ALL = "release_all"
 
 SDL_CONTROLLER_BUTTON_A = 0
 SDL_CONTROLLER_BUTTON_B = 1
@@ -220,4 +221,16 @@ def _put_event(event_queue: mp.Queue, event: ControllerWorkerEvent) -> None:
     try:
         event_queue.put_nowait(event)
     except queue.Full:
-        pass
+        # A lost BUTTON_UP can leave a macro key held indefinitely.  Collapse
+        # a saturated stream into an explicit reconciliation event instead.
+        try:
+            while True:
+                event_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            event_queue.put_nowait(
+                (EVENT_RELEASE_ALL, None, "手把事件佇列飽和，已安全釋放所有按鍵。")
+            )
+        except queue.Full:
+            pass

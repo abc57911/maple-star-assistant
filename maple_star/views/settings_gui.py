@@ -68,6 +68,7 @@ ctk.set_default_color_theme("dark-blue")
 FONT_FAMILY = "Noto Sans TC"
 MONO_FONT_FAMILY = "Noto Sans TC"
 CONSOLE_FONT_FAMILY = "Noto Sans TC"
+TAB_FONT_FAMILY = "Microsoft JhengHei UI"
 APP_BG = "#09111f"
 PANEL_BG = "#101b2d"
 PANEL_BG_ALT = "#0d1728"
@@ -117,17 +118,18 @@ LEFT_PANEL_MAX_WIDTH = 720
 COMPACT_PANEL_WIDTH = 520
 CONSOLE_MIN_WIDTH = 416
 CONSOLE_MIN_BODY_HEIGHT = 120
+CONSOLE_PAGE_MIN_HEIGHT = 420
 CONSOLE_HEADER_BODY_RESERVED_HEIGHT = 54
-WINDOW_CONTENT_VERTICAL_PADDING = 24
+WINDOW_CONTENT_VERTICAL_PADDING = 64
 EXP_PANEL_WIDTH = 420
 DETECTION_PANEL_WIDTH = 292
 MONITOR_PANEL_HEIGHT = 204
-WINDOW_EXPANDED_MIN_WIDTH = LEFT_PANEL_MAX_WIDTH + CONSOLE_MIN_WIDTH + 40
 WINDOW_COLLAPSED_MIN_WIDTH = LEFT_PANEL_MAX_WIDTH + 32
+WINDOW_EXPANDED_MIN_WIDTH = WINDOW_COLLAPSED_MIN_WIDTH
 WINDOW_MIN_WIDTH = WINDOW_EXPANDED_MIN_WIDTH
-WINDOW_MIN_HEIGHT = 800
+WINDOW_MIN_HEIGHT = 500
 WINDOW_DEFAULT_WIDTH = 1240
-WINDOW_DEFAULT_HEIGHT = 835
+WINDOW_DEFAULT_HEIGHT = 620
 WINDOW_COLLAPSED_WIDTH = WINDOW_COLLAPSED_MIN_WIDTH
 COMPACT_WINDOW_MIN_WIDTH = COMPACT_PANEL_WIDTH + 24
 COMPACT_WINDOW_MIN_HEIGHT = 228
@@ -151,6 +153,7 @@ MONO_FONT = (MONO_FONT_FAMILY, 13)
 EXP_FONT = (FONT_FAMILY, 15)
 EXP_MONO_FONT = (MONO_FONT_FAMILY, 14)
 CONSOLE_FONT = (CONSOLE_FONT_FAMILY, 15)
+TAB_FONT = (TAB_FONT_FAMILY, 13, "bold")
 WINDOW_INTERACTION_GRACE_SECONDS = 0.12
 RESIZE_SETTLE_DELAY_MS = 140
 CONSOLE_FLUSH_DELAY_MS = 50
@@ -170,7 +173,14 @@ class FlowLayout:
         self.frame.bind("<Configure>", lambda _event: self.layout(), add="+")
 
     def add(self, widget: tk.Misc, min_width: int) -> None:
-        self.items.append({"widget": widget, "min_width": min_width, "visible": True})
+        self.items.append(
+            {
+                "widget": widget,
+                "min_width": min_width,
+                "visible": True,
+                "last_layout": None,
+            }
+        )
         self.layout()
 
     def set_visible(self, widget: tk.Misc, visible: bool) -> None:
@@ -193,14 +203,25 @@ class FlowLayout:
             if not isinstance(widget, tk.Misc):
                 continue
             if not item["visible"]:
-                widget.grid_remove()
+                if item.get("last_layout") is not None:
+                    widget.grid_remove()
+                    item["last_layout"] = None
                 continue
             next_width = min_width if column == 0 else row_width + self.gap_x + min_width
             if column > 0 and next_width > width:
                 row += 1
                 column = 0
                 row_width = 0
-            widget.grid(row=row, column=column, sticky="w", padx=(0, self.gap_x), pady=(0, self.gap_y))
+            desired_layout = (row, column)
+            if item.get("last_layout") != desired_layout:
+                widget.grid(
+                    row=row,
+                    column=column,
+                    sticky="w",
+                    padx=(0, self.gap_x),
+                    pady=(0, self.gap_y),
+                )
+                item["last_layout"] = desired_layout
             row_width = min_width if column == 0 else row_width + self.gap_x + min_width
             column += 1
 
@@ -262,6 +283,7 @@ class AutoPotionSettingsGui:
         self.content_frame: ctk.CTkFrame | None = None
         self.controls_frame: ctk.CTkFrame | None = None
         self.monitor_frame: ctk.CTkFrame | None = None
+        self.monitor_responsive_relayout: Callable[[], None] | None = None
         self.exp_section: ctk.CTkFrame | None = None
         self.detection_section: ctk.CTkFrame | None = None
         self.combo_group_section: ctk.CTkFrame | None = None
@@ -284,11 +306,21 @@ class AutoPotionSettingsGui:
         self.console_frame: ctk.CTkFrame | None = None
         self.console_container: ctk.CTkFrame | None = None
         self.console_scrollbar: ctk.CTkScrollbar | None = None
+        self.console: tk.Text | None = None
+        self.console_placeholder: ctk.CTkLabel | None = None
         self.console_collapsed = False
         self.console_resize_after_id: str | None = None
         self.console_height_after_id: str | None = None
         self.console_flush_after_id: str | None = None
         self.console_pending_text: list[str] = []
+        self.console_pending_char_count = 0
+        self.active_page = "監控"
+        self.page_frames: dict[str, ctk.CTkFrame] = {}
+        self.page_built: set[str] = {"監控"}
+        self.page_placeholders: dict[str, ctk.CTkLabel] = {}
+        self.page_build_after_id: str | None = None
+        self.profile_select: ctk.CTkComboBox | None = None
+        self.monitor_controls_after_id: str | None = None
         self.console_resize_frozen = False
         self.resize_layout_suspended = False
         self.suppress_resize_suspend_until = 0.0
@@ -424,156 +456,47 @@ class AutoPotionSettingsGui:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         self.root.bind("<Alt-F4>", lambda _event: self.close(), add="+")
-        frame.columnconfigure(0, weight=0, minsize=LEFT_PANEL_MAX_WIDTH)
-        frame.columnconfigure(1, weight=1, minsize=CONSOLE_MIN_WIDTH)
-        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1, minsize=LEFT_PANEL_MAX_WIDTH)
+        frame.columnconfigure(1, weight=0, minsize=0)
+        frame.rowconfigure(1, weight=1)
+
+        self.page_navigation = ctk.CTkSegmentedButton(
+            frame,
+            values=("監控", "自動喝水", "小地圖巡航", "手把組合", "Console"),
+            command=self.show_page,
+            fg_color=PANEL_BG_ALT,
+            selected_color=ACCENT_GREEN,
+            selected_hover_color=ACCENT_GREEN,
+            unselected_color=SECONDARY_BUTTON_BG,
+            unselected_hover_color=SECONDARY_BUTTON_HOVER,
+            font=TAB_FONT,
+            height=28,
+            dynamic_resizing=True,
+        )
+        self.page_navigation.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        self.page_navigation.set("監控")
 
         controls_frame = ctk.CTkFrame(frame, fg_color="transparent", width=LEFT_PANEL_MAX_WIDTH)
         self.controls_frame = controls_frame
-        controls_frame.grid(row=0, column=0, sticky="nsw", padx=(0, 8))
+        controls_frame.grid(row=1, column=0, columnspan=2, sticky="nsew")
         controls_frame.grid_propagate(False)
         controls_frame.columnconfigure(0, weight=1)
 
-        control_hotkey_section, _header, control_hotkey_frame = self._build_section(controls_frame, "全域熱鍵", row=0, pady=(0, 0))
-        for column in range(10):
-            control_hotkey_frame.columnconfigure(column, weight=0)
-        control_hotkey_frame.columnconfigure(10, weight=1)
-        self._label(control_hotkey_frame, "自動喝水").grid(row=0, column=0, sticky="w", padx=(0, 4), pady=6)
-        toggle_entry = self._entry(control_hotkey_frame, self.toggle_hotkey, width=HOTKEY_ENTRY_WIDTH, justify="center")
-        toggle_entry.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=6)
-        toggle_entry.bind(
-            "<Button-1>",
-            lambda event: self._start_key_detection_from_entry(event, self.toggle_hotkey, "自動喝水熱鍵"),
-        )
-        self._info_icon(control_hotkey_frame, lambda: "總開關會暫停所有功能並釋放按鍵").grid(row=0, column=3, sticky="w", padx=(16, 4), pady=6)
-        self._label(control_hotkey_frame, "總開關").grid(row=0, column=4, sticky="w", padx=(0, 4), pady=6)
-        emergency_entry = self._entry(control_hotkey_frame, self.emergency_stop_hotkey, width=HOTKEY_ENTRY_WIDTH, justify="center")
-        emergency_entry.grid(row=0, column=5, sticky="w", padx=(0, 8), pady=6)
-        emergency_entry.bind(
-            "<Button-1>",
-            lambda event: self._start_key_detection_from_entry(event, self.emergency_stop_hotkey, "總開關熱鍵"),
-        )
-        self._label(control_hotkey_frame, "經驗統計").grid(row=0, column=7, sticky="w", padx=(16, 4), pady=6)
-        exp_toggle_entry = self._entry(control_hotkey_frame, self.experience_toggle_hotkey, width=HOTKEY_ENTRY_WIDTH, justify="center")
-        exp_toggle_entry.grid(row=0, column=8, sticky="w", padx=(0, 8), pady=6)
-        exp_toggle_entry.bind(
-            "<Button-1>",
-            lambda event: self._start_key_detection_from_entry(event, self.experience_toggle_hotkey, "經驗統計熱鍵"),
-        )
-        self._label(control_hotkey_frame, "重置統計").grid(row=1, column=7, sticky="w", padx=(16, 4), pady=(0, 6))
-        exp_reset_entry = self._entry(control_hotkey_frame, self.experience_reset_hotkey, width=HOTKEY_ENTRY_WIDTH, justify="center")
-        exp_reset_entry.grid(row=1, column=8, sticky="w", padx=(0, 8), pady=(0, 6))
-        exp_reset_entry.bind(
-            "<Button-1>",
-            lambda event: self._start_key_detection_from_entry(event, self.experience_reset_hotkey, "重置統計熱鍵"),
-        )
-        self._label(control_hotkey_frame, "能力值").grid(row=1, column=9, sticky="w", padx=(16, 4), pady=(0, 6))
-        character_stat_entry = self._entry(control_hotkey_frame, self.character_stat_hotkey, width=HOTKEY_ENTRY_WIDTH, justify="center")
-        character_stat_entry.grid(row=1, column=10, sticky="w", padx=(0, 8), pady=(0, 6))
-        character_stat_entry.bind(
-            "<Button-1>",
-            lambda event: self._start_key_detection_from_entry(event, self.character_stat_hotkey, "能力值快捷鍵"),
-        )
-        self._label(control_hotkey_frame, "拾取").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(0, 6))
-        pickup_toggle_entry = self._entry(
-            control_hotkey_frame,
-            self.pickup_toggle_hotkey,
-            width=HOTKEY_ENTRY_WIDTH,
-            justify="center",
-            placeholder_text="自訂",
-        )
-        pickup_toggle_entry.grid(row=1, column=1, sticky="w", padx=(0, 8), pady=(0, 6))
-        pickup_toggle_entry.bind(
-            "<Button-1>",
-            lambda event: self._start_key_detection_from_entry(event, self.pickup_toggle_hotkey, "拾取熱鍵"),
-        )
-        self._checkbox(
-            control_hotkey_frame,
-            "自動拾取",
-            self.pickup_enabled,
-            width=86,
-            command=self._toggle_pickup_enabled_from_checkbox,
-        ).grid(row=1, column=2, sticky="w", padx=(0, 8), pady=(0, 6))
-        self._label(control_hotkey_frame, "拾取鍵").grid(row=1, column=4, sticky="w", padx=(0, 4), pady=(0, 6))
-        pickup_key_entry = self._entry(
-            control_hotkey_frame,
-            self.pickup_key,
-            width=HOTKEY_ENTRY_WIDTH,
-            justify="center",
-            placeholder_text="自訂",
-        )
-        pickup_key_entry.grid(row=1, column=5, sticky="w", padx=(0, 8), pady=(0, 6))
-        pickup_key_entry.bind(
-            "<Button-1>",
-            lambda event: self._start_key_detection_from_entry(event, self.pickup_key, "拾取鍵"),
-        )
-        profile_section, _header, profile_frame = self._build_section(controls_frame, "設定檔", row=1)
-        for column in range(7):
-            profile_frame.columnconfigure(column, weight=0)
-        profile_frame.columnconfigure(2, weight=1)
-        self._label(profile_frame, "目前").grid(row=0, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
-        self.profile_select = self._combo(
-            profile_frame,
-            textvariable=self.active_profile,
-            values=self.settings.profile_names(),
-            width=PROFILE_COMBO_WIDTH,
-            command=lambda _value: self._switch_profile(),
-        )
-        self.profile_select.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=(0, 4))
-        self.profile_select.bind("<<ComboboxSelected>>", self._switch_profile)
-        self._button(profile_frame, "新增", self.create_profile, width=64).grid(row=0, column=3, sticky="w", padx=(0, 4), pady=(0, 4))
-        self._button(profile_frame, "刪除", self.delete_profile, width=64).grid(row=0, column=4, sticky="w", padx=(0, 4), pady=(0, 4))
-        self._button(profile_frame, "匯入", self.import_settings, width=64).grid(row=0, column=5, sticky="w", padx=(0, 4), pady=(0, 4))
-        self._button(profile_frame, "匯出", self.export_settings, width=64).grid(row=0, column=6, sticky="w", pady=(0, 4))
+        for page_name in ("監控", "自動喝水", "小地圖巡航", "手把組合"):
+            page = ctk.CTkFrame(controls_frame, fg_color="transparent")
+            page.columnconfigure(0, weight=1)
+            self.page_frames[page_name] = page
+        monitor_page = self.page_frames["監控"]
+        monitor_page.grid(row=0, column=0, sticky="nsew")
 
-        potion_section, potion_header, controls = self._build_section(controls_frame, "藥水監控", row=2)
-        self._checkbox(
-            potion_header,
-            "自動喝水",
-            self.auto_drink_enabled,
-            width=88,
-            command=self._toggle_auto_drink_enabled_from_checkbox,
-        ).grid(row=0, column=98, sticky="e", padx=(8, 8), pady=4)
-        controls.columnconfigure(1, weight=1)
-        self._build_row(
-            controls,
-            0,
-            "紅水",
-            self.hp_enabled,
-            self.hp_threshold,
-            self.hp_threshold_text,
-            self.hp_key,
-            self.hp_cooldown,
-            self.hp_continuous_enabled,
-            self.hp_continuous_stop_margin,
-            self.hp_current,
-        )
-        self._build_row(
-            controls,
-            1,
-            "藍水",
-            self.mp_enabled,
-            self.mp_threshold,
-            self.mp_threshold_text,
-            self.mp_key,
-            self.mp_cooldown,
-            self.mp_continuous_enabled,
-            self.mp_continuous_stop_margin,
-            self.mp_current,
-        )
-
-        monitor_frame = ctk.CTkFrame(controls_frame, fg_color="transparent")
+        monitor_frame = ctk.CTkFrame(monitor_page, fg_color="transparent")
         self.monitor_frame = monitor_frame
-        monitor_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        monitor_frame.grid_propagate(False)
-        monitor_frame.configure(height=MONITOR_PANEL_HEIGHT)
-        monitor_frame.columnconfigure(0, weight=0, minsize=EXP_PANEL_WIDTH)
-        monitor_frame.columnconfigure(1, weight=0, minsize=DETECTION_PANEL_WIDTH)
+        monitor_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        monitor_frame.columnconfigure(0, weight=3, uniform="monitor")
+        monitor_frame.columnconfigure(1, weight=2, uniform="monitor")
 
         exp_section, exp_title, exp_frame = self._build_section(monitor_frame, "", row=0, column=0, sticky="nsew", padx=(0, 8), pady=0)
         self.exp_section = exp_section
-        exp_section.configure(width=EXP_PANEL_WIDTH, height=MONITOR_PANEL_HEIGHT)
-        exp_section.grid_propagate(False)
         self._checkbox(exp_title, "", self.exp_efficiency_enabled, width=20).grid(row=0, column=0, sticky="w", padx=(8, 0), pady=4)
         exp_title_label = self._title_label(exp_title, "經驗計算")
         exp_title_label.grid(row=0, column=1, sticky="w", padx=(2, 0), pady=4)
@@ -596,13 +519,18 @@ class AutoPotionSettingsGui:
         self._label(exp_rate_frame, textvariable=self.exp_rate_1h_status, font=EXP_MONO_FONT).grid(row=0, column=1, sticky="w")
         self._label(exp_rate_frame, textvariable=self.exp_10m_gain_status, font=EXP_MONO_FONT).grid(row=0, column=2, sticky="w")
         self._label(exp_frame, textvariable=self.exp_quality_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=3, column=0, sticky="w", padx=(0, 8), pady=(0, 0))
-        exp_frame.rowconfigure(4, weight=1, minsize=12)
-        self._label(exp_frame, textvariable=self.exp_reader_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=5, column=0, sticky="sw", padx=(0, 8), pady=(0, 0))
+        self._label(exp_frame, textvariable=self.exp_reader_status, color=MUTED_TEXT, font=EXP_FONT).grid(row=4, column=0, sticky="w", padx=(0, 8), pady=(2, 0))
 
         detection_section, detection_title, detection_frame = self._build_section(monitor_frame, "", row=0, column=1, sticky="nsew", pady=0)
         self.detection_section = detection_section
-        detection_section.configure(width=DETECTION_PANEL_WIDTH, height=MONITOR_PANEL_HEIGHT)
-        detection_section.grid_propagate(False)
+        self.monitor_responsive_relayout = self._bind_responsive_two_columns(
+            monitor_frame,
+            exp_section,
+            detection_section,
+            active=lambda: not self.compact_experience_mode,
+            wide_weights=(3, 2),
+            wide_uniform="monitor",
+        )
         self._title_label(detection_title, "偵測診斷").grid(row=0, column=0, sticky="w", padx=(8, 0), pady=4)
         self._button(detection_title, "刷新預覽", self.refresh_bar_preview, width=82).grid(row=0, column=1, sticky="w", padx=(8, 0), pady=4)
         detection_frame.columnconfigure(0, weight=1)
@@ -613,91 +541,470 @@ class AutoPotionSettingsGui:
         self.bar_preview_labels["mp"] = self._label(detection_frame, "尚未刷新預覽", color=MUTED_TEXT)
         self.bar_preview_labels["mp"].grid(row=3, column=0, sticky="w", pady=(0, 6))
 
-        minimap_section, minimap_header, minimap_frame = self._build_section(
-            controls_frame,
-            "",
-            row=4,
-            sticky="ew",
-            pady=(8, 0),
+        runtime_frame = ctk.CTkFrame(monitor_page, fg_color=PANEL_BG_ALT, corner_radius=SECTION_RADIUS, border_width=1, border_color=PANEL_BORDER)
+        runtime_frame.grid(row=3, column=0, sticky="ew", pady=(8, 6))
+        for column in range(3):
+            runtime_frame.columnconfigure(column, weight=1)
+        self._label(runtime_frame, textvariable=self.runtime_script_status, color=ACCENT_GREEN).grid(row=0, column=0, sticky="w", padx=(10, 12), pady=8)
+        self._label(runtime_frame, textvariable=self.runtime_foreground_status).grid(row=0, column=1, sticky="w", padx=(0, 12), pady=8)
+        self._label(runtime_frame, textvariable=self.runtime_status_message, color=WARNING_YELLOW).grid(row=0, column=2, sticky="w", padx=(0, 12), pady=8)
+        self.console_restore_button = self._button(runtime_frame, "Console ›", self.toggle_console_collapsed, width=92)
+        self.console_restore_button.grid(row=0, column=3, sticky="e", padx=(0, 10), pady=8)
+        self.console_restore_button.grid_remove()
+        self.full_panel_widgets = [
+            detection_section,
+            runtime_frame,
+        ]
+
+        self.root.bind("<Configure>", self._on_root_configure, add="+")
+        self.set_window_topmost(settings.window_topmost)
+        self.set_minimap_cruise_group_collapsed(settings.minimap_cruise_group_collapsed)
+        self.set_combo_group_collapsed(settings.combo_group_collapsed)
+        self.set_console_collapsed(settings.console_collapsed)
+        self.set_compact_experience_mode(settings.compact_experience_mode, restore_saved_position=True)
+        self.show_page("監控")
+        self.monitor_controls_after_id = self.root.after(250, self._build_monitor_controls)
+
+    def _build_monitor_controls(self) -> None:
+        self.monitor_controls_after_id = None
+        page = self.page_frames.get("監控")
+        if page is None or self.profile_select is not None or self.closed:
+            return
+        hotkey_section, _header, hotkeys = self._build_section(page, "全域熱鍵", row=0, pady=(0, 0))
+        for column in range(10):
+            hotkeys.columnconfigure(column, weight=0)
+        hotkeys.columnconfigure(10, weight=1)
+
+        def key_entry(row: int, column: int, label: str, variable: tk.StringVar, capture_label: str) -> None:
+            self._label(hotkeys, label).grid(row=row, column=column, sticky="w", padx=(0, 4), pady=6)
+            entry = self._entry(hotkeys, variable, width=HOTKEY_ENTRY_WIDTH, justify="center")
+            entry.grid(row=row, column=column + 1, sticky="w", padx=(0, 8), pady=6)
+            entry.bind(
+                "<Button-1>",
+                lambda event: self._start_key_detection_from_entry(event, variable, capture_label),
+            )
+
+        key_entry(0, 0, "自動喝水", self.toggle_hotkey, "自動喝水熱鍵")
+        key_entry(0, 4, "總開關", self.emergency_stop_hotkey, "總開關熱鍵")
+        key_entry(0, 7, "經驗統計", self.experience_toggle_hotkey, "經驗統計熱鍵")
+        key_entry(1, 7, "重置統計", self.experience_reset_hotkey, "重置統計熱鍵")
+        key_entry(1, 9, "能力值", self.character_stat_hotkey, "能力值快捷鍵")
+        key_entry(1, 0, "拾取", self.pickup_toggle_hotkey, "拾取熱鍵")
+        self._checkbox(
+            hotkeys,
+            "自動拾取",
+            self.pickup_enabled,
+            width=86,
+            command=self._toggle_pickup_enabled_from_checkbox,
+        ).grid(row=1, column=2, sticky="w", padx=(0, 8), pady=(0, 6))
+        key_entry(1, 4, "拾取鍵", self.pickup_key, "拾取鍵")
+
+        profile_section, _header, profile = self._build_section(page, "設定檔", row=1)
+        for column in range(7):
+            profile.columnconfigure(column, weight=0)
+        profile.columnconfigure(2, weight=1)
+        self._label(profile, "目前").grid(row=0, column=0, sticky="w", padx=(0, 4), pady=(0, 4))
+        self.profile_select = self._combo(
+            profile,
+            textvariable=self.active_profile,
+            values=self.settings.profile_names(),
+            width=PROFILE_COMBO_WIDTH,
+            command=lambda _value: self._switch_profile(),
         )
-        self.minimap_cruise_section = minimap_section
-        self.minimap_cruise_body = minimap_frame
-        self.minimap_cruise_title_label = self._title_label(minimap_header, "小地圖巡航")
+        self.profile_select.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=(0, 4))
+        self.profile_select.bind("<<ComboboxSelected>>", self._switch_profile)
+        self._button(profile, "新增", self.create_profile, width=64).grid(row=0, column=3, sticky="w", padx=(0, 4), pady=(0, 4))
+        self._button(profile, "刪除", self.delete_profile, width=64).grid(row=0, column=4, sticky="w", padx=(0, 4), pady=(0, 4))
+        self._button(profile, "匯入", self.import_settings, width=64).grid(row=0, column=5, sticky="w", padx=(0, 4), pady=(0, 4))
+        self._button(profile, "匯出", self.export_settings, width=64).grid(row=0, column=6, sticky="w", pady=(0, 4))
+        self.full_panel_widgets[:0] = [hotkey_section, profile_section]
+        if self.compact_experience_mode:
+            hotkey_section.grid_remove()
+            profile_section.grid_remove()
+        else:
+            self.root.after_idle(self._sync_full_window_height_to_left_panel)
+
+    def show_page(self, page_name: str) -> None:
+        if page_name not in {"監控", "自動喝水", "小地圖巡航", "手把組合", "Console"}:
+            return
+        self.active_page = page_name
+        try:
+            self.page_navigation.set(page_name)
+            for page in self.page_frames.values():
+                page.grid_remove()
+            if page_name == "Console":
+                self._ensure_console_page_built()
+                if self.controls_frame is not None:
+                    self.controls_frame.grid_remove()
+                if self.console_section is not None:
+                    self.console_section.grid(
+                        row=1,
+                        column=0,
+                        columnspan=2,
+                        sticky="nsew",
+                        padx=0,
+                        pady=0,
+                    )
+                self._ensure_console_built()
+                self.page_built.add("Console")
+                current_width = max(WINDOW_EXPANDED_MIN_WIDTH, int(self.root.winfo_width()))
+                current_height = int(self.root.winfo_height())
+                self.root.minsize(WINDOW_EXPANDED_MIN_WIDTH, CONSOLE_PAGE_MIN_HEIGHT)
+                if current_height < CONSOLE_PAGE_MIN_HEIGHT:
+                    self._set_window_size(current_width, CONSOLE_PAGE_MIN_HEIGHT)
+            else:
+                if self.console_section is not None:
+                    self.console_section.grid_remove()
+                if self.controls_frame is not None:
+                    self.controls_frame.grid(
+                        row=1,
+                        column=0,
+                        columnspan=2,
+                        sticky="nsew",
+                        padx=0,
+                    )
+                self.page_frames[page_name].grid(row=0, column=0, sticky="nsew")
+                if page_name not in self.page_built:
+                    placeholder = self.page_placeholders.get(page_name)
+                    if placeholder is None:
+                        placeholder = self._label(
+                            self.page_frames[page_name],
+                            "載入設定頁…",
+                            color=MUTED_TEXT,
+                        )
+                        placeholder.grid(row=0, column=0, sticky="w", padx=12, pady=12)
+                        self.page_placeholders[page_name] = placeholder
+                    self.root.update_idletasks()
+                    if self.page_build_after_id is not None:
+                        self.root.after_cancel(self.page_build_after_id)
+                    self.page_build_after_id = self.root.after(
+                        1,
+                        lambda name=page_name: self._finish_page_build(name),
+                    )
+        except tk.TclError:
+            return
+        self._schedule_console_height_sync()
+        if page_name != "Console" and page_name in self.page_built:
+            self.root.after_idle(self._sync_full_window_height_to_left_panel)
+
+    def _finish_page_build(self, page_name: str) -> None:
+        self.page_build_after_id = None
+        if self.closed or self.active_page != page_name:
+            return
+        placeholder = self.page_placeholders.pop(page_name, None)
+        if placeholder is not None:
+            placeholder.destroy()
+        self._ensure_page_built(page_name)
+        self.root.after_idle(self._sync_full_window_height_to_left_panel)
+
+    def _ensure_page_built(self, page_name: str) -> None:
+        if page_name in self.page_built:
+            return
+        builders = {
+            "自動喝水": self._build_potion_page,
+            "小地圖巡航": self._build_minimap_page,
+            "手把組合": self._build_combo_page,
+        }
+        builder = builders.get(page_name)
+        if builder is not None:
+            builder(self.page_frames[page_name])
+        self.page_built.add(page_name)
+
+    def _bind_responsive_two_columns(
+        self,
+        container: ctk.CTkFrame,
+        first: ctk.CTkFrame,
+        second: ctk.CTkFrame,
+        *,
+        breakpoint: int = 900,
+        active: Callable[[], bool] | None = None,
+        wide_weights: tuple[int, int] = (1, 1),
+        wide_uniform: str = "",
+    ) -> Callable[[], None]:
+        layout_state = {"narrow": None}
+
+        def layout(_event: tk.Event | None = None) -> None:
+            try:
+                if active is not None and not active():
+                    layout_state["narrow"] = None
+                    return
+                narrow = int(container.winfo_width()) < breakpoint
+                if layout_state["narrow"] == narrow:
+                    return
+                layout_state["narrow"] = narrow
+                if narrow:
+                    container.columnconfigure(0, weight=1, uniform="")
+                    container.columnconfigure(1, weight=0, uniform="")
+                    first.grid_configure(row=0, column=0, sticky="ew", padx=0, pady=(0, 4))
+                    second.grid_configure(row=1, column=0, sticky="ew", padx=0, pady=(4, 0))
+                else:
+                    container.columnconfigure(0, weight=wide_weights[0], uniform=wide_uniform)
+                    container.columnconfigure(1, weight=wide_weights[1], uniform=wide_uniform)
+                    first.grid_configure(row=0, column=0, sticky="nsew", padx=(0, 4), pady=0)
+                    second.grid_configure(row=0, column=1, sticky="nsew", padx=(4, 0), pady=0)
+            except tk.TclError:
+                return
+
+        def relayout() -> None:
+            layout_state["narrow"] = None
+            layout()
+
+        container.bind("<Configure>", layout, add="+")
+        self.root.after_idle(relayout)
+        return relayout
+
+    def _build_potion_page(self, page: ctk.CTkFrame) -> None:
+        header = ctk.CTkFrame(
+            page,
+            fg_color=SECTION_HEADER_BG,
+            corner_radius=CONTROL_RADIUS,
+            border_width=1,
+            border_color=SECTION_HEADER_BORDER,
+        )
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        header.columnconfigure(99, weight=1)
+        self._title_label(header, "藥水監控").grid(row=0, column=0, sticky="w", padx=8, pady=4)
+        self._checkbox(
+            header,
+            "自動喝水",
+            self.auto_drink_enabled,
+            width=88,
+            command=self._toggle_auto_drink_enabled_from_checkbox,
+        ).grid(row=0, column=98, sticky="e", padx=(8, 8), pady=4)
+        cards = ctk.CTkFrame(page, fg_color="transparent")
+        cards.grid(row=1, column=0, sticky="ew")
+        cards.columnconfigure(0, weight=1, uniform="potion")
+        cards.columnconfigure(1, weight=1, uniform="potion")
+        hp_card = self._build_potion_card(
+            cards,
+            0,
+            "HP／紅水",
+            "紅水",
+            self.hp_enabled,
+            self.hp_threshold,
+            self.hp_threshold_text,
+            self.hp_key,
+            self.hp_cooldown,
+            self.hp_continuous_enabled,
+            self.hp_continuous_stop_margin,
+            self.hp_current,
+        )
+        mp_card = self._build_potion_card(
+            cards,
+            1,
+            "MP／藍水",
+            "藍水",
+            self.mp_enabled,
+            self.mp_threshold,
+            self.mp_threshold_text,
+            self.mp_key,
+            self.mp_cooldown,
+            self.mp_continuous_enabled,
+            self.mp_continuous_stop_margin,
+            self.mp_current,
+        )
+        self._bind_responsive_two_columns(cards, hp_card, mp_card)
+
+    def _build_potion_card(
+        self,
+        parent: ctk.CTkFrame,
+        column: int,
+        title: str,
+        capture_label: str,
+        enabled_var: tk.BooleanVar,
+        threshold_var: tk.DoubleVar,
+        threshold_text: tk.StringVar,
+        key_var: tk.StringVar,
+        cooldown_var: tk.StringVar,
+        continuous_var: tk.BooleanVar,
+        continuous_stop_margin_var: tk.StringVar,
+        current_var: tk.StringVar,
+    ) -> ctk.CTkFrame:
+        section, header, body = self._build_section(
+            parent,
+            "",
+            row=0,
+            column=column,
+            sticky="nsew",
+            padx=(0, 4) if column == 0 else (4, 0),
+            pady=0,
+        )
+        self._checkbox(header, title, enabled_var, width=112).grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=8,
+            pady=4,
+        )
+        self._label(header, textvariable=current_var, font=MONO_FONT).grid(
+            row=0,
+            column=99,
+            sticky="e",
+            padx=8,
+            pady=4,
+        )
+        body.columnconfigure(1, weight=1)
+        self._label(body, "觸發門檻").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        scale = ctk.CTkSlider(
+            body,
+            from_=1,
+            to=100,
+            variable=threshold_var,
+            command=lambda value, text=threshold_text: text.set(f"{float(value):.0f}"),
+            height=18,
+            fg_color=ENTRY_BG,
+            progress_color=ACCENT_BLUE,
+            button_color=ACCENT_BLUE,
+            button_hover_color=BUTTON_HOVER,
+        )
+        scale.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=4)
+        threshold_entry = self._entry(body, threshold_text, width=PERCENT_ENTRY_WIDTH)
+        threshold_entry.grid(row=0, column=2, sticky="w", padx=(0, 4), pady=4)
+        self._label(body, "%").grid(row=0, column=3, sticky="w", pady=4)
+
+        self._label(body, "按鍵").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        key_entry = self._entry(body, key_var, width=POTION_KEY_ENTRY_WIDTH, justify="center")
+        key_entry.grid(row=1, column=1, sticky="w", padx=(0, 12), pady=4)
+        key_entry.bind(
+            "<Button-1>",
+            lambda event, var=key_var, name=capture_label: self._start_key_detection_from_entry(event, var, name),
+        )
+        cooldown = ctk.CTkFrame(body, fg_color="transparent")
+        cooldown.grid(row=1, column=2, columnspan=2, sticky="e", pady=4)
+        self._label(cooldown, "冷卻").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self._entry(cooldown, cooldown_var, width=SECONDS_ENTRY_WIDTH).grid(row=0, column=1, sticky="w", padx=(0, 4))
+        self._label(cooldown, "秒").grid(row=0, column=2, sticky="w")
+
+        continuous = ctk.CTkFrame(body, fg_color="transparent")
+        continuous.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        self._checkbox(continuous, "連續補充", continuous_var, width=94).grid(row=0, column=0, sticky="w")
+        self._label(continuous, "停止誤差").grid(row=0, column=1, sticky="w", padx=(12, 4))
+        self._entry(continuous, continuous_stop_margin_var, width=PERCENT_ENTRY_WIDTH).grid(
+            row=0,
+            column=2,
+            sticky="w",
+            padx=(0, 4),
+        )
+        self._label(continuous, "%").grid(row=0, column=3, sticky="w")
+
+        threshold_entry.bind(
+            "<Return>",
+            lambda _event, var=threshold_var, text=threshold_text: self._apply_percent_text(var, text),
+        )
+        threshold_entry.bind(
+            "<FocusOut>",
+            lambda _event, var=threshold_var, text=threshold_text: self._apply_percent_text(var, text),
+        )
+        return section
+
+    def _build_minimap_page(self, page: ctk.CTkFrame) -> None:
+        section, header, body = self._build_section(page, "", row=0, sticky="ew", pady=(0, 0))
+        self.minimap_cruise_section = section
+        self.minimap_cruise_body = body
+        self.minimap_cruise_title_label = self._title_label(header, "小地圖巡航")
         self.minimap_cruise_title_label.grid(row=0, column=0, sticky="w", padx=8, pady=4)
-        minimap_header.bind("<Button-1>", lambda _event: self.toggle_minimap_cruise_group_collapsed())
+        header.bind("<Button-1>", lambda _event: self.toggle_minimap_cruise_group_collapsed())
         self.minimap_cruise_title_label.bind(
             "<Button-1>",
             lambda _event: self.toggle_minimap_cruise_group_collapsed(),
         )
-        minimap_frame.columnconfigure(6, weight=1)
-        self._label(minimap_frame, "啟停").grid(row=0, column=0, sticky="w", padx=(0, 4), pady=6)
-        minimap_toggle_entry = self._entry(
-            minimap_frame,
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        primary = ctk.CTkFrame(body, fg_color="transparent")
+        actions = ctk.CTkFrame(body, fg_color="transparent")
+        primary.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        actions.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        self._label(primary, "啟停").grid(row=0, column=0, sticky="w", padx=(0, 4), pady=6)
+        toggle_entry = self._entry(
+            primary,
             self.minimap_cruise_toggle_hotkey,
             width=HOTKEY_ENTRY_WIDTH,
             justify="center",
             placeholder_text="自訂",
         )
-        minimap_toggle_entry.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=6)
-        minimap_toggle_entry.bind(
+        toggle_entry.grid(row=0, column=1, sticky="w", padx=(0, 8), pady=6)
+        toggle_entry.bind(
             "<Button-1>",
-            lambda event: self._start_key_detection_from_entry(event, self.minimap_cruise_toggle_hotkey, "巡航啟停熱鍵"),
+            lambda event: self._start_key_detection_from_entry(
+                event,
+                self.minimap_cruise_toggle_hotkey,
+                "巡航啟停熱鍵",
+            ),
         )
-        self._label(minimap_frame, "攻擊鍵").grid(row=0, column=2, sticky="w", padx=(8, 4), pady=6)
-        minimap_attack_entry = self._entry(
-            minimap_frame,
+        self._label(primary, "攻擊鍵").grid(row=0, column=2, sticky="w", padx=(8, 4), pady=6)
+        attack_entry = self._entry(
+            primary,
             self.minimap_cruise_attack_key,
             width=HOTKEY_ENTRY_WIDTH,
             justify="center",
         )
-        minimap_attack_entry.grid(row=0, column=3, sticky="w", padx=(0, 8), pady=6)
-        minimap_attack_entry.bind(
+        attack_entry.grid(row=0, column=3, sticky="w", padx=(0, 8), pady=6)
+        attack_entry.bind(
             "<Button-1>",
-            lambda event: self._start_key_detection_from_entry(event, self.minimap_cruise_attack_key, "巡航攻擊鍵"),
+            lambda event: self._start_key_detection_from_entry(
+                event,
+                self.minimap_cruise_attack_key,
+                "巡航攻擊鍵",
+            ),
         )
-        self._button(minimap_frame, "設定邊界", self.start_minimap_cruise_boundary_setup, width=88).grid(
+        self._button(actions, "設定邊界", self.start_minimap_cruise_boundary_setup, width=88).grid(
             row=0,
-            column=4,
+            column=0,
             sticky="w",
             padx=(8, 8),
             pady=6,
         )
-        self._button(minimap_frame, "進階設定", self.open_minimap_cruise_extra_settings, width=88).grid(
+        self._button(actions, "進階設定", self.open_minimap_cruise_extra_settings, width=88).grid(
             row=0,
-            column=5,
+            column=1,
             sticky="w",
             padx=(0, 8),
             pady=6,
         )
-        self._label(minimap_frame, textvariable=self.minimap_cruise_boundary_status, color=MUTED_TEXT).grid(
-            row=0,
-            column=6,
-            columnspan=4,
+        self._label(actions, textvariable=self.minimap_cruise_boundary_status, color=MUTED_TEXT).grid(
+            row=1,
+            column=0,
+            columnspan=2,
             sticky="w",
             padx=(0, 8),
             pady=6,
         )
+        self._bind_responsive_two_columns(body, primary, actions)
+        self.set_minimap_cruise_group_collapsed(self.minimap_cruise_group_collapsed)
 
-        combo_group_section, combo_group_header, combo_group_body = self._build_section(
-            controls_frame,
-            "",
-            row=5,
-            sticky="ew",
-            pady=(8, 0),
-        )
-        self.combo_group_section = combo_group_section
-        self.combo_group_body = combo_group_body
-        self.combo_group_title_label = self._title_label(combo_group_header, "組合設定")
+    def _build_combo_page(self, page: ctk.CTkFrame) -> None:
+        section, header, body = self._build_section(page, "", row=0, sticky="ew", pady=(0, 0))
+        self.combo_group_section = section
+        self.combo_group_body = body
+        self.combo_group_title_label = self._title_label(header, "組合設定")
         self.combo_group_title_label.grid(row=0, column=0, sticky="w", padx=8, pady=4)
-        combo_group_header.bind("<Button-1>", lambda _event: self.toggle_combo_group_collapsed())
+        header.bind("<Button-1>", lambda _event: self.toggle_combo_group_collapsed())
         self.combo_group_title_label.bind("<Button-1>", lambda _event: self.toggle_combo_group_collapsed())
-        combo_group_body.columnconfigure(0, weight=1)
-
-        combos_frame = ctk.CTkFrame(combo_group_body, fg_color="transparent")
-        combos_frame.grid(row=0, column=0, sticky="ew")
-        combos_frame.columnconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
+        combos = ctk.CTkFrame(body, fg_color="transparent")
+        combos.grid(row=0, column=0, sticky="ew")
+        combos.columnconfigure(0, weight=1, uniform="combo")
+        combos.columnconfigure(1, weight=1, uniform="combo")
+        combo_a = ctk.CTkFrame(
+            combos,
+            fg_color=PANEL_BG_ALT,
+            corner_radius=CONTROL_RADIUS,
+            border_width=1,
+            border_color=PANEL_BORDER,
+        )
+        combo_b = ctk.CTkFrame(
+            combos,
+            fg_color=PANEL_BG_ALT,
+            corner_radius=CONTROL_RADIUS,
+            border_width=1,
+            border_color=PANEL_BORDER,
+        )
+        combo_a.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        combo_b.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        combo_a.columnconfigure(0, weight=1)
+        combo_b.columnconfigure(0, weight=1)
         self._build_combo_slot_row(
-            combos_frame,
+            combo_a,
             0,
             "A",
             self.rb_enabled,
@@ -713,8 +1020,8 @@ class AutoPotionSettingsGui:
             self._combo_a_description,
         )
         self._build_combo_slot_row(
-            combos_frame,
-            1,
+            combo_b,
+            0,
             "B",
             self.lb_enabled,
             self.lb_controller_button,
@@ -728,52 +1035,38 @@ class AutoPotionSettingsGui:
             self.lb_jump_interval,
             self._combo_b_description,
         )
+        self._bind_responsive_two_columns(
+            combos,
+            combo_a,
+            combo_b,
+            wide_uniform="combo",
+        )
         self._refresh_combo_script_visibility()
+        self.set_combo_group_collapsed(self.combo_group_collapsed)
 
-        runtime_frame = ctk.CTkFrame(controls_frame, fg_color=PANEL_BG_ALT, corner_radius=SECTION_RADIUS, border_width=1, border_color=PANEL_BORDER)
-        runtime_frame.grid(row=6, column=0, sticky="ew", pady=(8, 6))
-        for column in range(3):
-            runtime_frame.columnconfigure(column, weight=1)
-        self._label(runtime_frame, textvariable=self.runtime_script_status, color=ACCENT_GREEN).grid(row=0, column=0, sticky="w", padx=(10, 12), pady=8)
-        self._label(runtime_frame, textvariable=self.runtime_foreground_status).grid(row=0, column=1, sticky="w", padx=(0, 12), pady=8)
-        self._label(runtime_frame, textvariable=self.runtime_status_message, color=WARNING_YELLOW).grid(row=0, column=2, sticky="w", padx=(0, 12), pady=8)
-        self.console_restore_button = self._button(runtime_frame, "Console ›", self.toggle_console_collapsed, width=92)
-        self.console_restore_button.grid(row=0, column=3, sticky="e", padx=(0, 10), pady=8)
-        self.console_restore_button.grid_remove()
-        self.full_panel_widgets = [
-            control_hotkey_section,
-            profile_section,
-            potion_section,
-            detection_section,
-            minimap_section,
-            combo_group_section,
-            runtime_frame,
-        ]
-
-        console_section, console_header, console_frame = self._build_section(frame, "", row=0, column=1, sticky="new", padx=(8, 0), pady=0)
-        self.console_section = console_section
-        console_section.grid_propagate(False)
-        self.console_title_label = self._title_label(console_header, "Console")
+    def _ensure_console_page_built(self) -> None:
+        if self.console_section is not None or self.content_frame is None:
+            return
+        section, header, body = self._build_section(
+            self.content_frame,
+            "",
+            row=1,
+            column=0,
+            sticky="nsew",
+            padx=0,
+            pady=0,
+        )
+        self.console_section = section
+        section.grid_propagate(False)
+        self.console_title_label = self._title_label(header, "Console")
         self.console_title_label.grid(row=0, column=0, sticky="w", padx=8, pady=4)
-        self.console_clear_button = self._button(
-            console_header,
-            "清除",
-            self.clear_console,
-            width=58,
-        )
+        self.console_clear_button = self._button(header, "清除", self.clear_console, width=58)
         self.console_clear_button.grid(row=0, column=98, sticky="e", padx=(8, 0), pady=4)
-        self.console_toggle_button = self._button(
-            console_header,
-            "‹",
-            self.toggle_console_collapsed,
-            width=32,
-        )
-        self.console_toggle_button.grid(row=0, column=99, sticky="e", padx=(8, 8), pady=4)
-        self.console_frame = console_frame
-        console_frame.columnconfigure(0, weight=1)
-        console_frame.rowconfigure(0, weight=1)
+        self.console_frame = body
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
         self.console_container = ctk.CTkFrame(
-            console_frame,
+            body,
             height=620,
             width=CONSOLE_MIN_WIDTH,
             fg_color=CONSOLE_BG,
@@ -784,6 +1077,13 @@ class AutoPotionSettingsGui:
         self.console_container.grid(row=0, column=0, sticky="nsew")
         self.console_container.columnconfigure(0, weight=1)
         self.console_container.rowconfigure(0, weight=1)
+
+    def _ensure_console_built(self) -> None:
+        if self.console is not None or self.console_container is None:
+            return
+        if self.console_placeholder is not None:
+            self.console_placeholder.destroy()
+            self.console_placeholder = None
         self.console = tk.Text(
             self.console_container,
             height=1,
@@ -811,12 +1111,11 @@ class AutoPotionSettingsGui:
         self.console.configure(yscrollcommand=self.console_scrollbar.set)
         self.console.grid(row=0, column=0, sticky="nsew", padx=(1, 0), pady=1)
         self.console_scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 1), pady=1)
-        self.root.bind("<Configure>", self._on_root_configure, add="+")
-        self.set_window_topmost(settings.window_topmost)
-        self.set_minimap_cruise_group_collapsed(settings.minimap_cruise_group_collapsed)
-        self.set_combo_group_collapsed(settings.combo_group_collapsed)
-        self.set_console_collapsed(settings.console_collapsed)
-        self.set_compact_experience_mode(settings.compact_experience_mode, restore_saved_position=True)
+        if self.console_pending_text:
+            try:
+                self.console_flush_after_id = self.root.after_idle(self._flush_console_buffer)
+            except tk.TclError:
+                self.console_flush_after_id = None
 
     def _on_root_configure(self, event: tk.Event) -> None:
         if event.widget is not self.root:
@@ -1349,10 +1648,12 @@ class AutoPotionSettingsGui:
             if self.monitor_frame is not None:
                 self.monitor_frame.grid_configure(row=0, column=0, sticky="nsew", pady=0)
                 self.monitor_frame.configure(height=MONITOR_PANEL_HEIGHT)
+                self.monitor_frame.grid_propagate(False)
                 self.monitor_frame.columnconfigure(0, weight=0, minsize=COMPACT_PANEL_WIDTH)
                 self.monitor_frame.columnconfigure(1, weight=0, minsize=0)
             if self.exp_section is not None:
                 self.exp_section.configure(width=COMPACT_PANEL_WIDTH, height=MONITOR_PANEL_HEIGHT)
+                self.exp_section.grid_propagate(False)
                 self.exp_section.grid_configure(row=0, column=0, sticky="nsew", padx=0, pady=0)
         except tk.TclError:
             return
@@ -1363,23 +1664,25 @@ class AutoPotionSettingsGui:
                 self.controls_frame.configure(width=LEFT_PANEL_MAX_WIDTH)
                 self.controls_frame.grid_configure(padx=(0, 8))
             if self.content_frame is not None:
-                self.content_frame.columnconfigure(0, weight=0, minsize=LEFT_PANEL_MAX_WIDTH)
+                self.content_frame.columnconfigure(0, weight=1, minsize=LEFT_PANEL_MAX_WIDTH)
             if self.monitor_frame is not None:
-                self.monitor_frame.grid_configure(row=3, column=0, sticky="ew", pady=(8, 0))
-                self.monitor_frame.configure(height=MONITOR_PANEL_HEIGHT)
-                self.monitor_frame.columnconfigure(0, weight=0, minsize=EXP_PANEL_WIDTH)
-                self.monitor_frame.columnconfigure(1, weight=0, minsize=DETECTION_PANEL_WIDTH)
+                self.monitor_frame.grid_configure(row=2, column=0, sticky="ew", pady=(8, 0))
+                self.monitor_frame.grid_propagate(True)
+                self.monitor_frame.columnconfigure(0, weight=3, minsize=0, uniform="monitor")
+                self.monitor_frame.columnconfigure(1, weight=2, minsize=0, uniform="monitor")
             if self.exp_section is not None:
-                self.exp_section.configure(width=EXP_PANEL_WIDTH, height=MONITOR_PANEL_HEIGHT)
+                self.exp_section.grid_propagate(True)
                 self.exp_section.grid_configure(row=0, column=0, sticky="nsew", padx=(0, 8), pady=0)
             if self.detection_section is not None:
-                self.detection_section.configure(width=DETECTION_PANEL_WIDTH, height=MONITOR_PANEL_HEIGHT)
+                self.detection_section.grid_propagate(True)
             for widget in self.full_panel_widgets:
                 widget.grid()
             if self.console_collapsed:
                 self._collapse_console_panel()
             else:
                 self._restore_console_panel()
+            if self.monitor_responsive_relayout is not None:
+                self.root.after_idle(self.monitor_responsive_relayout)
         except tk.TclError:
             return
 
@@ -1399,16 +1702,7 @@ class AutoPotionSettingsGui:
         try:
             self.root.minsize(WINDOW_EXPANDED_MIN_WIDTH, WINDOW_MIN_HEIGHT)
             if self.content_frame is not None:
-                self.content_frame.columnconfigure(1, weight=1, minsize=CONSOLE_MIN_WIDTH)
-            if self.console_section is not None:
-                self.console_section.configure(width=CONSOLE_MIN_WIDTH)
-                self.console_section.grid(row=0, column=1, sticky="new", padx=(8, 0), pady=0)
-            if self.console_title_label is not None:
-                self.console_title_label.grid()
-            if self.console_frame is not None:
-                self.console_frame.grid()
-            if self.console_toggle_button is not None:
-                self.console_toggle_button.configure(text="‹")
+                self.content_frame.columnconfigure(1, weight=0, minsize=0)
             if self.console_restore_button is not None:
                 self.console_restore_button.grid_remove()
         except tk.TclError:
@@ -1502,6 +1796,7 @@ class AutoPotionSettingsGui:
             getattr(self, "closed", False)
             or getattr(self, "compact_experience_mode", False)
             or getattr(self, "console_collapsed", False)
+            or getattr(self, "active_page", "監控") == "Console"
             or getattr(self, "controls_frame", None) is None
             or getattr(self, "console_container", None) is None
         ):
@@ -1518,7 +1813,12 @@ class AutoPotionSettingsGui:
 
     def _sync_console_height_to_left_panel(self) -> None:
         self.console_height_after_id = None
-        if self.closed or self.compact_experience_mode or self.console_collapsed:
+        if (
+            self.closed
+            or self.compact_experience_mode
+            or self.console_collapsed
+            or getattr(self, "active_page", "監控") == "Console"
+        ):
             return
         if self.controls_frame is None or self.console_container is None:
             return
@@ -2353,6 +2653,12 @@ class AutoPotionSettingsGui:
         save_settings(self.settings, SETTINGS_PATH)
         self._destroy_toggle_notice()
         self._hide_tooltip()
+        if self.page_build_after_id is not None:
+            try:
+                self.root.after_cancel(self.page_build_after_id)
+            except tk.TclError:
+                pass
+            self.page_build_after_id = None
         if self.console_resize_after_id is not None:
             try:
                 self.root.after_cancel(self.console_resize_after_id)
@@ -2377,6 +2683,12 @@ class AutoPotionSettingsGui:
             except tk.TclError:
                 pass
             self.console_flush_after_id = None
+        if self.monitor_controls_after_id is not None:
+            try:
+                self.root.after_cancel(self.monitor_controls_after_id)
+            except tk.TclError:
+                pass
+            self.monitor_controls_after_id = None
         self.closed = True
         self.root.destroy()
 
@@ -2506,6 +2818,8 @@ class AutoPotionSettingsGui:
         )
 
     def _refresh_profile_select(self) -> None:
+        if self.profile_select is None:
+            return
         self.profile_select.configure(values=self.settings.profile_names())
         self.active_profile.set(self.settings.active_profile)
 
@@ -3470,6 +3784,13 @@ class AutoPotionSettingsGui:
         if self.closed or not text:
             return
         self.console_pending_text.append(text)
+        self.console_pending_char_count = int(getattr(self, "console_pending_char_count", 0)) + len(text)
+        if self.console_pending_char_count > MAX_CONSOLE_CHARS:
+            buffered = "".join(self.console_pending_text)[-MAX_CONSOLE_CHARS:]
+            self.console_pending_text[:] = [buffered]
+            self.console_pending_char_count = len(buffered)
+        if getattr(self, "console", None) is None or getattr(self, "active_page", "Console") != "Console":
+            return
         if self.console_flush_after_id is not None:
             return
         try:
@@ -3480,10 +3801,11 @@ class AutoPotionSettingsGui:
 
     def _flush_console_buffer(self) -> None:
         self.console_flush_after_id = None
-        if self.closed or not self.console_pending_text:
+        if self.closed or getattr(self, "console", None) is None or not self.console_pending_text:
             return
         text = "".join(self.console_pending_text)
         self.console_pending_text.clear()
+        self.console_pending_char_count = 0
         try:
             self.console.configure(state="normal")
             self.console.insert("end", text)
@@ -3502,12 +3824,15 @@ class AutoPotionSettingsGui:
         if self.closed:
             return
         self.console_pending_text.clear()
+        self.console_pending_char_count = 0
         if self.console_flush_after_id is not None:
             try:
                 self.root.after_cancel(self.console_flush_after_id)
             except tk.TclError:
                 pass
             self.console_flush_after_id = None
+        if getattr(self, "console", None) is None:
+            return
         try:
             self.console.configure(state="normal")
             self.console.delete("1.0", "end")

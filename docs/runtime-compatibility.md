@@ -3,6 +3,9 @@
 > 知識庫索引：[docs/INDEX.md](INDEX.md)
 
 ## GUI 與視窗
+- 主 GUI 使用 `監控`、`自動喝水`、`小地圖巡航`、`手把組合`、`Console` 五頁；只有監控頁在啟動時建立，其餘頁面首次開啟才建立。
+- 分頁列使用 `Microsoft JhengHei UI` 小型按鈕並靠左排列；除 Console 外，頁面 section 以內容高度與可換行雙欄配置為主，不以固定高度填滿視窗。
+- Console 未開啟前只寫入有上限的記憶體 buffer，不建立 `tk.Text`、不排程 repaint；切入 Console 頁後才建立 widget 並批次 flush。
 - GUI 需能在遊戲切換前景、拖曳視窗、中文輸入法啟用時維持穩定。
 - 遊戲視窗辨識應優先使用較精準的視窗條件與可恢復的 hwnd cache；不要只依賴容易撞名的標題字串。
 - 刷新 HP/MP 預覽時可短暫將遊戲視窗置頂並等待畫面穩定後再截圖。
@@ -39,9 +42,13 @@
 - Experience-only runtime 不應為了 EXP 統計每 tick 擷取 HP/MP；只有缺 HUD cache、下一次 EXP OCR/baseline/checkpoint 到期，或 HUD geometry 失效時才刷新 HUD。
 
 ## Runtime process
-- 主 process 負責 GUI 與 controller input；potion runtime 與 experience runtime 由 `RuntimeProcessCoordinator` 管理。
+- 主 process 負責 GUI、控制熱鍵與 runtime orchestration；potion、experience、control runtime 由 `RuntimeProcessCoordinator` 管理。
+- control runtime 負責手把組合、小地圖巡航與週期按鍵。所有 deadline 使用高解析絕對時間；逾期週期不可補發 backlog，避免 GUI 卡頓後 burst。
+- GUI resize/拖曳只延後 layout 與預覽工作，不得降低 control runtime 更新頻率或暫停其 scheduler。
+- control command queue 有上限；設定、target 與一般 state 各自保留最新 snapshot，queue 恢復後重送。release-all 另有 emergency event，shutdown 必須優先送達。control status 的 notice/alert/console 是 urgent payload，不納入核心 signature；status queue 飽和時須把尚未消費的 urgent payload 合併進最新 snapshot。
 - 子程序 command 包含 settings、target hwnd、feature enable/pause、release-all 與 shutdown；新增 command field 時需同步 dataclass、handler 與測試。
 - 子程序 status 需包含 generation；GUI 端收到舊 generation 或功能已關閉後的 status 時不得覆蓋目前畫面。
 - potion status 的 signature 不包含 transient notice / console lines；這兩者需作 urgent delivery，但不應讓核心狀態去重失效。
 - experience status signature 需追蹤 snapshot 的 EXP、percent、EXP-10、rates、ETA、elapsed、OCR/sample success rate、status 與 generation。
-- worker crash 時應停用對應功能並回報 GUI；potion status heartbeat 用於判斷 runtime 是否 stale。
+- 小地圖與巨集的 key-down/key-up 共用 held-key tracker；手把事件 queue 飽和時折疊成 release-all reconciliation event，不能漏掉 button-up。
+- control worker crash 或 heartbeat timeout 時應停用全部自動化；child finally 與主程序最後已知 held VK 都執行冪等 release-all，不可退回 Tk scheduler。potion status heartbeat 仍用於判斷 potion runtime 是否 stale。
