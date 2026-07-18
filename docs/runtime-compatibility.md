@@ -3,17 +3,16 @@
 > 知識庫索引：[docs/INDEX.md](INDEX.md)
 
 ## GUI 與視窗
-- 主 GUI 使用 `監控`、`自動喝水`、`小地圖巡航`、`手把組合`、`Console` 五頁；只有監控頁在啟動時建立，其餘頁面首次開啟才建立。
-- 分頁列使用 `Microsoft JhengHei UI` 小型按鈕並靠左排列；除 Console 外，頁面 section 以內容高度與可換行雙欄配置為主，不以固定高度填滿視窗。
-- Console 未開啟前只寫入有上限的記憶體 buffer，不建立 `tk.Text`、不排程 repaint；切入 Console 頁後才建立 widget 並批次 flush。
+- 主 GUI 使用 PySide6 的 `監控`、`自動喝水`、`小地圖巡航`、`手把組合`、`診斷` 五頁；頁面預先建立後以 `QStackedWidget` 做常數時間切換。
+- 巡航等長表單置於可捲動內容；Console 使用有最大 block count 的 `QPlainTextEdit` 並批次追加。
 - GUI 需能在遊戲切換前景、拖曳視窗、中文輸入法啟用時維持穩定。
 - 遊戲視窗辨識應優先使用較精準的視窗條件與可恢復的 hwnd cache；不要只依賴容易撞名的標題字串。
 - 刷新 HP/MP 預覽時可短暫將遊戲視窗置頂並等待畫面穩定後再截圖。
 - 若偵測失敗，不要更新既有範圍或預覽圖。
 - Runtime info 顯示需要節流，目前 GUI 主迴圈只需約每 0.25 秒刷新一次前景、狀態與 held keys。
-- 狀態文字若內容未變，不應重複寫入 `StringVar`；runtime child process 也應用 status signature 去重，避免 GUI repaint 壓力。
+- 狀態文字若內容未變，不重複寫入 widget；runtime child process 以 status signature 去重，避免 GUI repaint 壓力。
 - Toggle notice 是輔助視窗，顯示前需套用 background toolwindow style，位置以目標遊戲 client 中心為主，失敗才回螢幕中心並 clamp 到可視範圍。
-- Compact experience mode 與 full panel 都有獨立位置；Windows minimized sentinel `(-32000, -32000)` 或不可見座標不可保存。
+- Windows minimized sentinel `(-32000, -32000)` 或不可見座標不可保存。
 
 ## 偵測環境
 - 自動喝水偵測需考慮視窗模式。
@@ -42,7 +41,10 @@
 - Experience-only runtime 不應為了 EXP 統計每 tick 擷取 HP/MP；只有缺 HUD cache、下一次 EXP OCR/baseline/checkpoint 到期，或 HUD geometry 失效時才刷新 HUD。
 
 ## Runtime process
-- 主 process 負責 GUI、控制熱鍵與 runtime orchestration；potion、experience、control runtime 由 `RuntimeProcessCoordinator` 管理。
+- 主 process 負責 Qt GUI 與 client orchestration；production supervisor 管理 guardian、potion、experience 與 control runtime。
+- potion heartbeat與work progress分離；heartbeat timeout為2秒，progress stall為30秒，只有兩者均失效才判定卡死。
+- domain workers加入kill-on-close Windows Job；guardian排除Job並監測parent handle，父程序消失時先釋放全部輸入再退出。
+- guardian是唯一低階輸入writer；緊急停止遞增safety generation，舊generation命令一律拒絕。
 - control runtime 負責手把組合、小地圖巡航與週期按鍵。所有 deadline 使用高解析絕對時間；逾期週期不可補發 backlog，避免 GUI 卡頓後 burst。
 - GUI resize/拖曳只延後 layout 與預覽工作，不得降低 control runtime 更新頻率或暫停其 scheduler。
 - control command queue 有上限；設定、target 與一般 state 各自保留最新 snapshot，queue 恢復後重送。release-all 另有 emergency event，shutdown 必須優先送達。control status 的 notice/alert/console 是 urgent payload，不納入核心 signature；status queue 飽和時須把尚未消費的 urgent payload 合併進最新 snapshot。

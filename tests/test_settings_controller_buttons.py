@@ -40,10 +40,11 @@ class ControllerButtonSettingsTests(unittest.TestCase):
         self.assertEqual(settings.combo_slots["B"]["script_id"], COMBO_SCRIPT_SINGLE_JUMP_SKILL)
         self.assertTrue(settings.combo_slots["A"]["enabled"])
         self.assertTrue(settings.combo_slots["B"]["enabled"])
-        self.assertEqual(saved["rb_controller_button"], "RB")
-        self.assertEqual(saved["lb_controller_button"], "LB")
-        self.assertEqual(saved["combo_slots"]["A"]["trigger_button"], "RB")
-        self.assertEqual(saved["combo_slots"]["B"]["trigger_button"], "LB")
+        profile = saved["profiles"][saved["selected_profile"]]
+        self.assertEqual(profile["rb_controller_button"], "RB")
+        self.assertEqual(profile["lb_controller_button"], "LB")
+        self.assertEqual(profile["combo_slots"]["A"]["trigger_button"], "RB")
+        self.assertEqual(profile["combo_slots"]["B"]["trigger_button"], "LB")
 
     def test_settings_snapshot_includes_controller_buttons(self):
         settings = AutoPotionSettings(rb_controller_button="A", lb_controller_button="B")

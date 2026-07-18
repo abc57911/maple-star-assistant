@@ -165,8 +165,6 @@ def sync_runtime_settings_before_controller_events(
     auto_potion: AutoPotionController,
     sync_controller_button_bindings: Callable[[], None],
 ) -> bool:
-    if not auto_potion.gui.sync_after_event_processing():
-        return False
     sync_controller_button_bindings()
     return True
 
@@ -1005,6 +1003,7 @@ def run_control_runtime_process(
                         console_lines=console.pending(),
                         timing_sample_count=snapshot.sample_count,
                         timing_p95_lateness_ms=snapshot.p95_lateness_ms,
+                        timing_p99_lateness_ms=snapshot.p99_lateness_ms,
                         timing_max_lateness_ms=snapshot.max_lateness_ms,
                         held_vks=tuple(sorted(TRACKED_HELD_KEYS)),
                     )
@@ -1053,17 +1052,36 @@ def run_control_runtime_process(
 def _run_main(cleanup_actions: dict[str, Callable[[], None]]) -> None:
     startup_marker = os.environ.get("MAPLE_STAR_STARTUP_BENCHMARK_OUTPUT", "").strip()
     if startup_marker:
-        from ..views.settings_gui import AutoPotionSettingsGui
+        from ..views_qt.settings_gui import AutoPotionSettingsGui
 
         benchmark_gui = AutoPotionSettingsGui(AutoPotionSettings())
-        benchmark_gui.root.update_idletasks()
+        benchmark_gui.show()
+        benchmark_gui.application.processEvents()
         Path(startup_marker).write_text(f"{time.perf_counter():.9f}\n", encoding="utf-8")
-        benchmark_gui.root.destroy()
+        benchmark_gui.close()
         return
 
+    from ..views_qt.application_host import QtApplicationHost
+    from ..views_qt.settings_gui import AutoPotionSettingsGui
+
+    try:
+        settings = load_settings()
+    except Exception as exc:
+        settings = AutoPotionSettings()
+        gui = AutoPotionSettingsGui(settings)
+        message = f"設定載入失敗；自動化未啟動。\n{type(exc).__name__}: {exc}"
+        gui.set_status("設定載入失敗；自動化未啟動")
+        gui.show_page("診斷")
+        gui.diagnostics.append_console_batch([message])
+        gui.show()
+        gui.application.exec()
+        return
+    gui = AutoPotionSettingsGui(settings)
     auto_potion = _create_auto_potion_controller(
         is_target_window_active,
+        settings=settings,
         target_window_provider=find_target_window,
+        gui=gui,
     )
     cleanup_actions["auto-potion controller"] = auto_potion.cleanup
     auto_potion.install_console_redirect()
@@ -1322,6 +1340,10 @@ def _run_main(cleanup_actions: dict[str, Callable[[], None]]) -> None:
             held_keys=control_held_keys,
             last_action=control_last_action or auto_potion.last_action,
         )
+        diagnostics = getattr(auto_potion.runtime_port, "diagnostics_text", None)
+        apply_diagnostics = getattr(auto_potion.gui, "set_backend_diagnostics", None)
+        if callable(diagnostics) and callable(apply_diagnostics):
+            apply_diagnostics(diagnostics())
 
     def maybe_refresh_runtime_info(now: float) -> None:
         nonlocal last_runtime_info_refreshed_at
@@ -1386,12 +1408,14 @@ def _run_main(cleanup_actions: dict[str, Callable[[], None]]) -> None:
             print(f"主迴圈錯誤：{exc}")
             if not auto_potion.is_closed():
                 auto_potion.gui.set_status(f"主迴圈錯誤：{exc}")
-        finally:
-            if not auto_potion.is_closed():
-                auto_potion.gui.root.after(next_loop_delay_ms(), loop_step)
-
-    auto_potion.gui.root.after(0, loop_step)
-    auto_potion.gui.root.mainloop()
+    host = QtApplicationHost(
+        auto_potion.gui.application,
+        auto_potion.gui,
+        tick=loop_step,
+        interval_seconds=POLL_INTERVAL_SECONDS,
+    )
+    auto_potion.gui.set_shutdown_handler(host.request_quit)
+    host.run()
 
 
 def main() -> None:

@@ -13,7 +13,9 @@
 ## package 分層
 - `maple_star/`：主 package，採 MVC + services/adapters 結構。
 - `maple_star/models/`：資料模型、設定模型、經驗效率模型、controller runtime state dataclass。
-- `maple_star/views/`：GUI 與 console writer，包含 CustomTkinter view、theme 與 layout。
+- `maple_star/views_qt/`：PySide6 GUI、application host、QThread/QRunnable jobs、五頁 view 與 bounded console model。
+- `maple_star/backend/`、`maple_star/ipc/`：supervisor、worker registry、health、settings transaction、Windows Job、parent lease 與 bounded transports。
+- `maple_star/workers/`：input guardian、realtime scheduler 與 potion/EXP/notification domain workers。
 - `maple_star/controllers/`：主流程 orchestration，例如自動喝水 controller 與手把主 loop controller。
 - `maple_star/services/`：純服務邏輯，例如 bar detection、settings store、hotkey worker、gamepad binding。
 - `maple_star/adapters/`：外部系統邊界，例如 Win32 input/window API、SendInput helper、debug logging、pygame controller worker。
@@ -32,9 +34,8 @@
 - `maple_star/services/experience_paddle_reader.py`：PaddleOCR fallback orchestration 與 spawn-safe worker entry。
 - `maple_star/models/experience_pixel_templates.py`：repository-maintained runtime Pixel OCR template；檔案很大，修改時需以獨立 migration 與 OCR regression 驗證來源及結果。
 - `maple_star/models/controller_state.py`：controller 間共享的 dataclass，例如 HUD layout、OCR job/burst、potion effect attempt 與 out-of-potion hold。
-- `maple_star/views/settings_gui.py`：CustomTkinter lifecycle、設定狀態同步、compact experience mode、toggle notice、console trim 與 page callback 接線。
-- `maple_star/views/gui_theme.py`、`gui_presentation.py`：theme constants、共用 widget factory、responsive layout 與 tooltip 呈現。
-- `maple_star/views/pages/`：Monitor、Potion、Minimap、Combo、Console page builders 與 frozen context/ref contracts。
+- `maple_star/views_qt/settings_gui.py`、`application_host.py`：Qt GUI port、signal-driven settings 與 single-shot QTimer lifecycle。
+- `maple_star/views_qt/pages/`、`models/`：Dashboard、Potion、Cruise、Combo、Diagnostics 與 table/console/preview models。
 - `maple_star/services/runtime_processes.py`：potion、EXP 與 control runtime 的 multiprocessing coordinator、command/status dataclass、bounded queue、status signature 與 heartbeat。
 - `maple_star/services/runtime_api.py`、`controller_collaborator_api.py`：runtime message、port 與 collaborator contracts；避免 controller/runtime concrete module 互相 import。
 - `maple_star/services/screen_capture.py`：MSS backend 的唯一 owner，提供共用 screen capture port。
@@ -57,11 +58,11 @@
 
 ## Runtime 流程
 - 主 GUI process 由 `gamepad_controller.main()` 驅動，建立 `AutoPotionSettingsGui`、`AutoPotionController` 與 SDL event worker。
-- 預設啟用 `RuntimeProcessCoordinator`，分別管理 potion、experience 與 control child process；GUI 端只送 command、套用去重後的 status，不執行巨集或巡航 deadline。
-- control runtime 消費 SDL event queue，負責手把組合、小地圖巡航、週期鍵與對應 SendInput；自動喝水送鍵仍由 potion runtime 擁有。
+- production 使用 `SupervisedRuntimeProcessPort` 包裝 process coordinator，管理 guardian、potion、experience 與 control scheduler PID/incarnation/health；GUI 只送 command、套用去重後 status。
+- control/potion/EXP workers只產生意圖；keyboard、mouse 與 cursor mutation由 input guardian 單一寫入，受 safety generation fence 與 foreground guard 保護。
 - potion runtime 使用 headless GUI recorder 執行自動喝水流程；experience runtime 使用 `experience_only_runtime=True`，只在 EXP 工作需要 HUD 時刷新 HUD，避免不必要的 HP/MP 擷取。
 - runtime status 以 signature 去重，notice / urgent events / console lines 視為 urgent；即使狀態不變，也會用 heartbeat 維持 worker 存活可觀測性。
-- GUI 端套用 runtime status 前也會比對 signature，避免重複 `StringVar.set()` 造成不必要 repaint。
+- GUI 端套用 runtime status 前比對 signature，Qt widget programmatic sync使用 `QSignalBlocker`，避免不必要 repaint。
 
 ## 專案資料
 - `maple_star/assets/`：HUD label template，打包時需透過 `build_release.bat --add-data` 放進 package。

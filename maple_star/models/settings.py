@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -861,16 +864,18 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        print(f"讀取設定失敗，使用預設值：{exc}")
-        if save_migrations:
-            save_settings(settings, path)
-        return settings
+        raise ValueError(f"讀取設定失敗，原檔未修改：{exc}") from exc
 
     if not isinstance(raw, dict):
-        print("設定檔格式錯誤，使用預設值")
-        if save_migrations:
-            save_settings(settings, path)
-        return settings
+        raise ValueError("設定檔格式錯誤，原檔未修改：root 必須是 JSON object")
+
+    source_was_v2 = raw.get("schema_version") == 2
+    if "schema_version" in raw:
+        if not source_was_v2:
+            raise ValueError(f"不支援的設定 schema：{raw.get('schema_version')}")
+        from .settings_v2 import settings_v2_from_json_dict
+
+        raw = settings_v2_from_json_dict(raw).to_legacy_payload()
 
     base_settings = AutoPotionSettings(
         hp_enabled=_read_bool(raw, "hp_enabled", settings.hp_enabled),
@@ -1128,15 +1133,45 @@ def load_settings(path: Path = SETTINGS_PATH, save_migrations: bool = True) -> A
         or raw.get(key) != value
         for key, value in expected.items()
     )
-    if needs_save:
+    if needs_save or not source_was_v2:
         if save_migrations:
-            save_settings(loaded_settings, path)
+            _write_settings_v2_atomic(loaded_settings, path, backup_existing=not source_was_v2)
         print("設定檔已補齊缺少或格式異常的參數")
     return loaded_settings
 
 
 def save_settings(settings: AutoPotionSettings, path: Path = SETTINGS_PATH) -> None:
-    path.write_text(
-        json.dumps(settings.to_json_dict(), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    _write_settings_v2_atomic(settings, path, backup_existing=False)
+
+
+def _write_settings_v2_atomic(
+    settings: AutoPotionSettings,
+    path: Path,
+    *,
+    backup_existing: bool,
+) -> None:
+    from .settings_migrations import migrate_settings_payload
+
+    payload = migrate_settings_payload(settings.to_json_dict()).to_json_dict()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending = path.with_name(f"{path.name}.pending-write-{os.getpid()}")
+    rendered = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    with pending.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(rendered)
+        stream.flush()
+        os.fsync(stream.fileno())
+    if backup_existing and path.exists():
+        backup = path.with_name(f"{path.name}.backup.{time.time_ns()}")
+        shutil.copy2(path, backup)
+        backups = sorted(
+            path.parent.glob(f"{path.name}.backup.*"),
+            key=lambda item: item.stat().st_mtime_ns,
+            reverse=True,
+        )
+        for stale in backups[3:]:
+            stale.unlink(missing_ok=True)
+    try:
+        os.replace(pending, path)
+    except BaseException:
+        pending.unlink(missing_ok=True)
+        raise

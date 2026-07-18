@@ -17,6 +17,16 @@ from maple_star.settings import (
 )
 
 
+def _saved_settings_view(saved):
+    if "global" not in saved:
+        return saved
+    return {
+        **saved["global"],
+        "active_profile": saved["selected_profile"],
+        "profiles": saved["profiles"],
+    }
+
+
 class SettingsProfileTests(unittest.TestCase):
     def test_load_settings_migrates_flat_settings_to_default_profile(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -28,7 +38,7 @@ class SettingsProfileTests(unittest.TestCase):
 
             with patch("builtins.print"):
                 settings = load_settings(settings_path)
-            saved = json.loads(settings_path.read_text(encoding="utf-8"))
+            saved = _saved_settings_view(json.loads(settings_path.read_text(encoding="utf-8")))
 
         self.assertEqual(settings.active_profile, "Default")
         self.assertEqual(settings.hp_key, "9")
@@ -162,7 +172,7 @@ class SettingsProfileTests(unittest.TestCase):
 
             with patch("builtins.print"):
                 settings = load_settings(settings_path)
-            saved = json.loads(settings_path.read_text(encoding="utf-8"))
+            saved = _saved_settings_view(json.loads(settings_path.read_text(encoding="utf-8")))
 
         self.assertEqual(settings.hp_cooldown_seconds, POTION_MIN_COOLDOWN_SECONDS)
         self.assertEqual(settings.mp_cooldown_seconds, POTION_MIN_COOLDOWN_SECONDS)
@@ -184,7 +194,7 @@ class SettingsProfileTests(unittest.TestCase):
 
             with patch("builtins.print"):
                 settings = load_settings(settings_path)
-            saved = json.loads(settings_path.read_text(encoding="utf-8"))
+            saved = _saved_settings_view(json.loads(settings_path.read_text(encoding="utf-8")))
 
         self.assertEqual(settings.hp_continuous_stop_margin_percent, 0.0)
         self.assertEqual(settings.mp_continuous_stop_margin_percent, POTION_CONTINUOUS_STOP_MARGIN_MAX_PERCENT)
@@ -211,7 +221,7 @@ class SettingsProfileTests(unittest.TestCase):
 
             with patch("builtins.print"):
                 settings = load_settings(settings_path)
-            saved = json.loads(settings_path.read_text(encoding="utf-8"))
+            saved = _saved_settings_view(json.loads(settings_path.read_text(encoding="utf-8")))
 
         self.assertEqual(settings.full_panel_window_x, 120)
         self.assertEqual(settings.full_panel_window_y, 240)
@@ -258,7 +268,7 @@ class SettingsProfileTests(unittest.TestCase):
 
             with patch("builtins.print"):
                 settings = load_settings(settings_path)
-            saved = json.loads(settings_path.read_text(encoding="utf-8"))
+            saved = _saved_settings_view(json.loads(settings_path.read_text(encoding="utf-8")))
 
         self.assertEqual(settings.minimap_cruise_toggle_hotkey, "F6")
         self.assertEqual(settings.minimap_cruise_attack_key, "A")

@@ -14,7 +14,7 @@
 - 建議可用空間：只執行原始碼至少保留 2 GB；若還要打包，至少保留 5 GB。
 - 首次安裝套件與首次初始化 PaddleOCR 模型時需要網路。
 
-本專案使用 Win32 API、GDI、MCI、Tk 與 SDL controller，不能把 Linux、WSL 或 macOS 當作等效執行環境。
+本專案使用 Win32 API、GDI、MCI、Qt 與 SDL controller，不能把 Linux、WSL 或 macOS 當作等效執行環境。
 
 ## 外部依賴總表
 
@@ -22,12 +22,12 @@
 
 | 項目 | 必要性 | 安裝來源或 winget ID | 用途 |
 | --- | --- | --- | --- |
-| CPython 3.11 x64 | 必要 | `Python.Python.3.11` | app、測試、venv 與打包執行環境；安裝時需包含 Tcl/Tk。 |
+| CPython 3.11 x64 | 必要 | `Python.Python.3.11` | app、測試、venv 與打包執行環境。 |
 | Git for Windows | 驗證必要 | `Git.Git` | `tools/verify.py` 會執行 `git diff --check`；單純啟動 app 不依賴 Git。 |
 | Microsoft Visual C++ 2015-2022 Redistributable x64 | 建議安裝 | `Microsoft.VCRedist.2015+.x64` | PaddlePaddle、OpenCV、NumPy、pygame 等 Windows binary wheel 的 native runtime。 |
 | MapleStory Worlds | 實際使用時必要 | 使用者另行安裝 | MapleStar 的目標應用程式，不是 Python 套件，也不由本專案安裝。 |
 
-Python 官方安裝若未包含 Tcl/Tk，`import tkinter` 會失敗，GUI 將無法啟動。
+GUI 使用 PySide6；release artifact 明確排除 Tcl/Tk。
 
 ### 直接 Python 依賴
 
@@ -36,7 +36,7 @@ Python 官方安裝若未包含 Tcl/Tk，`import tkinter` 會失敗，GUI 將無
 | 套件 | requirements 約束 | import 名稱 | 專案用途 |
 | --- | --- | --- | --- |
 | `pygame-ce` | `>=2.5.0` | `pygame` | SDL2 controller 偵測、按鈕事件與 Joystick fallback。 |
-| `customtkinter` | `==5.2.2` | `customtkinter` | 主設定 GUI、theme 與 widgets。 |
+| `PySide6` | `==6.11.1` | `PySide6` | Qt 主 GUI、QTimer、QThreadPool、widgets 與 qwindows platform plugin。 |
 | `Pillow` | `>=10.0.0` | `PIL` | GUI 內的影像預覽與圖片轉換。 |
 | `mss` | `>=10.0.0` | `mss` | Windows 螢幕與遊戲畫面擷取。 |
 | `numpy` | `>=2.0.0,<2.4` | `numpy` | ROI、bar、minimap 與 OCR 影像陣列運算。 |
@@ -58,7 +58,7 @@ Python 官方安裝若未包含 Tcl/Tk，`import tkinter` 會失敗，GUI 將無
 | `pypdfium2` | PaddleX OCR extras | PaddleX OCR extras；打包時需保留 metadata。 |
 | `python-bidi` | PaddleX OCR extras | 雙向文字處理；import 名稱是 `bidi`。 |
 | `shapely` | PaddleX OCR extras | OCR 幾何處理。 |
-| `darkdetect`、`packaging` | `customtkinter` | Windows theme 偵測與版本處理。 |
+| `shiboken6`、`PySide6-Essentials`、`PySide6-Addons` | `PySide6` | Qt binding 與 runtime components。 |
 | `PyInstaller` | 開發工具，未列入 requirements | 只有執行 `build_release.bat` 時需要；腳本缺少時會自動安裝。 |
 
 截至 2026-07-14，使用 Python 3.11 依 `requirements.txt` 解出的其他轉移依賴名稱如下。這是盤點清單，不是鎖檔；版本與實際集合仍以新電腦安裝後的 pip resolver 為準。
@@ -147,11 +147,11 @@ winget install --exact --id Git.Git --accept-package-agreements --accept-source-
 winget install --exact --id Microsoft.VCRedist.2015+.x64 --accept-package-agreements --accept-source-agreements
 ```
 
-若系統沒有 winget，從 Python、Git 與 Microsoft 官方網站安裝相同 x64 版本。Python installer 必須啟用 `pip`、`py launcher` 與 `Tcl/Tk and IDLE`。安裝後關閉並重開 PowerShell，再執行：
+若系統沒有 winget，從 Python、Git 與 Microsoft 官方網站安裝相同 x64 版本。Python installer 必須啟用 `pip` 與 `py launcher`。安裝後關閉並重開 PowerShell，再執行：
 
 ```powershell
 py -3.11 --version
-py -3.11 -c "import struct, sys, tkinter; assert sys.platform == 'win32'; assert struct.calcsize('P') * 8 == 64; print(sys.version); print('Tk', tkinter.TkVersion)"
+py -3.11 -c "import struct, sys; assert sys.platform == 'win32'; assert struct.calcsize('P') * 8 == 64; print(sys.version)"
 git --version
 ```
 
@@ -193,7 +193,7 @@ $Python = (Resolve-Path -LiteralPath '.\.venv-paddleocr\Scripts\python.exe').Pat
 
 ```powershell
 & $Python -m pip check
-& $Python -c "import tkinter, customtkinter, cv2, mss, numpy, paddle, paddleocr, paddlex, pygame, imagesize, pyclipper, pypdfium2, bidi, shapely; from importlib.metadata import version; from PIL import Image; print('IMPORT_OK'); print('Python', __import__('sys').version.split()[0]); print('NumPy', version('numpy')); print('OpenCV', version('opencv-contrib-python')); print('Paddle', version('paddlepaddle')); print('PaddleOCR', version('paddleocr'))"
+& $Python -c "import PySide6, cv2, mss, numpy, paddle, paddleocr, paddlex, pygame, imagesize, pyclipper, pypdfium2, bidi, shapely; from importlib.metadata import version; from PIL import Image; print('IMPORT_OK'); print('Python', __import__('sys').version.split()[0]); print('Qt', version('PySide6')); print('NumPy', version('numpy')); print('OpenCV', version('opencv-contrib-python')); print('Paddle', version('paddlepaddle')); print('PaddleOCR', version('paddleocr'))"
 ```
 
 成功條件：
@@ -262,7 +262,7 @@ $Python = (Resolve-Path -LiteralPath '.\.venv-paddleocr\Scripts\python.exe').Pat
 .\build_release.bat
 ```
 
-`build_release.bat` 會優先使用 `.venv-paddleocr`、拒絕 Python 3.14+，並收集 PaddleOCR、PaddleX、CustomTkinter 與 OCR extras metadata。後續 ZIP 檢查與禁止提交項目依 [release.md](release.md) 執行。
+`build_release.bat` 會優先使用 `.venv-paddleocr`、拒絕 Python 3.14+，並收集 PaddleOCR、PaddleX、PySide6 Qt plugin 與 OCR extras metadata，同時排除 Tcl/Tk。後續 ZIP 檢查與禁止提交項目依 [release.md](release.md) 執行。
 
 ## 常見失敗
 
@@ -272,10 +272,10 @@ $Python = (Resolve-Path -LiteralPath '.\.venv-paddleocr\Scripts\python.exe').Pat
 - 若仍找不到，修復 Python 3.11 安裝並啟用 Python Launcher。
 - 不要改用 Microsoft Store 的不明版本 `python.exe` alias。
 
-### `No module named tkinter`
+### `No module named PySide6`
 
-- 重新執行 Python 3.11 installer，加入 `Tcl/Tk and IDLE`。
-- venv 會共用 base Python 的 Tcl/Tk；不應用 pip 安裝 `tkinter`。
+- 確認使用專案 venv，重新執行 `& $Python -m pip install -r .\requirements.txt`。
+- 不要用 pip 單獨安裝不相容的 Qt component 版本；PySide6、Essentials、Addons 與 shiboken6 必須一致。
 
 ### `No matching distribution found for paddlepaddle`
 

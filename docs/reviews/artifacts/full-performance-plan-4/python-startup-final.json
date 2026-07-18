@@ -1,0 +1,41 @@
+{
+  "mode": "python",
+  "marker": "main_ready",
+  "samples_seconds": [
+    0.3827034999849275,
+    0.35825780002051033,
+    0.36768349999329075,
+    0.3724551000050269,
+    0.3588023000047542,
+    0.3494076000060886,
+    0.35549069999251515
+  ],
+  "median_seconds": 0.3588023000047542,
+  "environment": {
+    "commit": "566c8b42d0df039b704ed45979f7dc0a8eadfbfd",
+    "mode": "python",
+    "python": "3.14.3",
+    "executable": "C:\\Python314\\python.exe",
+    "cpu": "Intel64 Family 6 Model 183 Stepping 1, GenuineIntel",
+    "logical_cores": 24,
+    "ram_bytes": 34039758848,
+    "windows_build": "Windows-11-10.0.26200-SP0",
+    "system_dpi": 96,
+    "power_plan": "91202427-e9a0-4927-bcfa-300faca65952 (Bitsum Highest Performance)",
+    "cache_condition": "cold-process/warm-os-cache"
+  },
+  "first_visible_shell_samples_seconds": [
+    0.1697176000161562,
+    0.16206020000390708,
+    0.15920359999290667,
+    0.1736254999996163,
+    0.15868009999394417,
+    0.15760449998197146,
+    0.16082089999690652
+  ],
+  "first_visible_shell_median_seconds": 0.16082089999690652,
+  "first_visible_shell_passed": true,
+  "baseline_seconds": 0.5134484,
+  "improvement_percent": 30.11911226040354,
+  "passed": true
+}

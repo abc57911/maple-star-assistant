@@ -16,6 +16,7 @@ CONTROL_TIMING_SAMPLE_LIMIT = 4096
 class TimingSnapshot:
     sample_count: int = 0
     p95_lateness_ms: float = 0.0
+    p99_lateness_ms: float = 0.0
     max_lateness_ms: float = 0.0
 
 
@@ -30,10 +31,12 @@ class DeadlineTimingRecorder:
         if not self._samples_ms:
             return TimingSnapshot()
         ordered = sorted(self._samples_ms)
-        percentile_index = max(0, math.ceil(len(ordered) * 0.95) - 1)
+        p95_index = max(0, math.ceil(len(ordered) * 0.95) - 1)
+        p99_index = max(0, math.ceil(len(ordered) * 0.99) - 1)
         return TimingSnapshot(
             sample_count=len(ordered),
-            p95_lateness_ms=ordered[percentile_index],
+            p95_lateness_ms=ordered[p95_index],
+            p99_lateness_ms=ordered[p99_index],
             max_lateness_ms=ordered[-1],
         )
 

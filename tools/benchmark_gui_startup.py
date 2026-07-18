@@ -11,18 +11,22 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from maple_star.services.benchmark_environment import collect_benchmark_environment
 
 
-def _measure_python_once() -> float:
+def _measure_python_once() -> tuple[float, float]:
     command = (
         "from maple_star.models.settings import AutoPotionSettings;"
-        "from maple_star.views.settings_gui import AutoPotionSettingsGui;"
+        "from maple_star.views_qt.settings_gui import AutoPotionSettingsGui;"
         "import time;"
         "s=time.perf_counter();"
         "g=AutoPotionSettingsGui(AutoPotionSettings());"
-        "g.root.withdraw();g.root.update_idletasks();"
+        "g.show();g.application.processEvents();"
         "print(time.perf_counter()-s);"
-        "g.root.destroy()"
+        "g.close()"
     )
     started = time.perf_counter()
     result = subprocess.run(
@@ -35,7 +39,7 @@ def _measure_python_once() -> float:
     elapsed = time.perf_counter() - started
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     gui_elapsed = float(lines[-1])
-    return max(gui_elapsed, elapsed)
+    return max(gui_elapsed, elapsed), gui_elapsed
 
 
 def _measure_executable_once(executable: Path, timeout_seconds: float = 30.0) -> float:
@@ -73,14 +77,31 @@ def main() -> None:
         executable = args.executable.resolve()
         if not executable.is_file():
             raise SystemExit(f"找不到 EXE：{executable}")
-        measure = lambda: _measure_executable_once(executable)
+        measure = lambda: (_measure_executable_once(executable), None)
         mode = "exe"
     else:
         measure = _measure_python_once
         mode = "python"
-    samples = [measure() for _ in range(max(1, args.runs))]
+    measurements = [measure() for _ in range(max(1, args.runs))]
+    samples = [measurement[0] for measurement in measurements]
+    visible_samples = [measurement[1] for measurement in measurements if measurement[1] is not None]
     median = sorted(samples)[len(samples) // 2]
-    result: dict[str, object] = {"mode": mode, "samples_seconds": samples, "median_seconds": median}
+    result: dict[str, object] = {
+        "mode": mode,
+        "marker": "main_ready",
+        "samples_seconds": samples,
+        "median_seconds": median,
+        "environment": collect_benchmark_environment(
+            mode=mode,
+            cache_condition="cold-process/warm-os-cache",
+            root=ROOT,
+        ),
+    }
+    if visible_samples:
+        visible_median = sorted(visible_samples)[len(visible_samples) // 2]
+        result["first_visible_shell_samples_seconds"] = visible_samples
+        result["first_visible_shell_median_seconds"] = visible_median
+        result["first_visible_shell_passed"] = visible_median <= 0.2
     if args.baseline_seconds is not None:
         improvement = (args.baseline_seconds - median) / args.baseline_seconds * 100.0
         result["baseline_seconds"] = args.baseline_seconds
@@ -89,8 +110,9 @@ def main() -> None:
     rendered = json.dumps(result, ensure_ascii=False, indent=2)
     print(rendered, flush=True)
     if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")
-    if result.get("passed") is False:
+    if result.get("passed") is False or result.get("first_visible_shell_passed") is False:
         raise SystemExit(1)
 
 
