@@ -678,6 +678,8 @@ def _control_target_client_bounds(target_hwnd: int) -> tuple[int, int, int, int]
 
 
 def _minimap_next_deadline(runtime: MinimapCruiseRuntime) -> float | None:
+    if getattr(runtime, "pending_release_vks", None):
+        return getattr(runtime, "pending_release_retry_at", None)
     if runtime.lie_detector_challenge_active:
         return nearest_deadline(
             (runtime.next_lie_detector_check_at, runtime.next_lie_detector_alert_at)
@@ -693,13 +695,14 @@ def _minimap_next_deadline(runtime: MinimapCruiseRuntime) -> float | None:
             if index not in runtime.periodic_key_pending_taps
         ),
         *(pending[1] for pending in runtime.periodic_key_pending_taps.values()),
+        *(held[1] for held in getattr(runtime, "periodic_key_held", {}).values()),
     ]
     if runtime.red_player_alert_active:
         deadlines.append(runtime.next_red_player_alert_at)
     if runtime.status == MINIMAP_CRUISE_STATUS_TURNING:
         deadlines.extend((runtime.turn_key_up_at, runtime.resume_attack_at))
     elif runtime.status == MINIMAP_CRUISE_STATUS_PRE_BOUNDARY_SKILL:
-        deadlines.append(runtime.pre_boundary_skill_key_up_at)
+        deadlines.extend((runtime.pre_boundary_skill_key_up_at, runtime.pre_boundary_probe_at))
     elif runtime.status == MINIMAP_CRUISE_STATUS_STATIONARY_SKILL:
         deadlines.extend(
             (runtime.stationary_skill_key_up_at, runtime.stationary_skill_post_delay_until)
@@ -900,10 +903,11 @@ def run_control_runtime_process(
                         settings = _settings_from_payload(command.settings_payload)
                         bindings = build_combo_script_bindings(settings)
                         button_bindings = build_controller_button_bindings(settings, bindings)
-                        minimap.settings = settings
+                        minimap.apply_settings(settings, time.perf_counter())
                         settings_changed = True
                         continue
                     if isinstance(command, TargetWindowUpdated):
+                        minimap.prepare_target_window_update(time.perf_counter())
                         target_state["hwnd"] = int(command.hwnd or 0)
                         continue
                     if isinstance(command, ControlCommand):

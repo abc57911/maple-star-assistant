@@ -60,6 +60,11 @@ from ..models.settings import (
     normalize_profile_name,
 )
 from ..services.settings_store import load_settings, save_settings
+from ..services.minimap_cruise import (
+    MINIMAP_CRUISE_MAX_BOUNDARY_Y_DELTA_PIXELS,
+    MINIMAP_CRUISE_MIN_BOUNDARY_WIDTH_PIXELS,
+    validate_minimap_cruise_settings,
+)
 from ..adapters.win_input import Point, parse_vk_key, user32
 from .gui_theme import *  # noqa: F401,F403
 from .gui_presentation import GuiPresentationMixin
@@ -1877,6 +1882,22 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
                 first = self.minimap_cruise_first_point
                 if first is not None:
                     left_x, right_x = sorted((first[0], point[0]))
+                    if right_x - left_x < MINIMAP_CRUISE_MIN_BOUNDARY_WIDTH_PIXELS:
+                        self.minimap_cruise_first_point = None
+                        self.minimap_cruise_boundary_step = "left"
+                        self.minimap_cruise_boundary_status.set("邊界：請重新點左界")
+                        self.set_status("小地圖巡航邊界寬度至少需 20 px")
+                        self.minimap_cruise_mouse_was_down = is_down
+                        self._schedule_minimap_cruise_boundary_poll()
+                        return
+                    if abs(first[1] - point[1]) > MINIMAP_CRUISE_MAX_BOUNDARY_Y_DELTA_PIXELS:
+                        self.minimap_cruise_first_point = None
+                        self.minimap_cruise_boundary_step = "left"
+                        self.minimap_cruise_boundary_status.set("邊界：請重新點左界")
+                        self.set_status("小地圖巡航左右邊界高度差不得超過 30 px")
+                        self.minimap_cruise_mouse_was_down = is_down
+                        self._schedule_minimap_cruise_boundary_poll()
+                        return
                     detect_y = round((first[1] + point[1]) / 2)
                     self.settings.minimap_cruise_left_x = left_x
                     self.settings.minimap_cruise_right_x = right_x
@@ -2075,6 +2096,11 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
             return False
 
     def apply_to_settings(self) -> None:
+        previous_minimap_settings = {
+            name: getattr(self.settings, name)
+            for name in self.settings.__dataclass_fields__
+            if name.startswith("minimap_cruise_")
+        }
         self._read_percent(self.hp_threshold, self.hp_threshold_text)
         self._read_percent(self.mp_threshold, self.mp_threshold_text)
         self.settings.normalize_combo_slots()
@@ -2306,6 +2332,11 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
             setattr(self.settings, f"minimap_cruise_periodic_key_{slot}", key)
             setattr(self.settings, interval_attr, interval)
             periodic_interval_vars[index].set(f"{interval:g}")
+        minimap_error = validate_minimap_cruise_settings(self.settings, parse_vk_key)
+        if minimap_error is not None:
+            for name, value in previous_minimap_settings.items():
+                setattr(self.settings, name, value)
+            self.set_status(minimap_error)
         self.settings.console_collapsed = self.console_collapsed
         self.settings.combo_group_collapsed = self.combo_group_collapsed
         self.settings.minimap_cruise_group_collapsed = getattr(

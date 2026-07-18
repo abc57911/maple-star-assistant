@@ -38,6 +38,10 @@ MINIMAP_CRUISE_FOREGROUND_RESUME_DELAY_SECONDS = 0.2
 MINIMAP_CRUISE_OUT_OF_BOUNDS_RECOVERY_INTERVAL_SECONDS = 0.5
 MINIMAP_CRUISE_RECOVERY_STUCK_CONFIRMATIONS = 2
 MINIMAP_CRUISE_PERIODIC_KEY_TAP_SPACING_SECONDS = 1.0
+MINIMAP_CRUISE_PERIODIC_KEY_HOLD_SECONDS = 0.05
+MINIMAP_CRUISE_RELEASE_RETRY_INTERVAL_SECONDS = 0.05
+MINIMAP_CRUISE_MIN_BOUNDARY_WIDTH_PIXELS = 20
+MINIMAP_CRUISE_MAX_BOUNDARY_Y_DELTA_PIXELS = 30
 
 MINIMAP_CRUISE_STATUS_STOPPED = "stopped"
 MINIMAP_CRUISE_STATUS_STARTING = "starting"
@@ -54,6 +58,80 @@ RIGHT_DIRECTION_VK = 0x27
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LIE_DETECTOR_BOMB_TEMPLATE_PATH = PROJECT_ROOT / "maple_star" / "assets" / "minimap_cruise_lie_detector_bomb.png"
 _LIE_DETECTOR_BOMB_TEMPLATE: tuple[np.ndarray, np.ndarray | None] | None = None
+_LIE_DETECTOR_BOMB_SCALED_TEMPLATES: tuple[tuple[np.ndarray, np.ndarray | None], ...] | None = None
+
+
+def validate_minimap_cruise_settings(
+    settings: AutoPotionSettings,
+    parse_key: Callable[[str], int],
+    client_bounds: tuple[int, int, int, int] | None = None,
+    *,
+    require_boundaries: bool = False,
+) -> str | None:
+    bounds = (
+        settings.minimap_cruise_left_x,
+        settings.minimap_cruise_right_x,
+        settings.minimap_cruise_detect_y,
+    )
+    if all(value is None for value in bounds):
+        if require_boundaries:
+            return "請先設定小地圖邊界"
+    elif any(value is None for value in bounds):
+        return "請先設定小地圖邊界" if require_boundaries else "小地圖巡航邊界設定不完整"
+    else:
+        left_x, right_x = sorted((int(bounds[0]), int(bounds[1])))
+        detect_y = int(bounds[2])
+        if right_x - left_x < MINIMAP_CRUISE_MIN_BOUNDARY_WIDTH_PIXELS:
+            return "小地圖巡航邊界寬度至少需 20 px"
+        if client_bounds is not None:
+            _left, _top, width, height = client_bounds
+            if not (0 <= left_x < right_x < width and 0 <= detect_y < height):
+                return "小地圖巡航邊界超出遊戲視窗"
+
+    def parsed(label: str, key: str) -> tuple[int | None, str | None]:
+        if not key.strip():
+            return None, None
+        try:
+            return parse_key(key.strip()), None
+        except (KeyError, ValueError):
+            return None, f"{label}設定無效"
+
+    attack_vk, error = parsed("小地圖巡航攻擊鍵", settings.minimap_cruise_attack_key)
+    if error or attack_vk is None:
+        return error or "小地圖巡航攻擊鍵設定無效"
+    reserved = {LEFT_DIRECTION_VK, RIGHT_DIRECTION_VK}
+    if attack_vk in reserved:
+        return "小地圖巡航攻擊鍵不得使用左右方向鍵"
+
+    held_keys: list[tuple[str, int]] = [("攻擊鍵", attack_vk)]
+    if settings.minimap_cruise_pre_boundary_skill_enabled:
+        vk, error = parsed("邊界技能鍵", settings.minimap_cruise_pre_boundary_skill_key)
+        if error or vk is None:
+            return error or "邊界技能鍵設定無效"
+        held_keys.append(("邊界技能鍵", vk))
+    stationary_vk, error = parsed("原地位移技能鍵", settings.minimap_cruise_stationary_skill_key)
+    if error:
+        return error
+    if stationary_vk is not None:
+        held_keys.append(("原地位移技能鍵", stationary_vk))
+    if any(vk == attack_vk for _label, vk in held_keys[1:]):
+        return "小地圖巡航攻擊鍵與技能鍵不得重複"
+    if any(vk in reserved for _label, vk in held_keys[1:]):
+        return "小地圖巡航技能鍵不得使用左右方向鍵"
+
+    used_periodic: set[int] = set()
+    held_vks = {vk for _label, vk in held_keys}
+    for index in range(1, 6):
+        if not getattr(settings, f"minimap_cruise_periodic_key_{index}_enabled"):
+            continue
+        key = getattr(settings, f"minimap_cruise_periodic_key_{index}")
+        vk, error = parsed(f"週期鍵 {index}", key)
+        if error or vk is None:
+            return error or f"週期鍵 {index} 設定無效"
+        if vk in reserved or vk in held_vks or vk in used_periodic:
+            return f"週期鍵 {index} 與其他巡航按鍵衝突"
+        used_periodic.add(vk)
+    return None
 
 
 class CaptureProvider(Protocol):
@@ -88,7 +166,6 @@ class MinimapCruiseRuntime:
     stationary_x: int | None = None
     stationary_last_x: int | None = None
     stationary_started_at: float | None = None
-    consecutive_detection_failures: int = 0
     last_message: str = ""
     turn_direction_vk: int = 0
     turn_held_vk: int = 0
@@ -105,6 +182,7 @@ class MinimapCruiseRuntime:
     red_player_alert_active: bool = False
     pre_boundary_skill_held_vk: int = 0
     pre_boundary_skill_key_up_at: float | None = None
+    pre_boundary_probe_at: float | None = None
     pre_boundary_skill_triggered_boundary: str | None = None
     stationary_skill_held_vk: int = 0
     stationary_skill_key_up_at: float | None = None
@@ -118,19 +196,34 @@ class MinimapCruiseRuntime:
     recovery_stuck_confirmations: int = 0
     periodic_key_next_at: dict[int, float] = field(default_factory=dict)
     periodic_key_pending_taps: dict[int, tuple[int, float, float]] = field(default_factory=dict)
+    periodic_key_held: dict[int, tuple[int, float]] = field(default_factory=dict)
     last_periodic_key_tap_at: float | None = None
+    pending_release_vks: set[int] = field(default_factory=set)
+    pending_release_retry_at: float | None = None
+    pending_settings: AutoPotionSettings | None = None
+    resume_after_settings_apply: bool = False
+    resume_after_target_update: bool = False
+    _current_now: float = field(default=0.0, init=False)
     _last_status_report: str = field(default="", init=False)
 
     def toggle(self, now: float) -> bool:
+        self._current_now = now
         if self.enabled:
-            self.stop("小地圖巡航已停用")
+            self.stop("小地圖巡航已停用", now=now)
             return False
 
-        if not self._has_configured_boundaries():
-            self._report_status("請先設定小地圖邊界")
+        if self.pending_release_vks:
+            self._report_status("小地圖巡航：等待按鍵釋放")
             return False
-        if self._configured_attack_vk() is None:
-            self._report_status("小地圖巡航攻擊鍵設定無效")
+
+        error = validate_minimap_cruise_settings(
+            self.settings,
+            self.parse_vk_key_func,
+            self.target_client_bounds_provider(),
+            require_boundaries=True,
+        )
+        if error is not None:
+            self._report_status(error)
             return False
 
         self.enabled = True
@@ -150,7 +243,6 @@ class MinimapCruiseRuntime:
         self.foreground_resume_at = None
         self._reset_periodic_key_schedule(now)
         self._reset_stationary_tracking()
-        self.consecutive_detection_failures = 0
         self.last_message = (
             "小地圖巡航：偵測到測謊視窗"
             if self.lie_detector_challenge_active
@@ -159,7 +251,9 @@ class MinimapCruiseRuntime:
         self._report_status(self.last_message)
         return True
 
-    def stop(self, message: str = "小地圖巡航已停用") -> None:
+    def stop(self, message: str = "小地圖巡航已停用", *, now: float | None = None) -> None:
+        if now is not None:
+            self._current_now = now
         self.enabled = False
         self.status = MINIMAP_CRUISE_STATUS_STOPPED
         self._cancel_turn()
@@ -177,6 +271,15 @@ class MinimapCruiseRuntime:
         self._report_status(message)
 
     def update(self, now: float) -> None:
+        self._current_now = now
+        self._retry_pending_releases(now)
+        if self.pending_release_vks:
+            return
+        if self.pending_settings is not None:
+            self._commit_pending_settings(now)
+        elif self.resume_after_target_update:
+            self.resume_after_target_update = False
+            self.toggle(now)
         if self.lie_detector_challenge_active:
             self._update_lie_detector_pause(now)
             return
@@ -217,17 +320,14 @@ class MinimapCruiseRuntime:
 
         character_x = self._capture_character_x()
         if character_x is None:
-            self.consecutive_detection_failures += 1
             self._suspend("小地圖巡航：找不到角色點")
             return
 
-        self.consecutive_detection_failures = 0
         self.last_detected_x = character_x
         self.current_direction = self._initial_or_current_direction(character_x)
         self.settings.minimap_cruise_last_direction = self.current_direction
         self._update_stationary_tracking(character_x, now)
         out_of_bounds_direction = self._direction_toward_bounds_if_outside(character_x)
-        forced_direction = self._forced_direction_toward_bounds(character_x)
 
         if self.status == MINIMAP_CRUISE_STATUS_RECOVERING:
             if out_of_bounds_direction is None:
@@ -305,6 +405,88 @@ class MinimapCruiseRuntime:
     def _can_send_actions(self) -> bool:
         return self.can_run_actions() and self.is_target_window_active() and not self.is_action_blocked()
 
+    def _press_key(self, vk: int) -> bool:
+        if self.pending_release_vks or not self._can_send_actions():
+            self._suspend("小地圖巡航暫停")
+            return False
+        try:
+            self.key_down_func(vk)
+        except Exception:
+            self._suspend("小地圖巡航：按鍵按下失敗")
+            return False
+        return True
+
+    def _release_key(self, vk: int) -> bool:
+        try:
+            self.key_up_func(vk)
+        except Exception:
+            self.pending_release_vks.add(vk)
+            self.pending_release_retry_at = self._current_now + MINIMAP_CRUISE_RELEASE_RETRY_INTERVAL_SECONDS
+            return False
+        self.pending_release_vks.discard(vk)
+        if not self.pending_release_vks:
+            self.pending_release_retry_at = None
+        return True
+
+    def _retry_pending_releases(self, now: float) -> None:
+        if not self.pending_release_vks:
+            self.pending_release_retry_at = None
+            return
+        if self.pending_release_retry_at is not None and now + 1e-9 < self.pending_release_retry_at:
+            return
+        for vk in tuple(self.pending_release_vks):
+            if self._release_key(vk):
+                self._clear_released_vk(vk)
+        if self.pending_release_vks:
+            self.pending_release_retry_at = now + MINIMAP_CRUISE_RELEASE_RETRY_INTERVAL_SECONDS
+
+    def apply_settings(self, settings: AutoPotionSettings, now: float) -> bool:
+        error = validate_minimap_cruise_settings(
+            settings,
+            self.parse_vk_key_func,
+            self.target_client_bounds_provider(),
+        )
+        if error is not None:
+            self._report_status(error)
+            return False
+        was_enabled = self.enabled
+        self.stop("小地圖巡航：套用設定", now=now)
+        self.pending_settings = settings
+        self.resume_after_settings_apply = was_enabled
+        if not self.pending_release_vks:
+            self._commit_pending_settings(now)
+        return True
+
+    def prepare_target_window_update(self, now: float) -> None:
+        was_enabled = self.enabled
+        self.stop("小地圖巡航：目標視窗已更新", now=now)
+        self.resume_after_target_update = was_enabled
+
+    def _commit_pending_settings(self, now: float) -> None:
+        settings = self.pending_settings
+        if settings is None or self.pending_release_vks:
+            return
+        resume = self.resume_after_settings_apply
+        self.pending_settings = None
+        self.resume_after_settings_apply = False
+        self.settings = settings
+        if resume:
+            self.toggle(now)
+
+    def _clear_released_vk(self, vk: int) -> None:
+        for attribute in (
+            "attack_held_vk",
+            "turn_held_vk",
+            "pre_boundary_skill_held_vk",
+            "stationary_skill_held_vk",
+            "recovery_held_vk",
+        ):
+            if getattr(self, attribute) == vk:
+                setattr(self, attribute, 0)
+        for index, (held_vk, _release_at) in tuple(self.periodic_key_held.items()):
+            if held_vk == vk:
+                self.periodic_key_held.pop(index, None)
+
     def _suspend(self, message: str) -> None:
         self._cancel_turn()
         self._cancel_pre_boundary_skill()
@@ -312,6 +494,7 @@ class MinimapCruiseRuntime:
         self._cancel_recovery()
         self._release_attack_key()
         self._reset_stationary_tracking()
+        self._reset_red_player_alert()
         self.foreground_resume_at = None
         self.status = MINIMAP_CRUISE_STATUS_SUSPENDED
         self.last_message = message
@@ -372,7 +555,6 @@ class MinimapCruiseRuntime:
         self._reset_red_player_alert()
         self._reset_periodic_key_schedule(now)
         self._reset_stationary_tracking()
-        self.consecutive_detection_failures = 0
         self.last_message = "小地圖巡航：測謊已完成，自動恢復"
         self._report_status(self.last_message)
 
@@ -430,7 +612,8 @@ class MinimapCruiseRuntime:
         if self.attack_held_vk == attack_vk:
             return True
         self._release_attack_key()
-        self.key_down_func(attack_vk)
+        if not self._press_key(attack_vk):
+            return False
         self.attack_held_vk = attack_vk
         return True
 
@@ -438,9 +621,7 @@ class MinimapCruiseRuntime:
         held_vk = self.attack_held_vk
         if not held_vk:
             return
-        try:
-            self.key_up_func(held_vk)
-        finally:
+        if self._release_key(held_vk):
             self.attack_held_vk = 0
 
     def _configured_pre_boundary_skill_vk(self) -> int | None:
@@ -511,11 +692,20 @@ class MinimapCruiseRuntime:
                 self.periodic_key_next_at[index] = now + interval
 
     def _clear_periodic_key_schedule(self) -> None:
+        for index, (vk, _release_at) in tuple(self.periodic_key_held.items()):
+            if self._release_key(vk):
+                self.periodic_key_held.pop(index, None)
         self.periodic_key_next_at.clear()
         self.periodic_key_pending_taps.clear()
         self.last_periodic_key_tap_at = None
 
     def _update_periodic_keys(self, now: float) -> None:
+        for index, (vk, release_at) in tuple(self.periodic_key_held.items()):
+            if now + 1e-9 >= release_at and self._release_key(vk):
+                self.periodic_key_held.pop(index, None)
+        if self.periodic_key_held or self.pending_release_vks:
+            return
+
         valid_slots: dict[int, tuple[int, float]] = {}
         for index, enabled, key, interval in self._periodic_key_slots():
             vk = self._configured_periodic_key_vk(key)
@@ -562,7 +752,12 @@ class MinimapCruiseRuntime:
         if queued[0][1] <= now + 1e-9 and now + 1e-9 >= earliest_allowed:
             _priority, _send_at, index, vk, interval = queued.pop(0)
             cadence_deadline = self.periodic_key_next_at.get(index, _send_at)
-            self.tap_key_func(vk)
+            if not self._press_key(vk):
+                return
+            self.periodic_key_held[index] = (
+                vk,
+                now + MINIMAP_CRUISE_PERIODIC_KEY_HOLD_SECONDS,
+            )
             self.last_periodic_key_tap_at = now
             self.periodic_key_pending_taps.pop(index, None)
             self.periodic_key_next_at[index] = next_absolute_deadline(cadence_deadline, interval, now)
@@ -675,9 +870,11 @@ class MinimapCruiseRuntime:
         self._cancel_turn()
         self._cancel_recovery()
         self._cancel_stationary_skill()
-        self.key_down_func(skill_vk)
+        if not self._press_key(skill_vk):
+            return
         self.pre_boundary_skill_held_vk = skill_vk
         self.pre_boundary_skill_key_up_at = now + MINIMAP_CRUISE_PRE_BOUNDARY_SKILL_HOLD_SECONDS
+        self.pre_boundary_probe_at = now + MINIMAP_CRUISE_DETECT_INTERVAL_SECONDS
         self.pre_boundary_skill_triggered_boundary = boundary
         self.status = MINIMAP_CRUISE_STATUS_PRE_BOUNDARY_SKILL
         self.last_message = "小地圖巡航：邊界前技能"
@@ -688,8 +885,8 @@ class MinimapCruiseRuntime:
             return
         if self.pre_boundary_skill_held_vk and self.pre_boundary_skill_key_up_at is not None:
             if now + 1e-9 < self.pre_boundary_skill_key_up_at:
-                if self._handle_out_of_bounds_during_pre_boundary_skill(now):
-                    return
+                if self.pre_boundary_probe_at is not None and now + 1e-9 >= self.pre_boundary_probe_at:
+                    self._probe_pre_boundary_skill(now)
                 return
             self._cancel_pre_boundary_skill()
         if self._handle_boundary_after_pre_boundary_skill(now):
@@ -700,34 +897,20 @@ class MinimapCruiseRuntime:
         self.last_message = "小地圖巡航中"
         self.next_detect_at = now
 
-    def _handle_out_of_bounds_during_pre_boundary_skill(self, now: float) -> bool:
+    def _probe_pre_boundary_skill(self, now: float) -> None:
+        self.pre_boundary_probe_at = now + MINIMAP_CRUISE_DETECT_INTERVAL_SECONDS
         character_x = self._capture_character_x()
         if character_x is None:
-            return False
+            return
 
-        self.consecutive_detection_failures = 0
         self.last_detected_x = character_x
-        out_of_bounds_direction = self._direction_toward_bounds_if_outside(character_x)
-        if out_of_bounds_direction is None:
-            return False
-        self._cancel_pre_boundary_skill()
-        self._begin_turn(
-            out_of_bounds_direction,
-            self._boundary_for_out_of_bounds_direction(out_of_bounds_direction),
-            now,
-        )
-        return True
 
     def _handle_boundary_after_pre_boundary_skill(self, now: float) -> bool:
         character_x = self._capture_character_x()
         if character_x is None:
-            fallback_direction = self._direction_away_from_pre_boundary()
-            if fallback_direction is None:
-                return False
-            self._begin_turn(fallback_direction, self.pre_boundary_skill_triggered_boundary, now)
+            self._suspend("小地圖巡航：找不到角色點")
             return True
 
-        self.consecutive_detection_failures = 0
         self.last_detected_x = character_x
         self.current_direction = self._initial_or_current_direction(character_x)
         self.settings.minimap_cruise_last_direction = self.current_direction
@@ -766,7 +949,8 @@ class MinimapCruiseRuntime:
         self._reset_stationary_tracking()
         self.stationary_skill_post_delay_until = None
         self._release_attack_key()
-        self.key_down_func(skill_vk)
+        if not self._press_key(skill_vk):
+            return
         self.stationary_skill_held_vk = skill_vk
         self.stationary_skill_key_up_at = now + MINIMAP_CRUISE_STATIONARY_SKILL_HOLD_SECONDS
         self.status = MINIMAP_CRUISE_STATUS_STATIONARY_SKILL
@@ -818,21 +1002,18 @@ class MinimapCruiseRuntime:
     def _capture_stationary_skill_character_x(self) -> int | None:
         character_x = self._capture_character_x()
         if character_x is None:
-            self.consecutive_detection_failures += 1
             self._suspend("小地圖巡航：找不到角色點")
             return None
-        self.consecutive_detection_failures = 0
         self.last_detected_x = character_x
         return character_x
 
     def _cancel_pre_boundary_skill(self) -> None:
         held_vk = self.pre_boundary_skill_held_vk
         if held_vk:
-            try:
-                self.key_up_func(held_vk)
-            finally:
+            if self._release_key(held_vk):
                 self.pre_boundary_skill_held_vk = 0
         self.pre_boundary_skill_key_up_at = None
+        self.pre_boundary_probe_at = None
 
     def _cancel_stationary_skill(self) -> None:
         self._release_stationary_skill_key()
@@ -842,9 +1023,7 @@ class MinimapCruiseRuntime:
     def _release_stationary_skill_key(self) -> None:
         held_vk = self.stationary_skill_held_vk
         if held_vk:
-            try:
-                self.key_up_func(held_vk)
-            finally:
+            if self._release_key(held_vk):
                 self.stationary_skill_held_vk = 0
         self.stationary_skill_key_up_at = None
 
@@ -871,6 +1050,7 @@ class MinimapCruiseRuntime:
 
         if not self.recovery_held_vk:
             if self._moving_toward_bounds(character_x):
+                self.recovery_last_x = character_x
                 self.recovery_stuck_confirmations = 0
                 if not self._hold_attack_key():
                     return
@@ -878,9 +1058,8 @@ class MinimapCruiseRuntime:
                 self.recovery_stuck_confirmations += 1
                 if self.recovery_stuck_confirmations >= MINIMAP_CRUISE_RECOVERY_STUCK_CONFIRMATIONS:
                     self._release_attack_key()
-                    self.key_down_func(direction_vk)
-                    self.recovery_held_vk = direction_vk
-        self.recovery_last_x = character_x
+                    if self._press_key(direction_vk):
+                        self.recovery_held_vk = direction_vk
         self.current_direction = direction
         self.settings.minimap_cruise_last_direction = direction
         self.status = MINIMAP_CRUISE_STATUS_RECOVERING
@@ -905,9 +1084,7 @@ class MinimapCruiseRuntime:
     def _cancel_recovery(self) -> None:
         held_vk = self.recovery_held_vk
         if held_vk:
-            try:
-                self.key_up_func(held_vk)
-            finally:
+            if self._release_key(held_vk):
                 self.recovery_held_vk = 0
         self.recovery_boundary = None
         self.recovery_last_x = None
@@ -973,7 +1150,8 @@ class MinimapCruiseRuntime:
         direction_vk = RIGHT_DIRECTION_VK if next_direction == "right" else LEFT_DIRECTION_VK
         self.turn_direction_vk = direction_vk
         if MINIMAP_CRUISE_TURN_AFTER_ATTACK_RELEASE_DELAY_SECONDS <= 0.0:
-            self.key_down_func(direction_vk)
+            if not self._press_key(direction_vk):
+                return
             self.turn_held_vk = direction_vk
             self.turn_key_down_at = None
             self.turn_key_up_at = now + MINIMAP_CRUISE_TURN_KEY_HOLD_SECONDS
@@ -1008,7 +1186,8 @@ class MinimapCruiseRuntime:
             and self.turn_key_down_at is not None
             and now >= self.turn_key_down_at
         ):
-            self.key_down_func(self.turn_direction_vk)
+            if not self._press_key(self.turn_direction_vk):
+                return
             self.turn_held_vk = self.turn_direction_vk
             self.turn_key_down_at = None
             self.turn_key_up_at = now + MINIMAP_CRUISE_TURN_KEY_HOLD_SECONDS
@@ -1035,9 +1214,7 @@ class MinimapCruiseRuntime:
         held_vk = self.turn_held_vk
         if not held_vk:
             return
-        try:
-            self.key_up_func(held_vk)
-        finally:
+        if self._release_key(held_vk):
             self.turn_held_vk = 0
             self.turn_key_up_at = None
 
@@ -1270,13 +1447,15 @@ def detect_lie_detector_bomb(
     mask: np.ndarray | None = None,
     threshold: float = MINIMAP_CRUISE_LIE_DETECTOR_MATCH_THRESHOLD,
 ) -> bool:
+    global _LIE_DETECTOR_BOMB_SCALED_TEMPLATES
     if image is None:
         return False
     array = np.asarray(image)
     if array.ndim != 3 or array.shape[0] <= 0 or array.shape[1] <= 0 or array.shape[2] < 3:
         return False
 
-    if template is None:
+    use_cached_scales = template is None
+    if use_cached_scales:
         loaded = load_lie_detector_bomb_template()
         if loaded is None:
             return False
@@ -1290,15 +1469,24 @@ def detect_lie_detector_bomb(
     if base_mask is not None and (base_mask.ndim != 2 or base_mask.shape[:2] != base_template.shape[:2]):
         base_mask = None
 
-    for scale in (0.85, 0.90, 0.95, 1.0, 1.05, 1.10, 1.15):
-        scaled_template = base_template
-        scaled_mask = base_mask
-        if abs(scale - 1.0) > 1e-9:
-            width = max(1, round(base_template.shape[1] * scale))
-            height = max(1, round(base_template.shape[0] * scale))
-            scaled_template = cv2.resize(base_template, (width, height), interpolation=cv2.INTER_AREA)
-            if base_mask is not None:
-                scaled_mask = cv2.resize(base_mask, (width, height), interpolation=cv2.INTER_NEAREST)
+    scaled_templates = _LIE_DETECTOR_BOMB_SCALED_TEMPLATES if use_cached_scales else None
+    if scaled_templates is None:
+        built: list[tuple[np.ndarray, np.ndarray | None]] = []
+        for scale in (0.85, 0.90, 0.95, 1.0, 1.05, 1.10, 1.15):
+            scaled_template = base_template
+            scaled_mask = base_mask
+            if abs(scale - 1.0) > 1e-9:
+                width = max(1, round(base_template.shape[1] * scale))
+                height = max(1, round(base_template.shape[0] * scale))
+                scaled_template = cv2.resize(base_template, (width, height), interpolation=cv2.INTER_AREA)
+                if base_mask is not None:
+                    scaled_mask = cv2.resize(base_mask, (width, height), interpolation=cv2.INTER_NEAREST)
+            built.append((scaled_template, scaled_mask))
+        scaled_templates = tuple(built)
+        if use_cached_scales:
+            _LIE_DETECTOR_BOMB_SCALED_TEMPLATES = scaled_templates
+
+    for scaled_template, scaled_mask in scaled_templates:
         if scaled_template.shape[0] > search.shape[0] or scaled_template.shape[1] > search.shape[1]:
             continue
         if scaled_mask is not None and bool(scaled_mask.any()):

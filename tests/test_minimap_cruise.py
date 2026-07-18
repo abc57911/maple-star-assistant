@@ -1,7 +1,9 @@
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
+from maple_star.services import minimap_cruise as minimap_cruise_module
 
 from maple_star.services.minimap_cruise import (
     LEFT_DIRECTION_VK,
@@ -9,6 +11,7 @@ from maple_star.services.minimap_cruise import (
     MINIMAP_CRUISE_DETECT_INTERVAL_SECONDS,
     MINIMAP_CRUISE_FOREGROUND_RESUME_DELAY_SECONDS,
     MINIMAP_CRUISE_LIE_DETECTOR_ALERT_INTERVAL_SECONDS,
+    MINIMAP_CRUISE_PERIODIC_KEY_HOLD_SECONDS,
     MINIMAP_CRUISE_PRE_BOUNDARY_SKILL_HOLD_SECONDS,
     MINIMAP_CRUISE_RED_PLAYER_ALERT_AFTER_SECONDS,
     MINIMAP_CRUISE_RED_PLAYER_ALERT_INTERVAL_SECONDS,
@@ -137,6 +140,20 @@ class MinimapCruiseTests(unittest.TestCase):
         self.assertTrue(detect_lie_detector_bomb(image, template, mask))
         self.assertFalse(detect_lie_detector_bomb(np.zeros_like(image), template, mask))
 
+    def test_default_lie_detector_scaled_templates_are_cached(self):
+        loaded = load_lie_detector_bomb_template()
+        self.assertIsNotNone(loaded)
+        image = np.zeros((320, 512, 4), dtype=np.uint8)
+        minimap_cruise_module._LIE_DETECTOR_BOMB_SCALED_TEMPLATES = None
+
+        with patch.object(cv2, "resize", wraps=cv2.resize) as resize:
+            detect_lie_detector_bomb(image)
+            first_call_count = resize.call_count
+            detect_lie_detector_bomb(image)
+
+        self.assertGreater(first_call_count, 0)
+        self.assertEqual(resize.call_count, first_call_count)
+
     def test_detect_minimap_red_player_dot(self):
         image = np.zeros((80, 120, 4), dtype=np.uint8)
         cv2.circle(image, (50, 35), 4, (0, 0, 230, 255), thickness=-1)
@@ -192,6 +209,73 @@ class MinimapCruiseTests(unittest.TestCase):
         self.assertEqual(events, [])
         self.assertEqual(statuses[-1], "請先設定小地圖邊界")
 
+    def test_toggle_rejects_periodic_key_that_conflicts_with_attack(self):
+        runtime, events, statuses, _alerts = self.make_runtime([])
+        runtime.settings.minimap_cruise_periodic_key_1_enabled = True
+        runtime.settings.minimap_cruise_periodic_key_1 = "C"
+
+        self.assertFalse(runtime.toggle(100.0))
+
+        self.assertEqual(events, [])
+        self.assertIn("衝突", statuses[-1])
+
+    def test_toggle_rejects_boundary_narrower_than_twenty_pixels(self):
+        runtime, events, statuses, _alerts = self.make_runtime([])
+        runtime.settings.minimap_cruise_right_x = 119
+
+        self.assertFalse(runtime.toggle(100.0))
+
+        self.assertEqual(events, [])
+        self.assertIn("20 px", statuses[-1])
+
+    def test_apply_settings_restarts_enabled_runtime_without_old_pending_key(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([])
+        runtime.enabled = True
+        runtime.status = MINIMAP_CRUISE_STATUS_ATTACKING
+        runtime.attack_held_vk = 0x43
+        runtime.periodic_key_pending_taps[1] = (0x56, 101.0, 10.0)
+        candidate = AutoPotionSettings(
+            minimap_cruise_attack_key="A",
+            minimap_cruise_left_x=100,
+            minimap_cruise_right_x=200,
+            minimap_cruise_detect_y=150,
+        )
+
+        self.assertTrue(runtime.apply_settings(candidate, 100.0))
+
+        self.assertIs(runtime.settings, candidate)
+        self.assertTrue(runtime.enabled)
+        self.assertEqual(runtime.periodic_key_pending_taps, {})
+        self.assertEqual(events, [("up", 0x43)])
+
+    def test_target_update_resumes_only_after_old_key_release_succeeds(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([])
+        attempts = 0
+
+        def release(vk: int) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("send failed")
+            events.append(("up", vk))
+
+        runtime.key_up_func = release
+        runtime.enabled = True
+        runtime.status = MINIMAP_CRUISE_STATUS_ATTACKING
+        runtime.attack_held_vk = 0x43
+
+        runtime.prepare_target_window_update(100.0)
+
+        self.assertFalse(runtime.enabled)
+        self.assertTrue(runtime.resume_after_target_update)
+        runtime.update(100.049)
+        self.assertFalse(runtime.enabled)
+        runtime.update(100.05)
+
+        self.assertTrue(runtime.enabled)
+        self.assertFalse(runtime.resume_after_target_update)
+        self.assertEqual(events, [("up", 0x43)])
+
     def test_initial_direction_uses_character_side_and_holds_attack(self):
         runtime, events, _statuses, _alerts = self.make_runtime([120])
 
@@ -239,16 +323,17 @@ class MinimapCruiseTests(unittest.TestCase):
         runtime.update(112.0)
         runtime.update(113.0)
         runtime.update(114.0)
+        runtime.update(114.0 + MINIMAP_CRUISE_PERIODIC_KEY_HOLD_SECONDS)
 
         self.assertEqual(
             events,
             [
                 ("down", 0x43),
-                ("tap", 0x56),
-                ("tap", 0x41),
-                ("tap", 0x42),
-                ("tap", 0x44),
-                ("tap", 0x45),
+                ("down", 0x56), ("up", 0x56),
+                ("down", 0x41), ("up", 0x41),
+                ("down", 0x42), ("up", 0x42),
+                ("down", 0x44), ("up", 0x44),
+                ("down", 0x45), ("up", 0x45),
             ],
         )
 
@@ -265,8 +350,9 @@ class MinimapCruiseTests(unittest.TestCase):
         runtime.can_run_actions = lambda: True
         runtime.update(102.0)
         runtime.update(103.0)
+        runtime.update(103.0 + MINIMAP_CRUISE_PERIODIC_KEY_HOLD_SECONDS)
 
-        self.assertEqual(events, [("tap", 0x56), ("down", 0x43)])
+        self.assertEqual(events, [("down", 0x56), ("down", 0x43), ("up", 0x56)])
         self.assertEqual(runtime.periodic_key_next_at[1], 104.0)
 
     def test_periodic_key_countdown_continues_while_target_is_not_foreground(self):
@@ -297,8 +383,9 @@ class MinimapCruiseTests(unittest.TestCase):
         self.assertEqual(events, [("down", 0x43), ("up", 0x43)])
 
         runtime.update(resume_at)
+        runtime.update(resume_at + MINIMAP_CRUISE_PERIODIC_KEY_HOLD_SECONDS)
 
-        self.assertEqual(events, [("down", 0x43), ("up", 0x43), ("tap", 0x56), ("down", 0x43)])
+        self.assertEqual(events, [("down", 0x43), ("up", 0x43), ("down", 0x56), ("down", 0x43), ("up", 0x56)])
 
     def test_target_must_remain_foreground_for_full_resume_delay(self):
         target_active = True
@@ -345,8 +432,51 @@ class MinimapCruiseTests(unittest.TestCase):
 
         defer_potion = False
         runtime.update(102.0)
+        runtime.update(102.0 + MINIMAP_CRUISE_PERIODIC_KEY_HOLD_SECONDS)
 
-        self.assertEqual(events, [("down", 0x43), ("tap", 0x56)])
+        self.assertEqual(events, [("down", 0x43), ("down", 0x56), ("up", 0x56)])
+
+    def test_release_failure_retries_while_stopped_and_blocks_enable(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([])
+        attempts = 0
+
+        def release(vk: int) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("send failed")
+            events.append(("up", vk))
+
+        runtime.key_up_func = release
+        runtime.enabled = True
+        runtime.status = MINIMAP_CRUISE_STATUS_ATTACKING
+        runtime.attack_held_vk = 0x43
+
+        runtime.stop(now=100.0)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_STOPPED)
+        self.assertEqual(runtime.attack_held_vk, 0x43)
+        self.assertEqual(runtime.pending_release_vks, {0x43})
+        self.assertFalse(runtime.toggle(100.01))
+
+        runtime.update(100.049)
+        self.assertEqual(attempts, 1)
+        runtime.update(100.05)
+
+        self.assertEqual(events, [("up", 0x43)])
+        self.assertEqual(runtime.pending_release_vks, set())
+        self.assertEqual(runtime.attack_held_vk, 0)
+
+    def test_key_down_rechecks_foreground_at_send_boundary(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([])
+        runtime.enabled = True
+        runtime.status = MINIMAP_CRUISE_STATUS_STARTING
+        runtime.is_target_window_active = lambda: False
+
+        self.assertFalse(runtime._hold_attack_key())
+
+        self.assertEqual(events, [])
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_SUSPENDED)
 
     def test_stationary_character_turns_after_configured_delay_without_boundary_hit(self):
         runtime, events, _statuses, _alerts = self.make_runtime([150, 150])
@@ -848,8 +978,8 @@ class MinimapCruiseTests(unittest.TestCase):
             ],
         )
 
-    def test_pre_boundary_skill_turns_right_immediately_if_left_dash_crosses_boundary(self):
-        runtime, events, _statuses, _alerts = self.make_runtime([114, 80])
+    def test_pre_boundary_skill_holds_full_duration_before_turning_after_left_dash(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([114, 80, 80])
         runtime.settings.minimap_cruise_pre_boundary_skill_enabled = True
         runtime.settings.minimap_cruise_pre_boundary_skill_key = "V"
         runtime.settings.minimap_cruise_pre_boundary_distance = 15
@@ -860,6 +990,13 @@ class MinimapCruiseTests(unittest.TestCase):
 
         runtime.update(100.0)
         runtime.update(101.0)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_PRE_BOUNDARY_SKILL)
+        self.assertEqual(runtime.attack_held_vk, 0x43)
+        self.assertEqual(runtime.pre_boundary_skill_held_vk, 0x56)
+        self.assertEqual(events, [("down", 0x56)])
+
+        runtime.update(100.0 + MINIMAP_CRUISE_PRE_BOUNDARY_SKILL_HOLD_SECONDS)
 
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_TURNING)
         self.assertEqual(runtime.current_direction, "right")
@@ -875,7 +1012,7 @@ class MinimapCruiseTests(unittest.TestCase):
             ],
         )
 
-    def test_pre_boundary_skill_falls_back_to_right_turn_when_left_edge_marker_disappears(self):
+    def test_pre_boundary_skill_suspends_when_marker_disappears_at_release(self):
         runtime, events, _statuses, _alerts = self.make_runtime([114, 114, None])
         runtime.settings.minimap_cruise_pre_boundary_skill_enabled = True
         runtime.settings.minimap_cruise_pre_boundary_skill_key = "V"
@@ -889,16 +1026,14 @@ class MinimapCruiseTests(unittest.TestCase):
         runtime.update(101.0)
         runtime.update(100.0 + MINIMAP_CRUISE_PRE_BOUNDARY_SKILL_HOLD_SECONDS)
 
-        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_TURNING)
-        self.assertEqual(runtime.current_direction, "right")
-        self.assertEqual(runtime.turn_held_vk, 0x27)
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_SUSPENDED)
+        self.assertEqual(runtime.turn_held_vk, 0)
         self.assertEqual(
             events,
             [
                 ("down", 0x56),
                 ("up", 0x56),
                 ("up", 0x43),
-                ("down", 0x27),
             ],
         )
 
@@ -1109,6 +1244,23 @@ class MinimapCruiseTests(unittest.TestCase):
         self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_RECOVERING)
         self.assertEqual(runtime.recovery_held_vk, LEFT_DIRECTION_VK)
         self.assertEqual(runtime.attack_held_vk, 0)
+        self.assertEqual(events, [("up", 0x43), ("down", LEFT_DIRECTION_VK)])
+
+    def test_out_of_bounds_recovery_oscillation_does_not_reset_best_progress(self):
+        runtime, events, _statuses, _alerts = self.make_runtime([279, 280, 279])
+        runtime.enabled = True
+        runtime.status = MINIMAP_CRUISE_STATUS_RECOVERING
+        runtime.current_direction = "left"
+        runtime.attack_held_vk = 0x43
+        runtime.recovery_boundary = "right"
+        runtime.recovery_last_x = 280
+
+        runtime.update(100.0)
+        runtime.update(101.0)
+        runtime.update(102.0)
+
+        self.assertEqual(runtime.recovery_last_x, 279)
+        self.assertEqual(runtime.recovery_held_vk, LEFT_DIRECTION_VK)
         self.assertEqual(events, [("up", 0x43), ("down", LEFT_DIRECTION_VK)])
 
     def test_left_out_of_bounds_recovery_releases_attack_and_holds_inward_direction_when_stuck(self):
@@ -1448,6 +1600,18 @@ class MinimapCruiseTests(unittest.TestCase):
 
         self.assertFalse(runtime.red_player_alert_active)
         self.assertEqual(runtime.red_player_present_since, 130.0)
+
+    def test_red_player_timer_resets_when_cruise_is_suspended(self):
+        runtime, _events, _statuses, alerts = self.make_runtime([])
+        runtime.enabled = True
+        runtime.status = MINIMAP_CRUISE_STATUS_ATTACKING
+        runtime.red_player_present_since = 100.0
+        runtime.can_run_actions = lambda: False
+
+        runtime.update(110.0)
+
+        self.assertEqual(runtime.status, MINIMAP_CRUISE_STATUS_SUSPENDED)
+        self.assertIsNone(runtime.red_player_present_since)
         self.assertEqual(alerts, [])
 
     def test_red_player_notice_rearms_after_dot_disappears(self):

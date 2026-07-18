@@ -384,7 +384,7 @@ def _is_target_hwnd_active(hwnd: int) -> bool:
     if hwnd and is_valid_window(hwnd) and not is_window_minimized(hwnd):
         if any(candidate == hwnd for candidate in foreground_handles):
             return True
-    return is_target_window(foreground_hwnd)
+    return False
 
 
 def _run_child_cleanup_step(worker: str, label: str, action: Callable[[], None]) -> None:

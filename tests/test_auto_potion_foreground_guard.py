@@ -2149,7 +2149,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller._process_due_potion_sends.assert_not_called()
         controller._update_experience_efficiency.assert_called_once_with(100.0)
 
-    def test_runtime_target_active_accepts_foreground_msw_window_with_different_hwnd(self):
+    def test_runtime_target_active_rejects_foreground_msw_window_with_different_hwnd(self):
         with (
             patch("maple_star.services.runtime_processes.foreground_window_handle", return_value=2222),
             patch("maple_star.services.runtime_processes.window_ancestor_handles", return_value=(2222,)),
@@ -2157,7 +2157,7 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
             patch("maple_star.services.runtime_processes.is_window_minimized", return_value=False),
             patch("maple_star.services.runtime_processes.is_target_window", return_value=True),
         ):
-            self.assertTrue(_is_target_hwnd_active(1111))
+            self.assertFalse(_is_target_hwnd_active(1111))
 
     def test_runtime_target_active_accepts_foreground_child_of_target_hwnd(self):
         with (
