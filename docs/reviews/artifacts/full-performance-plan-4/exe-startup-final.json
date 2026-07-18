@@ -1,0 +1,23 @@
+{
+  "mode": "exe",
+  "marker": "main_ready",
+  "samples_seconds": [
+    0.5508011999772862,
+    0.6152795999951195,
+    0.5485310999793
+  ],
+  "median_seconds": 0.5508011999772862,
+  "environment": {
+    "commit": "566c8b42d0df039b704ed45979f7dc0a8eadfbfd",
+    "mode": "exe",
+    "python": "3.14.3",
+    "executable": "C:\\Python314\\python.exe",
+    "cpu": "Intel64 Family 6 Model 183 Stepping 1, GenuineIntel",
+    "logical_cores": 24,
+    "ram_bytes": 34039758848,
+    "windows_build": "Windows-11-10.0.26200-SP0",
+    "system_dpi": 96,
+    "power_plan": "91202427-e9a0-4927-bcfa-300faca65952 (Bitsum Highest Performance)",
+    "cache_condition": "cold-process/warm-os-cache"
+  }
+}

@@ -99,7 +99,7 @@ class GamepadMacroTests(unittest.TestCase):
             rb_macro,
         )
 
-    def test_sync_runtime_settings_before_controller_events_applies_gui_before_binding_sync(self):
+    def test_sync_runtime_settings_before_controller_events_uses_signal_committed_settings(self):
         events: list[str] = []
         settings = SimpleNamespace(rb_enabled=False)
 
@@ -120,9 +120,9 @@ class GamepadMacroTests(unittest.TestCase):
                 sync_controller_button_bindings,
             )
         )
-        self.assertEqual(events, ["gui", "sync:True"])
+        self.assertEqual(events, ["sync:False"])
 
-    def test_sync_runtime_settings_before_controller_events_skips_binding_sync_when_gui_not_ready(self):
+    def test_sync_runtime_settings_before_controller_events_does_not_pump_gui(self):
         events: list[str] = []
 
         class Gui:
@@ -135,13 +135,13 @@ class GamepadMacroTests(unittest.TestCase):
         def sync_controller_button_bindings() -> None:
             events.append("sync")
 
-        self.assertFalse(
+        self.assertTrue(
             sync_runtime_settings_before_controller_events(
                 auto_potion,  # type: ignore[arg-type]
                 sync_controller_button_bindings,
             )
         )
-        self.assertEqual(events, ["gui"])
+        self.assertEqual(events, ["sync"])
 
     def test_repeating_jump_interval_reports_runtime_effective_floor(self):
         slot = {

@@ -38,7 +38,7 @@ python tools/verify.py ocr-slow
 - 編譯檢查 `main.py`、`main.pyw`、`maple_gamepad_macro.py`、`auto_potion.py` 與 `maple_star` package。
 - 以 `main.pyw` 作為 PyInstaller GUI 入口，產出無 console 視窗的主程式。
 - 使用 `--windowed --onedir --name MapleStar`。
-- 保留 CustomTkinter 資源與 PaddleOCR / Paddle / PaddleX hidden import；不要恢復無界 `collect-all`。
+- 保留 PySide6 Qt platform plugin 與 PaddleOCR / Paddle / PaddleX hidden import；排除 `tkinter` / `_tkinter`，不要恢復無界 `collect-all`。
 - 只具名加入 Paddle runtime 必要的 `mklml.dll` 與 PaddleX `OCR.yaml`。
 - 排除未使用的 `Crypto`、`hf_xet`，並在壓縮前移除 OpenCV videoio FFmpeg DLL；本專案不支援 PDF、影音檔或替代 model hoster 的行為不得由此推論。
 - 保留 PaddleX `ocr-core` 需要的 metadata：`imagesize`、`opencv-contrib-python`、`pyclipper`、`pypdfium2`、`python-bidi`、`shapely`。

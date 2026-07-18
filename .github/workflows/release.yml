@@ -30,8 +30,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -r requirements.txt
-          python -m pip install pyinstaller
+          python -m pip install -r requirements-release-lock.txt
 
       - name: Run tests
         run: |
@@ -59,6 +58,13 @@ jobs:
               if ($entries -notcontains $required) {
                 throw "Release package is missing required file: $required"
               }
+            }
+
+            if (-not ($entries | Where-Object { $_ -like "*qwindows.dll" })) {
+              throw "Release package is missing qwindows.dll"
+            }
+            if ($entries | Where-Object { $_ -match '(^|/)(tcl|tk|_tkinter)' }) {
+              throw "Release package unexpectedly contains Tcl/Tk runtime"
             }
 
             foreach ($forbidden in @("settings.json", "MapleStar.spec")) {

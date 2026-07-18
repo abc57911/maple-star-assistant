@@ -10,6 +10,9 @@
 - [runtime-compatibility.md](runtime-compatibility.md)：GUI、遊戲視窗、DPI、HP/MP/EXP ROI、loading/fade 與前景切換注意事項。
 - [verification.md](verification.md)：精準測試原則、跨子系統、發行前與 PaddleOCR 專項驗證命令。
 - [release.md](release.md)：本機打包、GitHub Releases、ZIP 驗證與失敗處理流程。
+- [2026-07-18 全 App 效能 Baseline](reviews/2026-07-18-full-performance-baseline.md)：重構前同機效能與環境證據。
+- [Settings v2 Mapping Review](reviews/2026-07-18-settings-v2-mapping.md)：global/profile/extension mapping 與 migration 邊界。
+- [2026-07-18 全 App 最大效能 Final Review](reviews/2026-07-18-full-performance-final.md)：Qt、supervisor、guardian、效能與 release gates。
 - [緊湊 GUI 版面設計](superpowers/specs/2026-07-17-compact-gui-layout-design.md)：五頁字型、靠左分頁與內容驅動版面規格。
 - [全專案 Code Review 與減肥設計](superpowers/specs/2026-07-17-project-slimming-design.md)：開發工具移除、發行包減肥、巨型模組拆分與分批驗證規格。
 - [自動巡航安全性、業務判斷與效能強化](superpowers/specs/2026-07-18-minimap-cruise-hardening-design.md)：巡航輸入安全、按鍵 ownership、邊界技能兩秒契約、回界判斷與辨識節流規格。

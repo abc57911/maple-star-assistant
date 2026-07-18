@@ -78,13 +78,25 @@ python tools\verify.py performance
 
 - 冷啟動 GUI 三次並輸出中位數；若要驗證 30% 改善，可另用 `python tools\benchmark_gui_startup.py --baseline-seconds <舊版秒數>`。
 - 量測五頁切換的可見回應；gate 為 p95 ≤150ms。第一次進入頁面會先呈現載入狀態，再於 event loop 空檔完成 lazy build。
-- 啟動 production control runtime process，使用 fake capture 與 no-op input sink 同時跑手把巨集、小地圖判讀、週期鍵、正式 command/status queue 與 10ms benchmark deadline；預設只跑 10 秒，不會對 Windows 送鍵。gate 為 lateness p95 ≤10ms、最大值 ≤25ms。
+- 啟動 production control runtime process，使用 fake capture 與 no-op input sink 同時跑手把巨集、小地圖判讀、週期鍵、正式 command/status queue 與 10ms benchmark deadline；預設只跑 10 秒，不會對 Windows 送鍵。gate 為 lateness p95 ≤10ms、p99 ≤5ms、最大值 ≤25ms。
 
 短時間開發 smoke 可執行：
 
 ```powershell
 python tools\benchmark_control_timing.py --duration 5
 ```
+
+完整架構重構另有以下明確 gate：
+
+```powershell
+python tools\verify_child_role_artifact.py
+python tools\verify_qt_gui_smoke.py
+python tools\verify_qt_gui_smoke.py --all-scales
+python tools\benchmark_runtime_pipeline.py --duration 600
+python tools\run_full_performance_soak.py --duration 3600
+```
+
+soak 同時限制 scheduler lateness 與 child RSS growth；不得用縮短 duration 的結果取代 60 分鐘 gate。
 
 打包後的 EXE 冷啟動使用安全 ready-marker 模式，不會啟動 control/potion runtime。執行前先關閉既有 maple-star，並分別帶入舊版與新版 EXE 的中位數：
 

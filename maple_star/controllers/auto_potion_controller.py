@@ -11,7 +11,7 @@ import winsound
 from concurrent.futures import ProcessPoolExecutor
 from ctypes import wintypes
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import cv2
 import mss
@@ -110,6 +110,7 @@ from ..services.runtime_api import (
     InlineExecutor,
     PotionControl,
     PotionStatus,
+    PotionWorkerProgress,
     RuntimeProcessFactory,
     RuntimeProcessPort,
     WorkerCrashed,
@@ -154,9 +155,11 @@ from ..services.bar_detection import (
     should_continue_continuous_drink,
     should_drink_for_threshold,
 )
-from ..views.settings_gui import AutoPotionSettingsGui, GuiConsoleWriter
 from ..models.settings import AutoPotionSettings
 from ..services.settings_store import load_settings, save_settings
+
+if TYPE_CHECKING:
+    from ..views_qt.settings_gui import AutoPotionSettingsGui
 from ..adapters.win_input import (
     PhysicalMouseActivityObserver,
     Point,
@@ -237,6 +240,7 @@ POTION_EXPERIENCE_DEFER_SECONDS = 1.0
 POTION_BLOCKED_SOUND_INTERVAL_SECONDS = 3.0
 POTION_CHECK_SOUND_INTERVAL_SECONDS = 10.0
 RUNTIME_POTION_STATUS_TIMEOUT_SECONDS = 2.0
+RUNTIME_POTION_PROGRESS_TIMEOUT_SECONDS = 30.0
 DIRECT_BAR_FAILURE_WARNING_ATTEMPTS = 3
 
 
@@ -457,7 +461,11 @@ class AutoPotionController:
         self.is_target_window_active = is_target_window_active
         self.target_window_provider = target_window_provider
         self.settings = settings or load_settings()
-        self.gui = gui if gui is not None else AutoPotionSettingsGui(self.settings)
+        if gui is None:
+            from ..views_qt.settings_gui import AutoPotionSettingsGui
+
+            gui = AutoPotionSettingsGui(self.settings)
+        self.gui = gui
         self.gui.set_bar_preview_provider(self.capture_bar_preview_images)
         self.gui.set_experience_reset_handler(self.reset_experience_statistics)
         self.screen_capture_service = ScreenCaptureService(lambda: mss.mss())
@@ -586,6 +594,8 @@ class AutoPotionController:
         self.runtime_potion_crash_reported = False
         self.runtime_experience_crash_reported = False
         self.last_runtime_potion_status_at = -999.0
+        self.last_runtime_potion_progress_observed_at = -999.0
+        self.runtime_potion_progress_token = None
         self.last_runtime_experience_alert_status = ""
         self.last_applied_potion_status_signature: tuple[object, ...] | None = None
         self.last_applied_experience_status_signature: tuple[object, ...] | None = None
@@ -600,6 +610,8 @@ class AutoPotionController:
             self._start_runtime_processes()
 
     def install_console_redirect(self) -> None:
+        from ..views_qt.settings_gui import GuiConsoleWriter
+
         if isinstance(sys.stdout, GuiConsoleWriter):
             return
         self.original_stdout = sys.stdout
@@ -715,6 +727,8 @@ class AutoPotionController:
         self.runtime_settings_snapshot = None
         self.runtime_control_state = None
         self.last_runtime_potion_status_at = time.monotonic()
+        self.last_runtime_potion_progress_observed_at = self.last_runtime_potion_status_at
+        self.runtime_potion_progress_token = None
 
     def _send_runtime_settings_if_needed(self) -> None:
         runtime = getattr(self, "runtime_processes", None)
@@ -752,6 +766,8 @@ class AutoPotionController:
         if previous_state is None or state[:3] != previous_state[:3]:
             self.runtime_potion_generation = int(getattr(self, "runtime_potion_generation", 0)) + 1
             self.last_runtime_potion_status_at = time.monotonic()
+            self.last_runtime_potion_progress_observed_at = self.last_runtime_potion_status_at
+            self.runtime_potion_progress_token = None
         if previous_state is None or (state[1], state[3]) != (previous_state[1], previous_state[3]):
             self.runtime_experience_generation = int(getattr(self, "runtime_experience_generation", 0)) + 1
         self.runtime_control_state = state
@@ -816,6 +832,13 @@ class AutoPotionController:
             if isinstance(item, PotionStatus):
                 if self._runtime_potion_status_is_current(item):
                     latest_potion_status = item
+            elif isinstance(item, PotionWorkerProgress):
+                if int(item.generation) == int(getattr(self, "runtime_potion_generation", 0)):
+                    received_at = time.monotonic()
+                    self.last_runtime_potion_status_at = received_at
+                    if item.progress_at != getattr(self, "runtime_potion_progress_token", None):
+                        self.runtime_potion_progress_token = item.progress_at
+                        self.last_runtime_potion_progress_observed_at = received_at
             elif isinstance(item, WorkerCrashed):
                 self._apply_worker_crash(item)
         if latest_potion_status is not None:
@@ -880,6 +903,7 @@ class AutoPotionController:
     def _apply_potion_status(self, status: PotionStatus) -> None:
         now = time.monotonic()
         self.last_runtime_potion_status_at = now
+        self.last_runtime_potion_progress_observed_at = now
         signature = _potion_status_signature(status)
         if (
             signature == getattr(self, "last_applied_potion_status_signature", None)
@@ -978,6 +1002,14 @@ class AutoPotionController:
         elif crash.worker == "experience":
             self.runtime_experience_crash_reported = True
             self.gui.set_status(f"EXP process 已停止：{crash.message}")
+        elif crash.worker == "guardian":
+            self.runtime_guardian_crash_reported = True
+            self.scripts_enabled = False
+            self.auto_drink_enabled = False
+            self.emergency_stop_requested = True
+            self._sync_gui_auto_drink_enabled()
+            self.gui.set_status(f"輸入 guardian 已停止：{crash.message}")
+            self.gui.show_toggle_notice("輸入 guardian 已停止，所有功能已暫停")
 
     def _report_runtime_worker_failures(self) -> None:
         runtime = getattr(self, "runtime_processes", None)
@@ -987,6 +1019,13 @@ class AutoPotionController:
             self._apply_worker_crash(WorkerCrashed("potion", "process exited"))
         if not runtime.experience_alive() and not getattr(self, "runtime_experience_crash_reported", False):
             self._apply_worker_crash(WorkerCrashed("experience", "process exited"))
+        guardian_alive = getattr(runtime, "guardian_alive", None)
+        if (
+            callable(guardian_alive)
+            and not guardian_alive()
+            and not getattr(self, "runtime_guardian_crash_reported", False)
+        ):
+            self._apply_worker_crash(WorkerCrashed("guardian", "process exited"))
 
     def _recover_stale_runtime_potion_process(self, now: float) -> None:
         if not self._runtime_processes_active():
@@ -1000,7 +1039,17 @@ class AutoPotionController:
         if last_status_at < 0:
             self.last_runtime_potion_status_at = now
             return
-        if now - last_status_at + POTION_TIME_EPSILON_SECONDS < RUNTIME_POTION_STATUS_TIMEOUT_SECONDS:
+        heartbeat_stale = (
+            now - last_status_at + POTION_TIME_EPSILON_SECONDS
+            >= RUNTIME_POTION_STATUS_TIMEOUT_SECONDS
+        )
+        progress_observed_at = getattr(self, "last_runtime_potion_progress_observed_at", -999.0)
+        progress_stale = (
+            progress_observed_at < 0
+            or now - progress_observed_at + POTION_TIME_EPSILON_SECONDS
+            >= RUNTIME_POTION_PROGRESS_TIMEOUT_SECONDS
+        )
+        if not heartbeat_stale or not progress_stale:
             return
 
         runtime = getattr(self, "runtime_processes", None)
@@ -1021,6 +1070,8 @@ class AutoPotionController:
         self.runtime_control_state = None
         self.gameplay_hud_active = False
         self.last_runtime_potion_status_at = now
+        self.last_runtime_potion_progress_observed_at = now
+        self.runtime_potion_progress_token = None
         self.gui.set_status("喝水 process 無回報，已自動重啟")
         self.gui.show_toggle_notice("喝水 process 已重啟")
         self._send_runtime_settings_if_needed()
@@ -1783,6 +1834,10 @@ class AutoPotionController:
     def emergency_stop(self) -> None:
         now = time.monotonic()
         if not self.scripts_enabled:
+            runtime = getattr(self, "runtime_processes", None)
+            rearm = getattr(runtime, "rearm_input", None)
+            if callable(rearm):
+                rearm()
             self.scripts_enabled = True
             self.auto_drink_enabled = True
             self._sync_gui_auto_drink_enabled()
@@ -1806,6 +1861,9 @@ class AutoPotionController:
         if self._runtime_processes_active():
             runtime = getattr(self, "runtime_processes", None)
             if runtime is not None:
+                safety_fence = getattr(runtime, "safety_fence", None)
+                if callable(safety_fence):
+                    safety_fence()
                 self.runtime_potion_generation = int(getattr(self, "runtime_potion_generation", 0)) + 1
                 self.runtime_experience_generation = int(getattr(self, "runtime_experience_generation", 0)) + 1
                 runtime.send_potion_control(
@@ -1958,7 +2016,7 @@ class AutoPotionController:
     def update(self, now: float, *, pump_gui: bool = True) -> None:
         self._drain_potion_engine_command_results(now)
         self.poll_control_hotkeys()
-        gui_ready = self.gui.pump() if pump_gui else self.gui.sync_after_event_processing()
+        gui_ready = self.gui.exists()
         if not gui_ready:
             self._release_all_potion_keys()
             if not self.gui.closed:

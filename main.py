@@ -37,8 +37,7 @@ _single_instance_mutex: wintypes.HANDLE | None = None
 _single_instance_lock_file: object | None = None
 
 try:
-    # Per-monitor v2 awareness can native-crash Tk/CustomTkinter when SDL
-    # controller polling is active and the window enters the Win32 move loop.
+    # Establish DPI awareness before QApplication and SDL initialize.
     ctypes.windll.user32.SetProcessDPIAware()
 except Exception:
     pass
@@ -113,10 +112,10 @@ def main() -> int:
         show_already_running_message()
         return 0
 
-    from maple_star.controllers.gamepad_controller import main as run_all_features
+    from maple_star.app.launcher import run_application
 
     try:
-        run_all_features()
+        run_application()
     except KeyboardInterrupt:
         print("\n已停止。")
         return 0

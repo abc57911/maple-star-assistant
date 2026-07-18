@@ -51,14 +51,14 @@ REQUIRED_EXPORTS = {
         )
     },
     "maple_star.gui": {
-        "AutoPotionSettingsGui": "maple_star.views.settings_gui",
-        "GuiConsoleWriter": "maple_star.views.settings_gui",
+        "AutoPotionSettingsGui": "maple_star.views_qt.settings_gui",
+        "GuiConsoleWriter": "maple_star.views_qt.settings_gui",
     },
     "auto_potion": {
         "AutoPotionController": "maple_star.controllers.auto_potion_controller",
         "AutoPotionSettings": "maple_star.models.settings",
-        "AutoPotionSettingsGui": "maple_star.views.settings_gui",
-        "GuiConsoleWriter": "maple_star.views.settings_gui",
+        "AutoPotionSettingsGui": "maple_star.views_qt.settings_gui",
+        "GuiConsoleWriter": "maple_star.views_qt.settings_gui",
         "SETTINGS_PATH": "maple_star.models.settings",
         "app_base_dir": "maple_star.models.settings",
         "event_to_hotkey": "maple_star.adapters.key_capture",
@@ -237,6 +237,7 @@ PATCH_POINTS = {
         "set_cursor_position",
         "sleep_while_pumping_messages",
         "temporary_mouse_input_lock",
+        "time.monotonic",
         "user32.ClientToScreen",
         "user32.GetClientRect",
         "user32.GetForegroundWindow",

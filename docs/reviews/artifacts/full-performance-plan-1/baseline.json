@@ -1,0 +1,9 @@
+{
+  "commit": "566c8b42d0df039b704ed45979f7dc0a8eadfbfd",
+  "legacy_python_startup_median_seconds": 0.5134484,
+  "legacy_page_visible_p95_ms": 15.1709,
+  "legacy_page_usable_p95_ms": 497.3137,
+  "control_deadline_p95_ms": 0.0516,
+  "control_deadline_max_ms": 0.1105,
+  "power_plan": "Bitsum Highest Performance"
+}

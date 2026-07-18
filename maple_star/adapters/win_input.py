@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from contextlib import contextmanager
 from ctypes import wintypes
-from typing import Callable
+from typing import Callable, Protocol
 
 from ..constants import (
     INPUT_KEYBOARD,
@@ -31,6 +31,7 @@ MOUSE_ACTIVITY_BUTTON_VKS = (0x01, 0x02, 0x04, 0x05, 0x06)
 MOUSE_ACTIVITY_ASYNC_DOWN_MASK = 0x8000
 _PROGRAMMATIC_MOUSE_IGNORE_UNTIL = 0.0
 _PROGRAMMATIC_MOUSE_LOCK = threading.Lock()
+_MUTATION_PROXY = None
 
 GWL_EXSTYLE = -20
 WS_EX_TOPMOST = 0x00000008
@@ -400,7 +401,7 @@ def mouse_input(flags: int) -> Input:
     )
 
 
-def release_mouse_buttons() -> None:
+def _native_release_mouse_buttons() -> None:
     events = (Input * 2)(
         mouse_input(MOUSEEVENTF_LEFTUP),
         mouse_input(MOUSEEVENTF_RIGHTUP),
@@ -411,21 +412,47 @@ def release_mouse_buttons() -> None:
     mark_programmatic_mouse_input()
 
 
-def key_down(vk_code: int) -> None:
+class InputMutationProxy(Protocol):
+    def key_down(self, vk_code: int) -> None: ...
+
+    def key_up(self, vk_code: int) -> None: ...
+
+    def tap_key(self, vk_code: int) -> None: ...
+
+    def set_cursor_position(self, x: int, y: int) -> None: ...
+
+    def left_click(self) -> None: ...
+
+    def release_mouse_buttons(self) -> None: ...
+
+
+def configure_input_mutation_proxy(proxy: InputMutationProxy | None) -> None:
+    global _MUTATION_PROXY
+    _MUTATION_PROXY = proxy
+
+
+def release_mouse_buttons() -> None:
+    if _MUTATION_PROXY is not None:
+        _MUTATION_PROXY.release_mouse_buttons()
+        return
+    _native_release_mouse_buttons()
+
+
+def _native_key_down(vk_code: int) -> None:
     event = keyboard_input(vk_code)
     sent = user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(Input))
     if sent != 1:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def key_up(vk_code: int) -> None:
+def _native_key_up(vk_code: int) -> None:
     event = keyboard_input(vk_code, KEYEVENTF_KEYUP)
     sent = user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(Input))
     if sent != 1:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def tap_key(vk_code: int) -> None:
+def _native_tap_key(vk_code: int) -> None:
     events = (Input * 2)(
         keyboard_input(vk_code),
         keyboard_input(vk_code, KEYEVENTF_KEYUP),
@@ -435,6 +462,27 @@ def tap_key(vk_code: int) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+def key_down(vk_code: int) -> None:
+    if _MUTATION_PROXY is not None:
+        _MUTATION_PROXY.key_down(vk_code)
+        return
+    _native_key_down(vk_code)
+
+
+def key_up(vk_code: int) -> None:
+    if _MUTATION_PROXY is not None:
+        _MUTATION_PROXY.key_up(vk_code)
+        return
+    _native_key_up(vk_code)
+
+
+def tap_key(vk_code: int) -> None:
+    if _MUTATION_PROXY is not None:
+        _MUTATION_PROXY.tap_key(vk_code)
+        return
+    _native_tap_key(vk_code)
+
+
 def get_cursor_position() -> tuple[int, int]:
     point = Point()
     if not user32.GetCursorPos(ctypes.byref(point)):
@@ -442,10 +490,17 @@ def get_cursor_position() -> tuple[int, int]:
     return int(point.x), int(point.y)
 
 
-def set_cursor_position(x: int, y: int) -> None:
+def _native_set_cursor_position(x: int, y: int) -> None:
     if not user32.SetCursorPos(int(x), int(y)):
         raise ctypes.WinError(ctypes.get_last_error())
     mark_programmatic_mouse_input()
+
+
+def set_cursor_position(x: int, y: int) -> None:
+    if _MUTATION_PROXY is not None:
+        _MUTATION_PROXY.set_cursor_position(x, y)
+        return
+    _native_set_cursor_position(x, y)
 
 
 def mark_programmatic_mouse_input() -> None:
@@ -637,16 +692,24 @@ def click_screen_point(x: int, y: int, *, preserve_cursor_position: bool = True)
         original_position = get_cursor_position()
     try:
         set_cursor_position(x, y)
-        events = (Input * 2)(
-            mouse_input(MOUSEEVENTF_LEFTDOWN),
-            mouse_input(MOUSEEVENTF_LEFTUP),
-        )
-        sent = user32.SendInput(2, events, ctypes.sizeof(Input))
-        if sent != 2:
-            raise ctypes.WinError(ctypes.get_last_error())
+        if _MUTATION_PROXY is not None:
+            _MUTATION_PROXY.left_click()
+        else:
+            _native_left_click()
     finally:
         if original_position is not None:
             set_cursor_position(*original_position)
+
+
+def _native_left_click() -> None:
+    events = (Input * 2)(
+        mouse_input(MOUSEEVENTF_LEFTDOWN),
+        mouse_input(MOUSEEVENTF_LEFTUP),
+    )
+    sent = user32.SendInput(2, events, ctypes.sizeof(Input))
+    if sent != 2:
+        raise ctypes.WinError(ctypes.get_last_error())
+    mark_programmatic_mouse_input()
 
 
 def click_client_point(

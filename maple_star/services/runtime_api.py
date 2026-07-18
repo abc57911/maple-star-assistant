@@ -66,6 +66,14 @@ class PotionStatus:
 
 
 @dataclass(frozen=True)
+class PotionWorkerProgress:
+    generation: int
+    heartbeat_at: float
+    progress_at: float
+    phase: str
+
+
+@dataclass(frozen=True)
 class ControlCommand:
     scripts_enabled: bool
     gameplay_hud_active: bool
@@ -93,6 +101,7 @@ class ControlStatus:
     console_lines: tuple[str, ...] = ()
     timing_sample_count: int = 0
     timing_p95_lateness_ms: float = 0.0
+    timing_p99_lateness_ms: float = 0.0
     timing_max_lateness_ms: float = 0.0
     held_vks: tuple[int, ...] = ()
 
@@ -141,6 +150,10 @@ class RuntimeProcessPort(Protocol):
 
     def request_control_release(self, command: ControlCommand) -> None: ...
 
+    def safety_fence(self) -> int: ...
+
+    def rearm_input(self) -> int: ...
+
     def drain_potion_statuses(self, limit: int = 64) -> list[object]: ...
 
     def drain_experience_statuses(self, limit: int = 64) -> list[object]: ...
@@ -152,6 +165,8 @@ class RuntimeProcessPort(Protocol):
     def experience_alive(self) -> bool: ...
 
     def control_alive(self) -> bool: ...
+
+    def guardian_alive(self) -> bool: ...
 
     def restart_potion(
         self,
@@ -258,6 +273,7 @@ def control_status_signature(status: ControlStatus) -> tuple[object, ...]:
         status.last_action,
         int(status.timing_sample_count),
         round(float(status.timing_p95_lateness_ms), 3),
+        round(float(status.timing_p99_lateness_ms), 3),
         round(float(status.timing_max_lateness_ms), 3),
     )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import queue
 import time
 from dataclasses import fields
@@ -12,6 +13,9 @@ from ..adapters.window_target import is_target_window
 from ..constants import DEFAULT_CAPTURE_INTERVAL_SECONDS
 from ..models.experience import ExperienceSnapshot
 from ..models.settings import AutoPotionSettings
+from ..backend.windows_job import WorkerJob
+from ..ipc.identity import WorkerRole
+from ..ipc.messages import RearmCommand, SafetyFenceCommand
 from .runtime_api import (
     ControlCommand,
     ControlStatus,
@@ -20,6 +24,7 @@ from .runtime_api import (
     InlineExecutor,
     PotionControl,
     PotionStatus,
+    PotionWorkerProgress,
     SettingsUpdated,
     Shutdown,
     TargetWindowUpdated,
@@ -128,10 +133,17 @@ class RuntimeProcessCoordinator:
         *,
         potion_worker_target: Callable[..., None],
         experience_worker_target: Callable[..., None],
+        guardian_worker_target: Callable[..., None] | None = None,
+        guarded_control_target: Callable[..., None] | None = None,
+        worker_job: WorkerJob | None = None,
     ) -> None:
         self._ctx = mp.get_context("spawn")
         self._potion_worker_target = potion_worker_target
         self._experience_worker_target = experience_worker_target
+        self._guardian_worker_target = guardian_worker_target
+        self._guarded_control_target = guarded_control_target
+        self._worker_job = worker_job
+        self._guardian_commands = self._ctx.Queue(maxsize=512) if guardian_worker_target is not None else None
         self._potion_commands = self._ctx.Queue()
         self._potion_statuses = self._ctx.Queue()
         self._experience_commands = self._ctx.Queue()
@@ -139,14 +151,33 @@ class RuntimeProcessCoordinator:
         self._control_commands = self._ctx.Queue(maxsize=CONTROL_QUEUE_MAXSIZE)
         self._control_statuses = self._ctx.Queue(maxsize=CONTROL_QUEUE_MAXSIZE)
         self._control_release_event = self._ctx.Event()
+        self._input_generation = self._ctx.Value("L", 0, lock=True)
         self._settings_payload = settings.to_json_dict()
         self._target_hwnd = int(target_hwnd or 0)
         self._potion_process = self._new_potion_process()
+        experience_args = (
+            self._experience_commands,
+            self._experience_statuses,
+            self._settings_payload,
+            self._target_hwnd,
+        )
+        if self._guardian_commands is not None:
+            experience_args += (self._guardian_commands, self._input_generation)
         self._experience_process = self._ctx.Process(
             target=self._experience_worker_target,
-            args=(self._experience_commands, self._experience_statuses, self._settings_payload, self._target_hwnd),
+            args=experience_args,
             name="MapleStarExperienceStats",
-            daemon=True,
+            daemon=False,
+        )
+        self._guardian_process = (
+            self._ctx.Process(
+                target=guardian_worker_target,
+                args=(self._guardian_commands, self._potion_statuses, self._target_hwnd, os.getpid()),
+                name="MapleStarInputGuardian",
+                daemon=False,
+            )
+            if guardian_worker_target is not None
+            else None
         )
         self._started = False
         self._stopped = False
@@ -156,11 +187,14 @@ class RuntimeProcessCoordinator:
         self._pending_control_target: TargetWindowUpdated | None = None
 
     def _new_potion_process(self) -> mp.Process:
+        args = (self._potion_commands, self._potion_statuses, self._settings_payload, self._target_hwnd)
+        if self._guardian_commands is not None:
+            args += (self._guardian_commands, self._input_generation)
         return self._ctx.Process(
             target=self._potion_worker_target,
-            args=(self._potion_commands, self._potion_statuses, self._settings_payload, self._target_hwnd),
+            args=args,
             name="MapleStarPotionRuntime",
-            daemon=True,
+            daemon=False,
         )
 
     def start(self) -> None:
@@ -170,8 +204,18 @@ class RuntimeProcessCoordinator:
             raise RuntimeError("runtime processes already stopped")
         self._started = True
         try:
+            if getattr(self, "_guardian_process", None) is not None:
+                self._guardian_process.start()
+                from ..adapters.win_input import configure_input_mutation_proxy
+                from .guardian_proxy import QueueInputMutationProxy
+
+                configure_input_mutation_proxy(
+                    QueueInputMutationProxy(self._guardian_commands, shared_generation=self._input_generation)
+                )
             self._potion_process.start()
+            self._assign_worker_job(WorkerRole.POTION, self._potion_process)
             self._experience_process.start()
+            self._assign_worker_job(WorkerRole.EXPERIENCE, self._experience_process)
         except BaseException:
             self.stop()
             raise
@@ -179,20 +223,48 @@ class RuntimeProcessCoordinator:
     def start_control(self, worker_target, *worker_args: object) -> None:
         if self._control_process is not None:
             return
-        self._control_process = self._ctx.Process(
-            target=worker_target,
-            args=(
+        worker_args = (
                 self._control_commands,
                 self._control_statuses,
                 self._settings_payload,
                 self._target_hwnd,
                 self._control_release_event,
                 *worker_args,
-            ),
+        )
+        target = worker_target
+        if self._guarded_control_target is not None and self._guardian_commands is not None:
+            target = self._guarded_control_target
+            worker_args = (worker_target, self._guardian_commands, self._input_generation, *worker_args)
+        self._control_process = self._ctx.Process(
+            target=target,
+            args=worker_args,
             name="MapleStarControlRuntime",
-            daemon=True,
+            daemon=False,
         )
         self._control_process.start()
+        self._assign_worker_job(WorkerRole.SCHEDULER, self._control_process)
+
+    def _assign_worker_job(self, role: WorkerRole, process: mp.Process) -> None:
+        worker_job = getattr(self, "_worker_job", None)
+        if worker_job is None or process.pid is None:
+            return
+        worker_job.add(role, process.pid)
+
+    def safety_fence(self) -> int:
+        if self._guardian_commands is None:
+            return 0
+        with self._input_generation.get_lock():
+            self._input_generation.value += 1
+            generation = int(self._input_generation.value)
+        self._guardian_commands.put(SafetyFenceCommand(generation))
+        return generation
+
+    def rearm_input(self) -> int:
+        if self._guardian_commands is None:
+            return 0
+        generation = int(self._input_generation.value)
+        self._guardian_commands.put(RearmCommand(generation))
+        return generation
 
     def send_settings(self, settings: AutoPotionSettings) -> None:
         self._settings_payload = settings.to_json_dict()
@@ -206,6 +278,8 @@ class RuntimeProcessCoordinator:
     def send_target_window(self, hwnd: int) -> None:
         self._target_hwnd = int(hwnd or 0)
         command = TargetWindowUpdated(self._target_hwnd)
+        if self._guardian_commands is not None:
+            self._guardian_commands.put(command)
         self._potion_commands.put(command)
         self._experience_commands.put(command)
         if self._control_process is not None:
@@ -281,6 +355,10 @@ class RuntimeProcessCoordinator:
     def control_alive(self) -> bool:
         return self._control_process is not None and self._control_process.is_alive()
 
+    def guardian_alive(self) -> bool:
+        process = getattr(self, "_guardian_process", None)
+        return process is None or process.is_alive()
+
     def restart_potion(self, settings: AutoPotionSettings, target_hwnd: int = 0, timeout: float = 1.0) -> None:
         self._settings_payload = settings.to_json_dict()
         self._target_hwnd = int(target_hwnd or 0)
@@ -294,6 +372,7 @@ class RuntimeProcessCoordinator:
         self._potion_statuses = self._ctx.Queue()
         self._potion_process = self._new_potion_process()
         self._potion_process.start()
+        self._assign_worker_job(WorkerRole.POTION, self._potion_process)
 
     def stop(self, timeout: float = 1.0) -> None:
         if getattr(self, "_stopped", False):
@@ -327,6 +406,20 @@ class RuntimeProcessCoordinator:
             processes.append(self._control_process)
         for process in processes:
             _stop_owned_process(process, timeout)
+        if getattr(self, "_worker_job", None) is not None:
+            _run_coordinator_cleanup_step("close worker job", self._worker_job.close)
+        if (
+            getattr(self, "_guardian_process", None) is not None
+            and getattr(self, "_guardian_commands", None) is not None
+        ):
+            _run_coordinator_cleanup_step(
+                "shutdown input guardian",
+                lambda: self._guardian_commands.put(Shutdown()),
+            )
+            _stop_owned_process(self._guardian_process, timeout)
+            from ..adapters.win_input import configure_input_mutation_proxy
+
+            configure_input_mutation_proxy(None)
 
 
 def _run_coordinator_cleanup_step(label: str, action: Callable[[], object]) -> None:

@@ -49,6 +49,7 @@ from maple_star.controllers.auto_potion_controller import (
     POTION_BLOCKED_SOUND_INTERVAL_SECONDS,
     POTION_CHECK_SOUND_INTERVAL_SECONDS,
     RUNTIME_POTION_STATUS_TIMEOUT_SECONDS,
+    RUNTIME_POTION_PROGRESS_TIMEOUT_SECONDS,
 )
 from maple_star.experience import (
     ExperienceEfficiencyTracker,
@@ -75,6 +76,7 @@ from maple_star.services.runtime_processes import (
     HeadlessRuntimeGui,
     PotionControl,
     PotionStatus,
+    PotionWorkerProgress,
     WorkerCrashed,
     _experience_status_signature,
     _handle_potion_command,
@@ -2645,6 +2647,67 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
 
         self.assertEqual(runtime.potion_restarts, [])
         self.assertEqual(controller.last_runtime_potion_status_at, 100.0)
+
+    def test_runtime_potion_heartbeat_prevents_false_restart_during_long_progress(self):
+        controller = self.make_controller([True])
+        runtime = self.FakeRuntime()
+        controller.runtime_processes_enabled = True
+        controller.runtime_processes = runtime
+        controller.runtime_control_state = (True, True, False, False)
+        controller.runtime_potion_generation = 5
+        controller.last_runtime_potion_status_at = 100.0
+        controller.last_runtime_potion_progress_observed_at = 100.0
+        runtime.potion_statuses.append(PotionWorkerProgress(5, 102.5, 100.0, "update"))
+
+        with patch("maple_star.controllers.auto_potion_controller.time.monotonic", return_value=102.5):
+            controller._drain_runtime_statuses()
+        controller._recover_stale_runtime_potion_process(102.5)
+
+        self.assertEqual(runtime.potion_restarts, [])
+        self.assertEqual(controller.last_runtime_potion_status_at, 102.5)
+
+    def test_runtime_potion_recent_progress_prevents_restart_when_heartbeat_is_delayed(self):
+        controller = self.make_controller([True])
+        runtime = self.FakeRuntime()
+        controller.runtime_processes_enabled = True
+        controller.runtime_processes = runtime
+        controller.runtime_control_state = (True, True, False, False)
+        controller.runtime_potion_generation = 5
+        controller.last_runtime_potion_status_at = 100.0
+        controller.last_runtime_potion_progress_observed_at = 101.5
+
+        controller._recover_stale_runtime_potion_process(102.5)
+
+        self.assertEqual(runtime.potion_restarts, [])
+
+    def test_runtime_potion_recent_heartbeat_prevents_restart_when_progress_is_delayed(self):
+        controller = self.make_controller([True])
+        runtime = self.FakeRuntime()
+        controller.runtime_processes_enabled = True
+        controller.runtime_processes = runtime
+        controller.runtime_control_state = (True, True, False, False)
+        controller.runtime_potion_generation = 5
+        controller.last_runtime_potion_status_at = 129.0
+        controller.last_runtime_potion_progress_observed_at = 100.0
+
+        controller._recover_stale_runtime_potion_process(130.0)
+
+        self.assertEqual(runtime.potion_restarts, [])
+
+    def test_runtime_potion_progress_deadline_still_restarts_true_stall(self):
+        controller = self.make_controller([True])
+        runtime = self.FakeRuntime()
+        controller.runtime_processes_enabled = True
+        controller.runtime_processes = runtime
+        controller.target_window_provider = Mock(return_value=2468)
+        controller.runtime_control_state = (True, True, False, False)
+        controller.runtime_potion_generation = 5
+        controller.last_runtime_potion_status_at = 100.0
+        controller.last_runtime_potion_progress_observed_at = 100.0
+
+        controller._recover_stale_runtime_potion_process(100.0 + RUNTIME_POTION_PROGRESS_TIMEOUT_SECONDS)
+
+        self.assertEqual(runtime.potion_restarts, [(controller.settings.snapshot(), 2468)])
 
     def test_gameplay_hud_gate_clears_stale_bar_regions_on_fresh_failure(self):
         controller = self.make_controller([])

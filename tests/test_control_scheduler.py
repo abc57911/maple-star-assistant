@@ -28,13 +28,14 @@ class ControlSchedulerTests(unittest.TestCase):
         self.assertAlmostEqual(next_absolute_deadline(10.0, 0.2, 10.05), 10.2)
         self.assertAlmostEqual(next_absolute_deadline(10.0, 0.2, 10.65), 10.8)
 
-    def test_timing_snapshot_reports_p95_and_max(self) -> None:
+    def test_timing_snapshot_reports_p95_p99_and_max(self) -> None:
         recorder = DeadlineTimingRecorder(max_samples=100)
         for lateness_ms in range(1, 101):
             recorder.record(10.0, 10.0 + lateness_ms / 1000.0)
         snapshot = recorder.snapshot()
         self.assertEqual(snapshot.sample_count, 100)
         self.assertAlmostEqual(snapshot.p95_lateness_ms, 95.0)
+        self.assertAlmostEqual(snapshot.p99_lateness_ms, 99.0)
         self.assertAlmostEqual(snapshot.max_lateness_ms, 100.0)
 
     def test_wait_reserves_fine_window(self) -> None:

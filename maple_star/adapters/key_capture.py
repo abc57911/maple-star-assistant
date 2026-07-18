@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import tkinter as tk
+from typing import Protocol
 
 from ..constants import ASYNC_KEY_DOWN_MASK
 from .win_input import user32
@@ -78,7 +78,13 @@ for index in range(1, 25):
     VK_DISPLAY_NAMES[0x70 + index - 1] = f"F{index}"
 
 DETECTABLE_KEY_VKS = tuple(VK_DISPLAY_NAMES)
-def event_to_hotkey(event: tk.Event) -> str | None:
+
+
+class KeyEvent(Protocol):
+    keysym: object
+
+
+def event_to_hotkey(event: KeyEvent) -> str | None:
     keysym = str(event.keysym)
     if keysym in MODIFIER_KEYSYMS:
         return None
