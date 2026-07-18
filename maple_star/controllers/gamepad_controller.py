@@ -32,6 +32,7 @@ from ..models.settings import (
     COMBO_SCRIPT_REPEATING_JUMP_SKILL,
     COMBO_SCRIPT_SINGLE_JUMP_SKILL,
     COMBO_SLOT_IDS,
+    load_settings,
 )
 from ..services.gamepad_bindings import (
     ControllerButtonBinding,
@@ -1375,9 +1376,14 @@ def _run_main(cleanup_actions: dict[str, Callable[[], None]]) -> None:
 
             poll_control_hotkeys_safely()
             window_interaction_active = auto_potion.gui.is_window_interaction_active()
-            if not window_interaction_active:
-                if not sync_runtime_settings_before_controller_events(auto_potion, lambda: None):
-                    return
+            if window_interaction_active:
+                if auto_potion.consume_emergency_stop_requested():
+                    stop_all_bindings(
+                        f"{auto_potion.settings.emergency_stop_hotkey}：停止所有手把巨集並釋放按鍵"
+                    )
+                return
+            if not sync_runtime_settings_before_controller_events(auto_potion, lambda: None):
+                return
             key_capture_actions_blocked = auto_potion.is_key_capture_blocking_actions()
             if key_capture_actions_blocked and not key_capture_actions_were_blocked:
                 stop_all_bindings("快捷鍵設定中，停止所有手把巨集並釋放按鍵")

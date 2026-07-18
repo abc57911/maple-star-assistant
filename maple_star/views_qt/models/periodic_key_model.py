@@ -50,6 +50,8 @@ class PeriodicKeyTableModel(QAbstractTableModel):
         value = (row.enabled, row.key, row.interval_seconds)[index.column()]
         if index.column() == 0 and role == Qt.ItemDataRole.CheckStateRole:
             return Qt.CheckState.Checked if value else Qt.CheckState.Unchecked
+        if index.column() == 0 and role == Qt.ItemDataRole.EditRole:
+            return bool(value)
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole) and index.column() != 0:
             return value
         return None
@@ -59,8 +61,12 @@ class PeriodicKeyTableModel(QAbstractTableModel):
             return False
         row = self.rows[index.row()]
         prefix = f"minimap_cruise_periodic_key_{index.row() + 1}"
-        if index.column() == 0 and role == Qt.ItemDataRole.CheckStateRole:
-            row.enabled = value == Qt.CheckState.Checked.value
+        if index.column() == 0 and role in (Qt.ItemDataRole.EditRole, Qt.ItemDataRole.CheckStateRole):
+            row.enabled = (
+                value == Qt.CheckState.Checked.value
+                if role == Qt.ItemDataRole.CheckStateRole
+                else bool(value)
+            )
             name, changed = f"{prefix}_enabled", row.enabled
         elif index.column() == 1 and role == Qt.ItemDataRole.EditRole:
             row.key = str(value).strip()
@@ -80,7 +86,9 @@ class PeriodicKeyTableModel(QAbstractTableModel):
 
     def flags(self, index: QModelIndex):
         flags = super().flags(index) | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        return flags | (Qt.ItemFlag.ItemIsUserCheckable if index.column() == 0 else Qt.ItemFlag.ItemIsEditable)
+        return flags | Qt.ItemFlag.ItemIsEditable | (
+            Qt.ItemFlag.ItemIsUserCheckable if index.column() == 0 else Qt.ItemFlag.NoItemFlags
+        )
 
     def headerData(self, section: int, orientation, role=Qt.ItemDataRole.DisplayRole):
         if role != Qt.ItemDataRole.DisplayRole:

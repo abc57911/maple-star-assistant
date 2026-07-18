@@ -928,7 +928,16 @@ class AutoPotionController:
             status.mp_track_region,
         )
         if status.gameplay_hud_active and status.hp_region is not None and status.mp_region is not None:
-            self.gui.refresh_bar_preview_once()
+            preview_regions = (
+                status.hp_region,
+                status.mp_region,
+                status.hp_track_region,
+                status.mp_track_region,
+            )
+            if preview_regions != getattr(self, "_last_auto_bar_preview_regions", None):
+                accepted = self.gui.refresh_bar_preview_once()
+                if accepted is not False:
+                    self._last_auto_bar_preview_regions = preview_regions
         if status.status:
             self.gui.set_status(status.status)
         if status.notice:

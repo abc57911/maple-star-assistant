@@ -2225,6 +2225,37 @@ class AutoPotionForegroundGuardTests(unittest.TestCase):
         controller.gui.refresh_bar_preview_once.assert_called_once()
         print_mock.assert_not_called()
 
+    def test_runtime_percent_changes_do_not_recapture_unchanged_preview_regions(self):
+        controller = self.make_controller([True])
+        runtime = self.FakeRuntime()
+        controller.runtime_processes_enabled = True
+        controller.runtime_processes = runtime
+
+        for percent in (25.0, 24.0):
+            runtime.potion_statuses.append(
+                PotionStatus(
+                    hp_percent=percent,
+                    mp_percent=80.0,
+                    hp_debug=f"HP {percent}",
+                    mp_debug="MP 80",
+                    status="自動喝水監控中",
+                    action="",
+                    notice="",
+                    trigger_interval_ms=None,
+                    console_lines=(),
+                    gameplay_hud_active=True,
+                    scripts_enabled=True,
+                    auto_drink_enabled=True,
+                    hp_region=(10, 20, 30, 12),
+                    mp_region=(40, 50, 30, 12),
+                    hp_track_region=(11, 21, 28, 10),
+                    mp_track_region=(41, 51, 28, 10),
+                )
+            )
+            controller._drain_runtime_statuses()
+
+        controller.gui.refresh_bar_preview_once.assert_called_once()
+
     def test_runtime_potion_status_replays_worker_media_sounds(self):
         controller = self.make_controller([True])
         runtime = self.FakeRuntime()

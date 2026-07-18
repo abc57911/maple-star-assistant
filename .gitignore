@@ -15,4 +15,6 @@ experience_debug.log.*
 telegram_reply.log
 telegram_reply.log.*
 settings.json
+settings.json.pre-restore.*.bak.json
+settings.restore.lock
 /secrets/

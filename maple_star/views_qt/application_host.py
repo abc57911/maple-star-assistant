@@ -7,6 +7,9 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QWidget
 
 
+WINDOW_INTERACTION_TICK_SECONDS = 0.05
+
+
 class QtApplicationHost:
     """Owns the Qt tick timer and guarantees a single shutdown transition."""
 
@@ -59,8 +62,15 @@ class QtApplicationHost:
         self._schedule()
 
     def _schedule(self) -> None:
-        delay_ms = max(0, round((self._next_deadline - time.monotonic()) * 1000.0))
+        delay_ms = self._schedule_delay_ms()
         self._timer.start(delay_ms)
 
+    def _schedule_delay_ms(self) -> int:
+        delay_ms = max(0, round((self._next_deadline - time.monotonic()) * 1000.0))
+        interaction_active = getattr(self.window, "is_window_interaction_active", None)
+        if callable(interaction_active) and interaction_active():
+            delay_ms = max(delay_ms, round(WINDOW_INTERACTION_TICK_SECONDS * 1000.0))
+        return delay_ms
 
-__all__ = ["QtApplicationHost"]
+
+__all__ = ["QtApplicationHost", "WINDOW_INTERACTION_TICK_SECONDS"]

@@ -2,41 +2,32 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtWidgets import QCheckBox, QFormLayout, QLabel, QLineEdit, QPlainTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QPlainTextEdit, QWidget
 
-from ..bindings import SettingsBinding, bind_widget
+from ..bindings import SettingsBinding
+from ..components import SettingsCard, create_page_shell
 
 
-DIAGNOSTIC_FIELDS = (
-    "console_collapsed", "combo_group_collapsed", "minimap_cruise_group_collapsed",
-    "compact_experience_mode", "window_topmost", "full_panel_window_x",
-    "full_panel_window_y", "compact_experience_window_x", "compact_experience_window_y",
-)
+DIAGNOSTIC_FIELDS: tuple[str, ...] = ()
 
 
 class DiagnosticsPage(QWidget):
     def __init__(self, settings: object | None = None, *, on_change: Callable[[str, object], None] | None = None) -> None:
         super().__init__()
         self.bindings: dict[str, SettingsBinding] = {}
-        layout = QVBoxLayout(self)
-        title = QLabel("診斷")
-        title.setObjectName("title")
-        layout.addWidget(title)
-        self.metrics = QLabel("PID / incarnation / heartbeat / progress / queue：--")
-        layout.addWidget(self.metrics)
-        form = QFormLayout()
-        for field in DIAGNOSTIC_FIELDS:
-            value = getattr(settings, field, False if field.endswith(("collapsed", "mode", "topmost")) else "")
-            widget = QCheckBox() if isinstance(value, bool) else QLineEdit()
-            binding = bind_widget(widget, lambda changed, name=field: on_change and on_change(name, changed))
-            binding.sync(value)
-            self.bindings[field] = binding
-            form.addRow(field, widget)
-        layout.addLayout(form)
+        self.settings_grid = create_page_shell(self, "診斷")
+
+        health_card = self.settings_grid.add_card(SettingsCard("背景程序健康狀態"))
+        self.metrics = QLabel("PID／執行代次／心跳／進度／佇列：--")
+        self.metrics.setWordWrap(True)
+        health_card.add_widget(self.metrics)
+
+        console_card = self.settings_grid.add_card(SettingsCard("診斷紀錄", "顯示後端原始診斷資訊。", wide=True), full_width=True)
         self.console = QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setMaximumBlockCount(1000)
-        layout.addWidget(self.console, 1)
+        self.console.setMinimumHeight(260)
+        console_card.add_widget(self.console, stretch=1)
 
     def append_console_batch(self, lines: list[str]) -> None:
         if lines:

@@ -19,6 +19,7 @@
 - [自動巡航安全性、業務判斷與效能強化實作計畫](superpowers/plans/2026-07-18-minimap-cruise-hardening-plan.md)：依前景狀態機、按鍵生命週期、設定交易與辨識快取分批實作。
 - [PySide6 GUI 重設計](superpowers/specs/2026-07-18-pyside6-gui-redesign-design.md)：Qt 原生事件迴圈、五頁重新設計、toolkit-neutral contract、分階段遷移與效能驗收規格。
 - [全 App 最大效能架構重構](superpowers/specs/2026-07-18-full-app-performance-architecture-design.md)：PySide6-only GUI、backend supervisor、Input guardian、Realtime scheduler、領域 worker、typed IPC、preview transport 與效能／壓力驗收規格；取代舊 PySide6 規格的 legacy fallback 決策。
+- [Qt GUI 繁中化、雙欄排版與設定恢復](superpowers/specs/2026-07-18-qt-gui-localization-layout-settings-restoration-design.md)：六頁繁中欄位、自適應雙欄卡片、switch 語意與改版前設定恢復規格。
 - [全 App 最大效能計畫 1](superpowers/plans/2026-07-18-full-performance-plan-1-foundation.md)：baseline、公開 API、settings v2 mapping、IPC identity、preview transport 與 Windows/PyInstaller 可行性。
 - [全 App 最大效能計畫 2](superpowers/plans/2026-07-18-full-performance-plan-2-supervisor.md)：backend supervisor、health、設定 transaction、parent-death、Worker Job 與 legacy adapter。
 - [全 App 最大效能計畫 3](superpowers/plans/2026-07-18-full-performance-plan-3-runtime-workers.md)：Input guardian、Realtime scheduler、potion intent、EXP OCR、notification/media 與混合負載 cutover。

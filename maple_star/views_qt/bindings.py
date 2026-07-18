@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QSignalBlocker, Signal
 from PySide6.QtGui import QKeyEvent, QKeySequence
-from PySide6.QtWidgets import QCheckBox, QDoubleSpinBox, QLineEdit, QSpinBox, QWidget
+from PySide6.QtWidgets import QAbstractButton, QComboBox, QDoubleSpinBox, QLineEdit, QSpinBox, QWidget
 
 
 class HotkeyEdit(QLineEdit):
@@ -49,7 +49,7 @@ class SettingsBinding:
 
 
 def bind_widget(widget: QWidget, on_user_change: Callable[[object], None]) -> SettingsBinding:
-    if isinstance(widget, QCheckBox):
+    if isinstance(widget, QAbstractButton) and widget.isCheckable():
         return SettingsBinding(
             widget,
             read=widget.isChecked,
@@ -71,6 +71,14 @@ def bind_widget(widget: QWidget, on_user_change: Callable[[object], None]) -> Se
             read=widget.value,
             write=lambda value: widget.setValue(float(value)),
             changed_signal=widget.valueChanged,
+            on_user_change=on_user_change,
+        )
+    if isinstance(widget, QComboBox):
+        return SettingsBinding(
+            widget,
+            read=widget.currentData,
+            write=lambda value: widget.setCurrentIndex(max(0, widget.findData(value))),
+            changed_signal=widget.currentIndexChanged,
             on_user_change=on_user_change,
         )
     if isinstance(widget, QLineEdit):

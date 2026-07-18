@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import ctypes
+import sys
 from collections.abc import Callable
+from ctypes import wintypes
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -15,11 +18,15 @@ from PySide6.QtWidgets import (
 )
 
 from .theme import APP_STYLESHEET
-from .pages import ComboPage, CruisePage, DashboardPage, DiagnosticsPage, PotionPage
+from .pages import ComboPage, CruisePage, DashboardPage, DiagnosticsPage, ExperiencePage, PotionPage
+
+
+WM_ENTERSIZEMOVE = 0x0231
+WM_EXITSIZEMOVE = 0x0232
 
 
 class MainWindow(QMainWindow):
-    page_names = ("監控", "自動喝水", "小地圖巡航", "手把組合", "診斷")
+    page_names = ("監控", "自動喝水", "小地圖巡航", "手把組合", "經驗計算", "診斷")
 
     def __init__(
         self,
@@ -32,6 +39,7 @@ class MainWindow(QMainWindow):
         self.closed = False
         self._shutdown = shutdown
         self._shutdown_started = False
+        self._window_interaction_active = False
         self._navigation: list[QPushButton] = []
         self.setWindowTitle("楓星助手")
         self.resize(1080, 720)
@@ -72,6 +80,7 @@ class MainWindow(QMainWindow):
                 ),
                 on_field_change=settings_changed,
             ),
+            ExperiencePage(settings, on_change=settings_changed),
             DiagnosticsPage(settings, on_change=settings_changed),
         )
         self.pages = dict(zip(self.page_names, page_widgets, strict=True))
@@ -106,7 +115,29 @@ class MainWindow(QMainWindow):
         if self.status_label.text() != message:
             self.status_label.setText(message)
 
+    def _set_window_interaction_active(self, active: bool) -> None:
+        self._window_interaction_active = bool(active)
+
+    def is_window_interaction_active(self) -> bool:
+        return bool(self._window_interaction_active)
+
+    def _handle_native_message(self, message_id: int) -> None:
+        if message_id == WM_ENTERSIZEMOVE:
+            self._set_window_interaction_active(True)
+        elif message_id == WM_EXITSIZEMOVE:
+            self._set_window_interaction_active(False)
+
+    def nativeEvent(self, event_type, message):
+        if sys.platform == "win32":
+            try:
+                message_id = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents.message
+                self._handle_native_message(message_id)
+            except (TypeError, ValueError, OSError):
+                pass
+        return super().nativeEvent(event_type, message)
+
     def closeEvent(self, event) -> None:
+        self._set_window_interaction_active(False)
         if not self._shutdown_started:
             self._shutdown_started = True
             if self._shutdown is not None:

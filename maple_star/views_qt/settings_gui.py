@@ -21,11 +21,13 @@ from maple_star.models.settings import (
 
 from .main_window import MainWindow
 from .bindings import HotkeyEdit
+from .labels import runtime_value
 from .jobs import CallableJob
 from .notices import ToggleNotice
 from .models.console_model import BoundedConsoleBuffer
 from .pages.dashboard import DashboardPage
 from .pages.diagnostics import DiagnosticsPage
+from .pages.experience import ExperiencePage
 
 
 class GuiConsoleWriter:
@@ -68,11 +70,12 @@ class AutoPotionSettingsGui(MainWindow):
         self._preview_job_active = False
         self._preview_job: CallableJob | None = None
         self._toggle_notice: ToggleNotice | None = None
+        self._latest_bar_detection_debug: tuple[str, str] = ("", "")
         self._console_buffer = BoundedConsoleBuffer(capacity=1000)
         super().__init__(settings, settings_changed=self._setting_changed)
-        self.dashboard.global_toggle.toggled.connect(self._request_auto_drink_toggle)
+        self.dashboard.auto_drink_toggle.toggled.connect(self._request_auto_drink_toggle)
         self.dashboard.pickup_toggle.toggled.connect(self._request_pickup_toggle)
-        self.dashboard.reset_experience.clicked.connect(self.reset_experience_statistics)
+        self.experience.reset_experience.clicked.connect(self.reset_experience_statistics)
         self.pages["自動喝水"].refresh_preview.clicked.connect(
             lambda: self._refresh_bar_preview(make_target_topmost=True)
         )
@@ -92,6 +95,10 @@ class AutoPotionSettingsGui(MainWindow):
     @property
     def diagnostics(self) -> DiagnosticsPage:
         return self.pages["診斷"]
+
+    @property
+    def experience(self) -> ExperiencePage:
+        return self.pages["經驗計算"]
 
     def _setting_changed(self, name: str, value: object) -> None:
         if name in {
@@ -144,20 +151,18 @@ class AutoPotionSettingsGui(MainWindow):
             self.set_pickup_enabled(not enabled)
 
     def set_auto_drink_enabled(self, enabled: bool) -> None:
-        blocker = QSignalBlocker(self.dashboard.global_toggle)
-        self.dashboard.global_toggle.setChecked(bool(enabled))
-        self.dashboard.global_toggle.setText("停用自動喝水" if enabled else "啟用自動喝水")
+        blocker = QSignalBlocker(self.dashboard.auto_drink_toggle)
+        self.dashboard.auto_drink_toggle.setChecked(bool(enabled))
         del blocker
 
     def set_pickup_enabled(self, enabled: bool) -> None:
         blocker = QSignalBlocker(self.dashboard.pickup_toggle)
         self.dashboard.pickup_toggle.setChecked(bool(enabled))
-        self.dashboard.pickup_toggle.setText("停用自動撿取" if enabled else "啟用自動撿取")
         del blocker
 
     def reset_experience_statistics(self) -> None:
         if self._experience_reset_handler is None or self._experience_reset_handler() is not False:
-            self.dashboard.apply_snapshot({"experience": "已重置"})
+            self.experience.apply_snapshot({"experience": "已重置"})
 
     def set_bar_preview_provider(self, provider: Callable[[bool], dict[str, dict[str, object]]]) -> None:
         self._bar_preview_provider = provider
@@ -172,14 +177,15 @@ class AutoPotionSettingsGui(MainWindow):
         self.dashboard.apply_snapshot({"hp_mp": f"{hp} / {mp}"})
 
     def set_bar_detection_debug(self, hp_debug: str, mp_debug: str) -> None:
-        self.pages["自動喝水"].preview_status.setText(f"HP {hp_debug} | MP {mp_debug}")
+        self._latest_bar_detection_debug = (str(hp_debug), str(mp_debug))
 
     def set_experience_snapshot(self, snapshot) -> None:
         status = getattr(snapshot, "status", "--")
-        self.dashboard.apply_snapshot({"experience": status})
+        self.experience.apply_snapshot({"experience": status})
 
     def set_exp_efficiency_enabled(self, enabled: bool) -> None:
         self.settings.exp_efficiency_enabled = bool(enabled)
+        self.experience.bindings["exp_efficiency_enabled"].sync(bool(enabled))
 
     def set_runtime_info(
         self,
@@ -191,16 +197,18 @@ class AutoPotionSettingsGui(MainWindow):
         held_keys: str,
         last_action: str,
     ) -> None:
+        translated_macro_status = runtime_value(macro_status)
+        translated_held_keys = runtime_value(held_keys)
         self.dashboard.apply_snapshot(
             {
-                "target": f"{'active' if target_active else 'inactive'} | {foreground_title}",
-                "workers": f"scripts={scripts_enabled} | macro={macro_status} | held={held_keys}",
+                "target": f"{'作用中' if target_active else '未作用'}｜{foreground_title}",
+                "workers": f"自動化={'啟用' if scripts_enabled else '停用'}｜組合={translated_macro_status}｜按住={translated_held_keys}",
                 "last_action": last_action,
             }
         )
         self.diagnostics.metrics.setText(
-            f"target={'active' if target_active else 'inactive'} | scripts={scripts_enabled} | "
-            f"macro={macro_status} | held={held_keys}"
+            f"目標={'作用中' if target_active else '未作用'}｜自動化={'啟用' if scripts_enabled else '停用'}｜"
+            f"組合={translated_macro_status}｜按住={translated_held_keys}"
         )
 
     def set_backend_diagnostics(self, text: str) -> None:
@@ -219,24 +227,25 @@ class AutoPotionSettingsGui(MainWindow):
     def _flush_console(self) -> None:
         self.diagnostics.append_console_batch(self._console_buffer.drain())
 
-    def refresh_bar_preview_once(self) -> None:
-        self._refresh_bar_preview(make_target_topmost=False)
+    def refresh_bar_preview_once(self) -> bool:
+        return self._refresh_bar_preview(make_target_topmost=False)
 
-    def _refresh_bar_preview(self, *, make_target_topmost: bool) -> None:
+    def _refresh_bar_preview(self, *, make_target_topmost: bool) -> bool:
         provider = getattr(self, "_bar_preview_provider", None) or getattr(self, "bar_preview_provider", None)
         if provider is None:
-            return
+            return False
         if not hasattr(self, "_preview_job_active"):
             self._apply_bar_preview_result(provider(make_target_topmost))
-            return
+            return True
         if self._preview_job_active:
-            return
+            return False
         self._preview_job_active = True
         job = CallableJob(lambda: provider(make_target_topmost))
         self._preview_job = job
         job.signals.succeeded.connect(self._apply_bar_preview_result)
         job.signals.failed.connect(self._bar_preview_failed)
         QThreadPool.globalInstance().start(job)
+        return True
 
     def _bar_preview_failed(self, message: str) -> None:
         self._preview_job_active = False
@@ -272,7 +281,8 @@ class AutoPotionSettingsGui(MainWindow):
         self.bar_preview_images = next_images
         self.bar_preview_has_snapshot = True
         self.pages["自動喝水"].preview_status.setText(
-            " | ".join(f"{name}: {'ok' if payload else '--'}" for name, payload in snapshots.items()) or "尚無 HUD preview"
+            "｜".join(f"{name.upper()}：{'正常' if payload else '--'}" for name, payload in snapshots.items())
+            or "尚無 HP／MP 預覽"
         )
 
     def is_detecting_key(self) -> bool:
@@ -302,9 +312,6 @@ class AutoPotionSettingsGui(MainWindow):
         if self._key_detection_release_vks & pressed_detectable_vks():
             return True
         self._key_detection_release_vks.clear()
-        return False
-
-    def is_window_interaction_active(self) -> bool:
         return False
 
     def pump(self) -> bool:

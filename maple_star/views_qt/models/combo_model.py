@@ -4,6 +4,8 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 
+from ..labels import COMBO_COLUMN_LABELS, display_value
+
 
 class ComboTableModel(QAbstractTableModel):
     columns = (
@@ -37,7 +39,8 @@ class ComboTableModel(QAbstractTableModel):
             return None
         name = self._names[index.row()]
         column = self.columns[index.column()]
-        return name if column == "slot" else self._slots[name].get(column, "")
+        value = name if column == "slot" else self._slots[name].get(column, "")
+        return display_value(column, value) if role == Qt.ItemDataRole.DisplayRole else value
 
     def setData(self, index: QModelIndex, value, role=Qt.ItemDataRole.EditRole) -> bool:
         if not index.isValid() or role != Qt.ItemDataRole.EditRole or index.column() == 0:
@@ -56,7 +59,7 @@ class ComboTableModel(QAbstractTableModel):
     def headerData(self, section: int, orientation, role=Qt.ItemDataRole.DisplayRole):
         if role != Qt.ItemDataRole.DisplayRole:
             return None
-        return self.columns[section] if orientation == Qt.Orientation.Horizontal else str(section + 1)
+        return COMBO_COLUMN_LABELS[self.columns[section]] if orientation == Qt.Orientation.Horizontal else str(section + 1)
 
     def to_dict(self) -> dict[str, dict[str, object]]:
         return {name: dict(payload) for name, payload in self._slots.items()}
