@@ -13,6 +13,7 @@
 - [緊湊 GUI 版面設計](superpowers/specs/2026-07-17-compact-gui-layout-design.md)：五頁字型、靠左分頁與內容驅動版面規格。
 - [全專案 Code Review 與減肥設計](superpowers/specs/2026-07-17-project-slimming-design.md)：開發工具移除、發行包減肥、巨型模組拆分與分批驗證規格。
 - [自動巡航安全性、業務判斷與效能強化](superpowers/specs/2026-07-18-minimap-cruise-hardening-design.md)：巡航輸入安全、按鍵 ownership、邊界技能兩秒契約、回界判斷與辨識節流規格。
+- [PySide6 GUI 重設計](superpowers/specs/2026-07-18-pyside6-gui-redesign-design.md)：Qt 原生事件迴圈、五頁重新設計、toolkit-neutral contract、分階段遷移與效能驗收規格。
 - [Stage 3 OCR 與 GUI 拆分設計](superpowers/specs/2026-07-17-stage-3-ocr-gui-decomposition-design.md)：實際 public API manifest、OCR 責任拆分、GUI page builder 與逐批 rollback 規格。
 - [Stage 3 OCR 與 GUI 拆分實作計畫](superpowers/plans/2026-07-17-stage-3-ocr-gui-decomposition-plan.md)：依 facade、OCR leaf/service 與 GUI page builder 分成十批執行與驗證。
 - [Stage 4 AutoPotionController 拆分設計](superpowers/specs/2026-07-17-stage-4-auto-potion-controller-decomposition-design.md)：runtime composition、media、hotkey、HUD、potion 與 EXP capture 的責任、ownership、相容與分批 rollback 規格。
