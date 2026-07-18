@@ -122,9 +122,6 @@ def build_monitor_page(parent: ctk.CTkFrame, context: MonitorPageContext) -> Mon
     widgets.label(runtime_frame, textvariable=context.runtime_status_message, color=WARNING_YELLOW).grid(
         row=0, column=2, sticky="w", padx=(0, 12), pady=8
     )
-    console_restore_button = widgets.button(runtime_frame, "Console ›", context.toggle_console, width=92)
-    console_restore_button.grid(row=0, column=3, sticky="e", padx=(0, 10), pady=8)
-    console_restore_button.grid_remove()
     return MonitorPageRefs(
         monitor_frame,
         exp_section,
@@ -133,7 +130,6 @@ def build_monitor_page(parent: ctk.CTkFrame, context: MonitorPageContext) -> Mon
         relayout,
         panel_mode_button,
         topmost_button,
-        console_restore_button,
         (detection_section, runtime_frame),
     )
 

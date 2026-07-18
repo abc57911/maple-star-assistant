@@ -3,6 +3,8 @@ from __future__ import annotations
 import ctypes
 import io
 import json
+import math
+import re
 import sys
 import time
 import tkinter as tk
@@ -68,6 +70,7 @@ from ..services.minimap_cruise import (
 from ..adapters.win_input import Point, parse_vk_key, user32
 from .gui_theme import *  # noqa: F401,F403
 from .gui_presentation import GuiPresentationMixin
+from .adaptive_scroll import AdaptiveScrollHost
 from .pages.console_page import build_console_page, build_console_text
 from .pages.combo_page import FlowLayout, build_combo_page
 from .pages.contracts import (
@@ -94,6 +97,19 @@ from .pages.potion_page import build_potion_page
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
+
+_ROOT_GEOMETRY_SIZE_PATTERN = re.compile(r"^(\d+)x(\d+)")
+_MONITOR_DEFAULT_TO_NEAREST = 2
+_WORK_AREA_EDGE_MARGIN_PHYSICAL_PIXELS = 12
+
+
+class _MonitorInfo(ctypes.Structure):
+    _fields_ = (
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+    )
 
 class GuiConsoleWriter:
     def __init__(self, gui: AutoPotionSettingsGui, original: object | None = None) -> None:
@@ -123,6 +139,14 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
         self.settings = settings
         self.closed = False
         self.root = ctk.CTk(fg_color=APP_BG)
+        self.auto_fit_pending = True
+        self.user_resized_current_page = False
+        self.programmatic_resize_generation = 0
+        self.programmatic_resize_active = False
+        self.programmatic_resize_target: tuple[int, int] | None = None
+        self.last_programmatic_resize_target: tuple[int, int] | None = None
+        self.programmatic_resize_after_id: str | None = None
+        self.last_auto_fit_signature: tuple[object, ...] | None = None
         install_tk_exception_logging(self.root)
         self.root.title("大雞雞專用")
         self.root.resizable(True, True)
@@ -171,7 +195,6 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
         self.console_title_label: ctk.CTkLabel | None = None
         self.console_clear_button: ctk.CTkButton | None = None
         self.console_toggle_button: ctk.CTkButton | None = None
-        self.console_restore_button: ctk.CTkButton | None = None
         self.console_frame: ctk.CTkFrame | None = None
         self.console_container: ctk.CTkFrame | None = None
         self.console_scrollbar: ctk.CTkScrollbar | None = None
@@ -191,7 +214,7 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
         self.console_pending_text: list[str] = []
         self.console_pending_char_count = 0
         self.active_page = "監控"
-        self.page_frames: dict[str, ctk.CTkFrame] = {}
+        self.page_frames: dict[str, AdaptiveScrollHost] = {}
         self.page_built: set[str] = {"監控"}
         self.page_placeholders: dict[str, ctk.CTkLabel] = {}
         self.page_build_after_id: str | None = None
@@ -359,7 +382,11 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
         controls_frame.columnconfigure(0, weight=1)
 
         for page_name in ("監控", "自動喝水", "小地圖巡航", "手把組合"):
-            page = ctk.CTkFrame(controls_frame, fg_color="transparent")
+            page = AdaptiveScrollHost(
+                controls_frame,
+                width=LEFT_PANEL_MAX_WIDTH,
+                height=WINDOW_MIN_HEIGHT,
+            )
             page.columnconfigure(0, weight=1)
             self.page_frames[page_name] = page
         monitor_page = self.page_frames["監控"]
@@ -386,7 +413,6 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
                 toggle_compact_mode=self.toggle_compact_experience_mode,
                 toggle_topmost=self.toggle_window_topmost,
                 refresh_bar_preview=self.refresh_bar_preview,
-                toggle_console=self.toggle_console_collapsed,
                 bind_checkbox_label=self._bind_checkbox_label,
                 monitor_is_active=lambda: not self.compact_experience_mode,
             ),
@@ -399,14 +425,13 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
         self.monitor_responsive_relayout = refs.monitor_responsive_relayout
         self.panel_mode_button = refs.panel_mode_button
         self.topmost_button = refs.topmost_button
-        self.console_restore_button = refs.console_restore_button
         self.full_panel_widgets = list(refs.full_panel_widgets)
 
         self.root.bind("<Configure>", self._on_root_configure, add="+")
         self.set_window_topmost(settings.window_topmost)
         self.set_minimap_cruise_group_collapsed(settings.minimap_cruise_group_collapsed)
         self.set_combo_group_collapsed(settings.combo_group_collapsed)
-        self.set_console_collapsed(settings.console_collapsed)
+        self.set_console_collapsed(False)
         self.set_compact_experience_mode(settings.compact_experience_mode, restore_saved_position=True)
         self.show_page("監控")
         self.monitor_controls_after_id = self.root.after(250, self._build_monitor_controls)
@@ -464,7 +489,12 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
     def show_page(self, page_name: str) -> None:
         if page_name not in {"監控", "自動喝水", "小地圖巡航", "手把組合", "Console"}:
             return
+        page_changed = page_name != self.active_page
         self.active_page = page_name
+        if page_changed:
+            self.user_resized_current_page = False
+            self.auto_fit_pending = True
+            self.last_auto_fit_signature = None
         try:
             self.page_navigation.set(page_name)
             for page in self.page_frames.values():
@@ -484,11 +514,16 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
                     )
                 self._ensure_console_built()
                 self.page_built.add("Console")
-                current_width = max(WINDOW_EXPANDED_MIN_WIDTH, int(self.root.winfo_width()))
-                current_height = int(self.root.winfo_height())
-                self.root.minsize(WINDOW_EXPANDED_MIN_WIDTH, CONSOLE_PAGE_MIN_HEIGHT)
-                if current_height < CONSOLE_PAGE_MIN_HEIGHT:
-                    self._set_window_size(current_width, CONSOLE_PAGE_MIN_HEIGHT)
+                current_size = self._current_window_logical_size()
+                if current_size is not None:
+                    current_width, current_height = current_size
+                    target_height = min(
+                        max(CONSOLE_PAGE_MIN_HEIGHT, current_height),
+                        self._maximum_logical_client_height() or max(CONSOLE_PAGE_MIN_HEIGHT, current_height),
+                    )
+                    self._set_window_min_size(WINDOW_EXPANDED_MIN_WIDTH, min(CONSOLE_PAGE_MIN_HEIGHT, target_height))
+                    if current_height != target_height:
+                        self._set_window_size(max(WINDOW_EXPANDED_MIN_WIDTH, current_width), target_height)
             else:
                 if self.console_section is not None:
                     self.console_section.grid_remove()
@@ -532,6 +567,7 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
         placeholder = self.page_placeholders.pop(page_name, None)
         if placeholder is not None:
             placeholder.destroy()
+        self.auto_fit_pending = True
         self.root.after_idle(self._sync_full_window_height_to_left_panel)
 
     def _ensure_page_built(self, page_name: str) -> None:
@@ -767,6 +803,13 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
         current_size = (int(event.width), int(event.height))
         size_changed = self.last_root_size is not None and current_size != self.last_root_size
         self.last_root_size = current_size
+        if getattr(self, "programmatic_resize_active", False):
+            self._schedule_window_interaction_finish()
+            return
+        logical_size = self._current_window_logical_size()
+        if logical_size is not None and logical_size == getattr(self, "last_programmatic_resize_target", None):
+            self._schedule_window_interaction_finish()
+            return
         now = time.monotonic()
         restored_from_minimized = bool(getattr(self, "root_was_minimized", False))
         self.root_was_minimized = False
@@ -777,6 +820,8 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
             return
         self.window_interaction_pause_until = now + WINDOW_INTERACTION_GRACE_SECONDS
         if size_changed and now >= self.suppress_resize_suspend_until:
+            self.user_resized_current_page = True
+            self.auto_fit_pending = False
             self._suspend_layout_for_resize()
         self._schedule_window_interaction_finish()
 
@@ -795,13 +840,19 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
             return False
 
     def toggle_console_collapsed(self) -> None:
-        self.set_console_collapsed(not self.console_collapsed)
+        self.show_page("Console")
 
     def toggle_combo_group_collapsed(self) -> None:
         self.set_combo_group_collapsed(not self.combo_group_collapsed)
 
     def toggle_minimap_cruise_group_collapsed(self) -> None:
         self.set_minimap_cruise_group_collapsed(not self.minimap_cruise_group_collapsed)
+
+    def _request_auto_fit(self, *, reset_user_ownership: bool = True) -> None:
+        self.auto_fit_pending = True
+        self.last_auto_fit_signature = None
+        if reset_user_ownership:
+            self.user_resized_current_page = False
 
     def set_minimap_cruise_group_collapsed(self, collapsed: bool) -> None:
         collapsed = bool(collapsed)
@@ -820,6 +871,7 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
                 )
         except tk.TclError:
             return
+        self._request_auto_fit()
         if getattr(self, "console_collapsed", False):
             self._sync_full_window_height_to_left_panel()
         else:
@@ -840,30 +892,18 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
                 self.combo_group_title_label.configure(text="組合設定（已收合）" if collapsed else "組合設定")
         except tk.TclError:
             return
+        self._request_auto_fit()
         if getattr(self, "console_collapsed", False):
             self._sync_full_window_height_to_left_panel()
         else:
             self._sync_console_height_to_left_panel()
 
     def set_console_collapsed(self, collapsed: bool) -> None:
-        if self.console_collapsed == collapsed:
-            self.settings.console_collapsed = collapsed
-            return
-        if collapsed:
-            self._unfreeze_console_resize()
-            self._remember_expanded_window_width()
-            self.console_collapsed = True
-            self.settings.console_collapsed = True
-            if not self.compact_experience_mode:
-                self._collapse_console_panel()
-                self._sync_full_window_height_to_left_panel(width=WINDOW_COLLAPSED_WIDTH)
-            return
         self.console_collapsed = False
         self.settings.console_collapsed = False
-        if not self.compact_experience_mode:
-            self._restore_console_panel()
-            self._set_window_width(max(WINDOW_EXPANDED_MIN_WIDTH, self.expanded_window_width))
-            self._sync_console_height_to_left_panel()
+        self._request_auto_fit()
+        if not self.compact_experience_mode and self.active_page != "Console":
+            self._sync_full_window_height_to_left_panel()
 
     def toggle_compact_experience_mode(self) -> None:
         self.set_compact_experience_mode(not self.compact_experience_mode)
@@ -934,19 +974,18 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
             return
 
     def _remember_expanded_window_width(self) -> None:
-        try:
-            current_width = int(self.root.winfo_width())
-        except tk.TclError:
+        current_size = self._current_window_logical_size()
+        if current_size is None:
             return
+        current_width, _current_height = current_size
         if current_width > WINDOW_COLLAPSED_MIN_WIDTH:
             self.expanded_window_width = max(WINDOW_EXPANDED_MIN_WIDTH, current_width)
 
     def _remember_default_window_size(self) -> None:
-        try:
-            width = int(self.root.winfo_width())
-            height = int(self.root.winfo_height())
-        except tk.TclError:
+        current_size = self._current_window_logical_size()
+        if current_size is None:
             return
+        width, height = current_size
         if width >= WINDOW_COLLAPSED_MIN_WIDTH and height >= COMPACT_WINDOW_MIN_HEIGHT:
             self.default_window_size = (
                 max(WINDOW_COLLAPSED_MIN_WIDTH, width),
@@ -1067,11 +1106,97 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
             return geometry
         return f"{geometry}{int(position[0]):+d}{int(position[1]):+d}"
 
-    def _set_window_width(self, width: int) -> None:
+    def _current_window_logical_size(self) -> tuple[int, int] | None:
         try:
-            height = max(WINDOW_MIN_HEIGHT, int(self.root.winfo_height()))
+            geometry = self.root.geometry()
+        except tk.TclError:
+            return None
+        if not isinstance(geometry, str):
+            return None
+        match = _ROOT_GEOMETRY_SIZE_PATTERN.match(geometry)
+        if match is None:
+            return None
+        width, height = int(match.group(1)), int(match.group(2))
+        if width <= 0 or height <= 0:
+            return None
+        return width, height
+
+    def _maximum_logical_client_height(self) -> int | None:
+        self.current_work_area_signature = None
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = int(self.root.winfo_id())
+            monitor_from_window = user32.MonitorFromWindow
+            monitor_from_window.restype = ctypes.c_void_p
+            monitor = monitor_from_window(hwnd, _MONITOR_DEFAULT_TO_NEAREST)
+            if not monitor:
+                return None
+            info = _MonitorInfo(cbSize=ctypes.sizeof(_MonitorInfo))
+            if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                return None
+            outer = wintypes.RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(outer)):
+                return None
+            client_height = int(self.root.winfo_height())
+            outer_height = int(outer.bottom - outer.top)
+            non_client_height = max(0, outer_height - client_height)
+            available_physical = (
+                int(info.rcWork.bottom)
+                - max(int(info.rcWork.top), int(outer.top))
+                - non_client_height
+                - _WORK_AREA_EDGE_MARGIN_PHYSICAL_PIXELS
+            )
+            logical = float(self.root._reverse_window_scaling(available_physical))
+        except (AttributeError, OSError, TypeError, ValueError, tk.TclError):
+            return None
+        if not math.isfinite(logical) or logical <= 0:
+            return None
+        maximum_height = max(1, round(logical))
+        self.current_work_area_signature = (
+            int(monitor),
+            int(info.rcWork.left),
+            int(info.rcWork.top),
+            int(info.rcWork.right),
+            int(info.rcWork.bottom),
+            maximum_height,
+        )
+        return maximum_height
+
+    def _begin_programmatic_resize(self, width: int, height: int) -> None:
+        self.programmatic_resize_generation += 1
+        self.programmatic_resize_active = True
+        self.programmatic_resize_target = (int(width), int(height))
+        if self.programmatic_resize_after_id is not None:
+            try:
+                self.root.after_cancel(self.programmatic_resize_after_id)
+            except tk.TclError:
+                pass
+        try:
+            self.programmatic_resize_after_id = self.root.after_idle(self._finish_programmatic_resize)
+        except tk.TclError:
+            self.programmatic_resize_after_id = None
+
+    def _finish_programmatic_resize(self) -> None:
+        self.programmatic_resize_after_id = None
+        self.last_programmatic_resize_target = self._current_window_logical_size()
+        self.programmatic_resize_target = None
+        self.programmatic_resize_active = False
+
+    def _set_window_min_size(self, width: int, height: int) -> None:
+        current_size = self._current_window_logical_size()
+        if current_size is not None:
+            self._begin_programmatic_resize(*current_size)
+        try:
+            self.root.minsize(int(width), int(height))
         except tk.TclError:
             return
+
+    def _set_window_width(self, width: int) -> None:
+        current_size = self._current_window_logical_size()
+        if current_size is None:
+            return
+        _current_width, current_height = current_size
+        height = current_height
         self._set_window_size(width, height)
 
     def _set_window_size(
@@ -1082,6 +1207,7 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
     ) -> None:
         try:
             self.suppress_resize_suspend_until = time.monotonic() + 0.25
+            self._begin_programmatic_resize(width, height)
             self.root.geometry(self._geometry_string(width, height, position))
         except tk.TclError:
             return
@@ -1089,7 +1215,7 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
     def _enter_compact_experience_mode(self) -> None:
         try:
             self._unfreeze_console_resize()
-            self.root.minsize(COMPACT_WINDOW_MIN_WIDTH, COMPACT_WINDOW_MIN_HEIGHT)
+            self._set_window_min_size(COMPACT_WINDOW_MIN_WIDTH, COMPACT_WINDOW_MIN_HEIGHT)
             if self.controls_frame is not None:
                 self.controls_frame.configure(width=COMPACT_PANEL_WIDTH)
                 self.controls_frame.grid_configure(padx=0)
@@ -1100,8 +1226,6 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
                 widget.grid_remove()
             if self.console_section is not None:
                 self.console_section.grid_remove()
-            if self.console_restore_button is not None:
-                self.console_restore_button.grid_remove()
             if self.monitor_frame is not None:
                 self.monitor_frame.grid_configure(row=0, column=0, sticky="nsew", pady=0)
                 self.monitor_frame.configure(height=MONITOR_PANEL_HEIGHT)
@@ -1134,37 +1258,11 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
                 self.detection_section.grid_propagate(True)
             for widget in self.full_panel_widgets:
                 widget.grid()
-            if self.console_collapsed:
-                self._collapse_console_panel()
-            else:
-                self._restore_console_panel()
+            self._set_window_min_size(WINDOW_EXPANDED_MIN_WIDTH, COMPACT_WINDOW_MIN_HEIGHT)
             if self.monitor_responsive_relayout is not None:
                 self.root.after_idle(self.monitor_responsive_relayout)
         except tk.TclError:
             return
-
-    def _collapse_console_panel(self) -> None:
-        try:
-            self.root.minsize(WINDOW_COLLAPSED_MIN_WIDTH, COMPACT_WINDOW_MIN_HEIGHT)
-            if self.content_frame is not None:
-                self.content_frame.columnconfigure(1, weight=0, minsize=0)
-            if self.console_section is not None:
-                self.console_section.grid_remove()
-            if self.console_restore_button is not None:
-                self.console_restore_button.grid()
-        except tk.TclError:
-            return
-
-    def _restore_console_panel(self) -> None:
-        try:
-            self.root.minsize(WINDOW_EXPANDED_MIN_WIDTH, WINDOW_MIN_HEIGHT)
-            if self.content_frame is not None:
-                self.content_frame.columnconfigure(1, weight=0, minsize=0)
-            if self.console_restore_button is not None:
-                self.console_restore_button.grid_remove()
-        except tk.TclError:
-            return
-        self._schedule_console_height_sync()
 
     def _suspend_layout_for_resize(self) -> None:
         if self.resize_layout_suspended or self.content_frame is None:
@@ -1207,6 +1305,13 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
             self.restore_repaint_after_id = self.root.after_idle(self._finish_restore_repaint)
         except tk.TclError:
             self.restore_repaint_after_id = None
+        programmatic_resize_after_id = getattr(self, "programmatic_resize_after_id", None)
+        if programmatic_resize_after_id is not None:
+            try:
+                self.root.after_cancel(programmatic_resize_after_id)
+            except tk.TclError:
+                pass
+            self.programmatic_resize_after_id = None
             self._finish_restore_repaint()
 
     def _finish_restore_repaint(self) -> None:
@@ -1233,6 +1338,8 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
         self._unfreeze_console_resize()
         self._schedule_console_height_sync()
         self._remember_current_mode_window_position()
+        if self.active_page != "Console" and not self.compact_experience_mode:
+            self.root.after_idle(self._sync_full_window_height_to_left_panel)
 
     def _unfreeze_console_resize(self) -> None:
         if self.console_collapsed or not self.console_resize_frozen or self.console_container is None:
@@ -1296,15 +1403,13 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
             return
 
     def _left_panel_content_height(self) -> int:
-        if self.controls_frame is None:
+        page = getattr(self, "page_frames", {}).get(getattr(self, "active_page", "監控"))
+        if page is None:
             return 0
         try:
-            _left, top, _width, height = self.controls_frame.grid_bbox()
-            if height > 0:
-                return int(top + height)
-        except tk.TclError:
-            pass
-        return int(self.controls_frame.winfo_reqheight())
+            return page.logical_content_height()
+        except (AttributeError, tk.TclError):
+            return 0
 
     def _full_window_target_height(self, left_height: int | None = None) -> int:
         if left_height is None:
@@ -1330,14 +1435,47 @@ class AutoPotionSettingsGui(GuiPresentationMixin):
             if left_height <= 0:
                 return
             min_width = WINDOW_COLLAPSED_MIN_WIDTH if self.console_collapsed else WINDOW_EXPANDED_MIN_WIDTH
-            target_height = self._full_window_target_height(left_height)
-            self.controls_frame.configure(height=left_height)
-            self.root.minsize(min_width, target_height)
-            current_width = int(self.root.winfo_width())
+            content_target_height = self._full_window_target_height(left_height)
+            maximum_height = self._maximum_logical_client_height()
+            current_size = self._current_window_logical_size()
+            if current_size is None:
+                return
+            current_width, current_height = current_size
+            user_owned = self.user_resized_current_page and not self.auto_fit_pending
+            if user_owned:
+                target_height = min(current_height, maximum_height) if maximum_height is not None else current_height
+            else:
+                target_height = (
+                    min(content_target_height, maximum_height)
+                    if maximum_height is not None
+                    else content_target_height
+                )
+            target_height = max(1, int(target_height))
             target_width = max(min_width, int(width) if width is not None else current_width)
-            current_height = int(self.root.winfo_height())
-            if current_width != target_width or current_height != target_height:
+            viewport_height = max(1, target_height - WINDOW_CONTENT_VERTICAL_PADDING)
+            overflow = content_target_height > target_height
+            active_page = self.page_frames.get(self.active_page)
+            if active_page is not None:
+                active_page.set_viewport_height(viewport_height)
+                active_page.set_overflow_enabled(overflow)
+            self.controls_frame.configure(height=viewport_height)
+            signature = (
+                self.active_page,
+                int(left_height),
+                target_width,
+                target_height,
+                getattr(self, "current_work_area_signature", None),
+                overflow,
+            )
+            if signature == self.last_auto_fit_signature and current_size == (target_width, target_height):
+                self.auto_fit_pending = False
+                return
+            minimum_height = min(COMPACT_WINDOW_MIN_HEIGHT, target_height)
+            self._set_window_min_size(min_width, minimum_height)
+            if current_size != (target_width, target_height):
                 self._set_window_size(target_width, target_height)
+            self.last_auto_fit_signature = signature
+            self.auto_fit_pending = False
         except tk.TclError:
             return
 

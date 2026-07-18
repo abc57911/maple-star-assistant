@@ -6,6 +6,7 @@ from maple_star.constants import MAX_CONSOLE_CHARS, MAX_CONSOLE_LINES
 from maple_star.gui import AutoPotionSettingsGui
 from maple_star.settings import AutoPotionSettings
 from maple_star.views.settings_gui import FlowLayout
+from maple_star.views.adaptive_scroll import AdaptiveScrollHost
 
 
 class ToggleNoticePositionTests(unittest.TestCase):
@@ -16,12 +17,121 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.root.winfo_screenheight.return_value = 1080
         gui.root.winfo_width.return_value = 1240
         gui.root.winfo_height.return_value = 760
+        gui.root.geometry.return_value = "1240x760+0+0"
+        gui.root.after_idle.return_value = "programmatic-resize"
         gui.console_flush_after_id = None
         gui.console_pending_text = []
         gui.root_was_minimized = False
         gui.restore_repaint_until = 0.0
         gui.restore_repaint_after_id = None
+        gui.active_page = "監控"
+        gui.compact_experience_mode = False
+        gui.page_frames = {}
+        gui.auto_fit_pending = True
+        gui.user_resized_current_page = False
+        gui.programmatic_resize_generation = 0
+        gui.programmatic_resize_active = False
+        gui.programmatic_resize_target = None
+        gui.last_programmatic_resize_target = None
+        gui.programmatic_resize_after_id = None
+        gui.last_auto_fit_signature = None
         return gui
+
+    def test_adaptive_scroll_height_converts_physical_canvas_bbox_to_logical(self):
+        host = AdaptiveScrollHost.__new__(AdaptiveScrollHost)
+        host._parent_canvas = Mock()
+        host._parent_canvas.bbox.return_value = (0, 0, 940, 628)
+        host._reverse_widget_scaling = Mock(return_value=502.4)
+
+        self.assertEqual(host.logical_content_height(), 502)
+        host._reverse_widget_scaling.assert_called_once_with(628)
+
+    def test_current_window_logical_size_parses_coordinates_and_fails_closed(self):
+        gui = self.make_gui()
+        for geometry in ("992x692", "992x692+10+20", "992x692-10-20"):
+            with self.subTest(geometry=geometry):
+                gui.root.geometry.return_value = geometry
+                self.assertEqual(gui._current_window_logical_size(), (992, 692))
+
+        gui.root.geometry.return_value = "invalid"
+        self.assertIsNone(gui._current_window_logical_size())
+
+    def test_window_width_change_preserves_logical_height(self):
+        gui = self.make_gui()
+        gui.root.geometry.return_value = "992x692+0+0"
+
+        gui._set_window_width(752)
+
+        gui.root.geometry.assert_called_with("752x692")
+
+    def test_height_sync_does_not_reapply_physical_125_percent_size(self):
+        gui = self.make_gui()
+        gui.console_collapsed = False
+        gui.controls_frame = Mock()
+        page = Mock()
+        page.logical_content_height.return_value = 628
+        gui.page_frames = {"監控": page}
+        gui.root.geometry.return_value = "992x692+0+0"
+        gui.root.winfo_width.return_value = 1240
+        gui.root.winfo_height.return_value = 865
+
+        with patch.object(gui, "_maximum_logical_client_height", return_value=None):
+            gui._sync_full_window_height_to_left_panel()
+
+        setter_calls = [call for call in gui.root.geometry.call_args_list if call.args]
+        self.assertEqual(setter_calls, [])
+
+    def test_user_owned_height_is_preserved_when_it_fits_work_area(self):
+        gui = self.make_gui()
+        gui.console_collapsed = False
+        gui.controls_frame = Mock()
+        gui.user_resized_current_page = True
+        gui.auto_fit_pending = False
+        page = Mock()
+        page.logical_content_height.return_value = 502
+        gui.page_frames = {"監控": page}
+        gui.root.geometry.return_value = "752x600+0+0"
+
+        with patch.object(gui, "_maximum_logical_client_height", return_value=640):
+            gui._sync_full_window_height_to_left_panel()
+
+        setter_calls = [call for call in gui.root.geometry.call_args_list if call.args]
+        self.assertEqual(setter_calls, [])
+
+    def test_user_owned_small_height_enables_overflow_without_auto_fit(self):
+        gui = self.make_gui()
+        gui.console_collapsed = False
+        gui.controls_frame = Mock()
+        gui.user_resized_current_page = True
+        gui.auto_fit_pending = False
+        page = Mock()
+        page.logical_content_height.return_value = 502
+        gui.page_frames = {"監控": page}
+        gui.root.geometry.return_value = "752x400+0+0"
+
+        with patch.object(gui, "_maximum_logical_client_height", return_value=640):
+            gui._sync_full_window_height_to_left_panel()
+
+        page.set_viewport_height.assert_called_once_with(336)
+        page.set_overflow_enabled.assert_called_once_with(True)
+        setter_calls = [call for call in gui.root.geometry.call_args_list if call.args]
+        self.assertEqual(setter_calls, [])
+
+    def test_user_owned_height_only_clamps_to_work_area(self):
+        gui = self.make_gui()
+        gui.console_collapsed = False
+        gui.controls_frame = Mock()
+        gui.user_resized_current_page = True
+        gui.auto_fit_pending = False
+        page = Mock()
+        page.logical_content_height.return_value = 502
+        gui.page_frames = {"監控": page}
+        gui.root.geometry.return_value = "752x700+0+0"
+
+        with patch.object(gui, "_maximum_logical_client_height", return_value=640):
+            gui._sync_full_window_height_to_left_panel()
+
+        gui.root.geometry.assert_called_with("752x640")
 
     def test_checkbox_label_click_toggles_variable_and_applies_settings(self):
         class FakeBooleanVar:
@@ -500,17 +610,19 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.console_collapsed = True
         gui.compact_experience_mode = False
         gui.controls_frame = Mock()
-        gui.controls_frame.grid_bbox.return_value = (0, 0, 720, 610)
-        gui.controls_frame.winfo_reqheight.return_value = 610
+        page = Mock()
+        page.logical_content_height.return_value = 610
+        gui.page_frames = {"監控": page}
         gui.root.winfo_width.return_value = 752
         gui.root.winfo_height.return_value = 800
+        gui.root.geometry.return_value = "752x800+0+0"
 
         gui.toggle_combo_group_collapsed()
 
-        gui.root.minsize.assert_called_with(752, 674)
+        gui.root.minsize.assert_called_with(752, 228)
         gui.root.geometry.assert_called_with("752x674")
 
-    def test_console_collapse_resizes_window_to_left_panel_height(self):
+    def test_legacy_console_collapsed_setting_is_normalized_for_console_page(self):
         gui = self.make_gui()
         gui.settings = Mock()
         gui.compact_experience_mode = False
@@ -519,22 +631,21 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.console_container = None
         gui.expanded_window_width = 1240
         gui.controls_frame = Mock()
-        gui.controls_frame.grid_bbox.return_value = (0, 0, 720, 654)
-        gui.controls_frame.winfo_reqheight.return_value = 654
+        page = Mock()
+        page.logical_content_height.return_value = 654
+        gui.page_frames = {"監控": page}
         gui.content_frame = Mock()
         gui.console_section = Mock()
-        gui.console_restore_button = Mock()
         gui.root.winfo_width.return_value = 1240
         gui.root.winfo_height.return_value = 835
+        gui.root.geometry.return_value = "1240x835+0+0"
 
         gui.set_console_collapsed(True)
 
-        self.assertTrue(gui.console_collapsed)
-        self.assertTrue(gui.settings.console_collapsed)
-        gui.console_section.grid_remove.assert_called_once()
-        gui.console_restore_button.grid.assert_called_once()
-        gui.root.minsize.assert_called_with(752, 718)
-        gui.root.geometry.assert_called_with("752x718")
+        self.assertFalse(gui.console_collapsed)
+        self.assertFalse(gui.settings.console_collapsed)
+        gui.root.minsize.assert_called_with(752, 228)
+        gui.root.geometry.assert_called_with("1240x718")
 
     def test_console_height_sync_shrinks_to_left_panel_requested_height(self):
         gui = self.make_gui()
@@ -543,9 +654,9 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.console_collapsed = False
         gui.console_height_after_id = "pending"
         gui.controls_frame = Mock()
-        gui.controls_frame.winfo_reqheight.return_value = 520
-        gui.controls_frame.winfo_height.return_value = 760
-        gui.controls_frame.grid_bbox.return_value = (0, 0, 720, 520)
+        page = Mock()
+        page.logical_content_height.return_value = 520
+        gui.page_frames = {"監控": page}
         gui.content_frame = None
         gui.console_section = Mock()
         gui.console_container = Mock()
@@ -556,7 +667,7 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.console_section.configure.assert_called_once_with(height=520)
         gui.console_container.configure.assert_called_once_with(width=416, height=466)
         gui.console_container.grid_configure.assert_called_once_with(sticky="nsew")
-        gui.root.minsize.assert_called_with(752, 584)
+        gui.root.minsize.assert_called_with(752, 228)
         gui.root.geometry.assert_called_with("1240x584")
 
     def test_console_height_sync_keeps_left_panel_height_when_left_panel_is_taller(self):
@@ -566,9 +677,9 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.console_collapsed = False
         gui.console_height_after_id = "pending"
         gui.controls_frame = Mock()
-        gui.controls_frame.winfo_reqheight.return_value = 240
-        gui.controls_frame.winfo_height.return_value = 760
-        gui.controls_frame.grid_bbox.return_value = (0, 0, 720, 820)
+        page = Mock()
+        page.logical_content_height.return_value = 820
+        gui.page_frames = {"監控": page}
         gui.content_frame = None
         gui.console_section = Mock()
         gui.console_container = Mock()
@@ -578,7 +689,7 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.controls_frame.configure.assert_called_once_with(height=820)
         gui.console_section.configure.assert_called_once_with(height=820)
         gui.console_container.configure.assert_called_once_with(width=416, height=766)
-        gui.root.minsize.assert_called_with(752, 884)
+        gui.root.minsize.assert_called_with(752, 228)
         gui.root.geometry.assert_called_with("1240x884")
 
     def test_append_console_trims_old_lines_and_disables_text(self):
@@ -616,6 +727,7 @@ class ToggleNoticePositionTests(unittest.TestCase):
         gui.console = Mock()
         gui.console.index.side_effect = ["1.0", "1.0"]
         gui.root.after.return_value = "console-flush"
+        gui.active_page = "Console"
 
         gui.append_console("sample")
         gui.append_console("\n")

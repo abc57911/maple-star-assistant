@@ -59,6 +59,13 @@ class GuiPageBuilderContractTests(unittest.TestCase):
             with self.subTest(refs=ref_type.__name__):
                 self.assertTrue(ref_type.__dataclass_params__.frozen)
 
+    def test_monitor_contract_has_no_legacy_console_button(self) -> None:
+        context_fields = {field.name for field in dataclasses.fields(contracts.MonitorPageContext)}
+        ref_fields = {field.name for field in dataclasses.fields(contracts.MonitorPageRefs)}
+
+        self.assertNotIn("toggle_console", context_fields)
+        self.assertNotIn("console_restore_button", ref_fields)
+
 
 class GuiPageBuilderLifecycleTests(unittest.TestCase):
     def test_finish_page_build_keeps_placeholder_when_builder_fails(self) -> None:

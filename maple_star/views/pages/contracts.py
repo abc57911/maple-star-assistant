@@ -94,7 +94,6 @@ class MonitorPageContext:
     toggle_compact_mode: Callback
     toggle_topmost: Callback
     refresh_bar_preview: Callback
-    toggle_console: Callback
     bind_checkbox_label: Callback
     monitor_is_active: Callback
 
@@ -108,7 +107,6 @@ class MonitorPageRefs:
     monitor_responsive_relayout: Callback
     panel_mode_button: Any
     topmost_button: Any
-    console_restore_button: Any
     full_panel_widgets: tuple[Any, ...]
 
 

@@ -16,6 +16,7 @@
 - [自動巡航安全性、業務判斷與效能強化實作計畫](superpowers/plans/2026-07-18-minimap-cruise-hardening-plan.md)：依前景狀態機、按鍵生命週期、設定交易與辨識快取分批實作。
 - [PySide6 GUI 重設計](superpowers/specs/2026-07-18-pyside6-gui-redesign-design.md)：Qt 原生事件迴圈、五頁重新設計、toolkit-neutral contract、分階段遷移與效能驗收規格。
 - [CustomTkinter DPI 與自適應視窗尺寸修正](superpowers/specs/2026-07-18-customtkinter-dpi-window-sizing-design.md)：統一 logical size、內容貼合、工作區 clamp 與 overflow scrolling，避免筆電頁面下方空白。
+- [CustomTkinter DPI 與自適應視窗實作計畫](superpowers/plans/2026-07-18-customtkinter-adaptive-window-implementation-plan.md)：分批實作 scroll host、DPI/work-area 換算、resize ownership 與精準驗證。
 - [Stage 3 OCR 與 GUI 拆分設計](superpowers/specs/2026-07-17-stage-3-ocr-gui-decomposition-design.md)：實際 public API manifest、OCR 責任拆分、GUI page builder 與逐批 rollback 規格。
 - [Stage 3 OCR 與 GUI 拆分實作計畫](superpowers/plans/2026-07-17-stage-3-ocr-gui-decomposition-plan.md)：依 facade、OCR leaf/service 與 GUI page builder 分成十批執行與驗證。
 - [Stage 4 AutoPotionController 拆分設計](superpowers/specs/2026-07-17-stage-4-auto-potion-controller-decomposition-design.md)：runtime composition、media、hotkey、HUD、potion 與 EXP capture 的責任、ownership、相容與分批 rollback 規格。
