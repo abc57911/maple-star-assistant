@@ -15,6 +15,11 @@
 - [自動巡航安全性、業務判斷與效能強化](superpowers/specs/2026-07-18-minimap-cruise-hardening-design.md)：巡航輸入安全、按鍵 ownership、邊界技能兩秒契約、回界判斷與辨識節流規格。
 - [自動巡航安全性、業務判斷與效能強化實作計畫](superpowers/plans/2026-07-18-minimap-cruise-hardening-plan.md)：依前景狀態機、按鍵生命週期、設定交易與辨識快取分批實作。
 - [PySide6 GUI 重設計](superpowers/specs/2026-07-18-pyside6-gui-redesign-design.md)：Qt 原生事件迴圈、五頁重新設計、toolkit-neutral contract、分階段遷移與效能驗收規格。
+- [全 App 最大效能架構重構](superpowers/specs/2026-07-18-full-app-performance-architecture-design.md)：PySide6-only GUI、backend supervisor、Input guardian、Realtime scheduler、領域 worker、typed IPC、preview transport 與效能／壓力驗收規格；取代舊 PySide6 規格的 legacy fallback 決策。
+- [全 App 最大效能計畫 1](superpowers/plans/2026-07-18-full-performance-plan-1-foundation.md)：baseline、公開 API、settings v2 mapping、IPC identity、preview transport 與 Windows/PyInstaller 可行性。
+- [全 App 最大效能計畫 2](superpowers/plans/2026-07-18-full-performance-plan-2-supervisor.md)：backend supervisor、health、設定 transaction、parent-death、Worker Job 與 legacy adapter。
+- [全 App 最大效能計畫 3](superpowers/plans/2026-07-18-full-performance-plan-3-runtime-workers.md)：Input guardian、Realtime scheduler、potion intent、EXP OCR、notification/media 與混合負載 cutover。
+- [全 App 最大效能計畫 4](superpowers/plans/2026-07-18-full-performance-plan-4-qt-cutover.md)：PySide6 五頁、settings migration、唯一入口、移除 CustomTkinter、效能／soak、packaging 與筆電 smoke。
 - [CustomTkinter DPI 與自適應視窗尺寸修正](superpowers/specs/2026-07-18-customtkinter-dpi-window-sizing-design.md)：統一 logical size、內容貼合、工作區 clamp 與 overflow scrolling，避免筆電頁面下方空白。
 - [CustomTkinter DPI 與自適應視窗實作計畫](superpowers/plans/2026-07-18-customtkinter-adaptive-window-implementation-plan.md)：分批實作 scroll host、DPI/work-area 換算、resize ownership 與精準驗證。
 - [Stage 3 OCR 與 GUI 拆分設計](superpowers/specs/2026-07-17-stage-3-ocr-gui-decomposition-design.md)：實際 public API manifest、OCR 責任拆分、GUI page builder 與逐批 rollback 規格。
